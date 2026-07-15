@@ -1,11 +1,15 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import Navigation from './components/Navigation'
+import { SportsNewsTicker } from './components/SportsNewsTicker'
 import ScanPage from './pages/ScanPage'
 import DesignSystem from './pages/DesignSystem'
+import AdminConsole from './pages/admin/AdminConsole'
 import { testSupabaseConnection } from './lib/testSupabase'
 import { ToastProvider } from './components/ToastProvider'
 import { useEnterTransition } from './hooks/useEnterTransition'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { AdminGuard } from './components/AdminGuard'
 
 function RouteFade({ children }: { children: React.ReactNode }) {
   const location = useLocation()
@@ -24,19 +28,33 @@ function RouteFade({ children }: { children: React.ReactNode }) {
 
 function App() {
   useEffect(() => {
-    testSupabaseConnection()
+    if (import.meta.env.VITE_DEBUG_SUPABASE === 'true') {
+      testSupabaseConnection()
+    }
   }, [])
 
   return (
     <BrowserRouter>
       <ToastProvider>
-        <Navigation />
-        <RouteFade>
-          <Routes>
-            <Route path="/" element={<ScanPage />} />
-            <Route path="/design-system" element={<DesignSystem />} />
-          </Routes>
-        </RouteFade>
+        <ErrorBoundary>
+          <Navigation />
+          <SportsNewsTicker />
+          <RouteFade>
+            <Routes>
+              <Route path="/" element={<ScanPage />} />
+              <Route
+                path="/admin/design-system"
+                element={
+                  <AdminGuard>
+                    <AdminConsole>
+                      <DesignSystem />
+                    </AdminConsole>
+                  </AdminGuard>
+                }
+              />
+            </Routes>
+          </RouteFade>
+        </ErrorBoundary>
       </ToastProvider>
     </BrowserRouter>
   )

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { limitedFetch } from './rate-limiter';
 
 // Agent 2: ESPN Stats API - Last 5 Games
 // NOTE: this endpoint returned 404 when verified on 2026-07-14 (path looks malformed:
@@ -18,7 +19,7 @@ export async function collectLast5Stats(playerId: string, sport: string): Promis
     const url = apiMap[sport];
     if (!url) return null;
 
-    const response = await fetch(url);
+    const response = await limitedFetch(url, 'espn-last5', { timeoutMs: 15_000, retries: 1 });
     const data: any = await response.json();
 
     // Parse last 5 games from response

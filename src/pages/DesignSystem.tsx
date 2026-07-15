@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { COLORS, SPACING, SHADOWS } from '../lib/theme';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
-import { useToast } from '../components/ToastProvider';
+import { useToast } from '../hooks/useToast';
 import { useEnterTransition } from '../hooks/useEnterTransition';
 
 const FOCUS_RING =

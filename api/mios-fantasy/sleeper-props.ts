@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { limitedFetch } from './rate-limiter';
 
 // Agent 4: Sleeper API (NBA/WNBA only)
 // NOTE: verified 2026-07-14. The real endpoint is /v1/players/{sport} (sport as a string
@@ -8,16 +9,25 @@ export async function collectSleeperProps(sport: string, _contestDate: string): 
   if (!['nba', 'wnba'].includes(sport)) return [];
 
   try {
-    const response = await fetch(`https://api.sleeper.app/v1/players/${sport}`);
+    const response = await limitedFetch(`https://api.sleeper.app/v1/players/${sport}`, 'sleeper', {
+      timeoutMs: 10_000,
+      retries: 1
+    });
     const data = (await response.json()) as Record<string, any>;
 
     return Object.values(data)
-      .slice(0, 100)
+      .filter((player: any) => player.active !== false && player.status !== 'RET')
+      .slice(0, 350)
       .map((player: any) => ({
         player_id: player.player_id,
         name: player.full_name,
-        position: player.position,
-        team: player.team
+        position: player.position ?? player.fantasy_positions?.[0],
+        team: player.team,
+        injury_status: player.injury_status,
+        injury_notes: player.injury_notes,
+        injury_body_part: player.injury_body_part,
+        status: player.status,
+        fantasy_positions: player.fantasy_positions
       }));
   } catch (error) {
     console.error('Sleeper error:', error);

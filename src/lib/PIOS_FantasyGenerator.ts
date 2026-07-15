@@ -1,13 +1,20 @@
+import { normalizePlayerName } from './validation';
+
 export interface LineupPlayerDraft {
   name: string;
   team: string;
   position: string;
   salary: number;
+  salary_source?: string;
   player_id: string;
   confidence_score: number;
   last_5_avg_pts: number;
   injury_status: string;
   projected_points?: number;
+  ownership_projection?: number;
+  minutes_projection?: number;
+  usage_rate?: number;
+  pace_metric?: number;
 }
 
 export interface DraftLineup {
@@ -15,6 +22,14 @@ export interface DraftLineup {
   projected_points: number;
   salary_used: number;
   confidence_score: number;
+  simulation_ev?: number;
+  ceiling_score?: number;
+  floor_score?: number;
+  win_rate?: number;
+  top_10_rate?: number;
+  leverage_score?: number;
+  ownership_sum?: number;
+  lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   constraint_violations: string[];
 }
 
@@ -41,14 +56,12 @@ const ROSTER_SLOTS: Record<string, RosterSlot[]> = {
     { slot: 'UTIL', eligible: ['PG', 'SG', 'SF', 'PF', 'C'] }
   ],
   wnba: [
-    { slot: 'PG', eligible: ['PG'] },
-    { slot: 'SG', eligible: ['SG'] },
-    { slot: 'SF', eligible: ['SF'] },
-    { slot: 'PF', eligible: ['PF'] },
-    { slot: 'C', eligible: ['C'] },
-    { slot: 'G', eligible: ['PG', 'SG'] },
-    { slot: 'F', eligible: ['SF', 'PF'] },
-    { slot: 'UTIL', eligible: ['PG', 'SG', 'SF', 'PF', 'C'] }
+    { slot: 'G1', eligible: ['PG', 'SG'] },
+    { slot: 'G2', eligible: ['PG', 'SG'] },
+    { slot: 'F1', eligible: ['SF', 'PF'] },
+    { slot: 'F2', eligible: ['SF', 'PF'] },
+    { slot: 'UTIL1', eligible: ['PG', 'SG', 'SF', 'PF', 'C'] },
+    { slot: 'UTIL2', eligible: ['PG', 'SG', 'SF', 'PF', 'C'] }
   ],
   nfl: [
     { slot: 'QB', eligible: ['QB'] },
@@ -90,11 +103,11 @@ export function generateLineups(
   excludedPlayers: string[],
   riskTolerance: string
 ): DraftLineup[] {
-  const excludedLower = excludedPlayers.map((p) => p.toLowerCase());
+  const excludedLower = excludedPlayers.map(normalizePlayerName);
 
   // Filter roster: remove injured, remove excluded
   const eligiblePlayers = roster.filter(
-    (p) => p.injury_status !== 'out' && !excludedLower.includes(p.name?.toLowerCase())
+    (p) => p.injury_status !== 'out' && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
   );
 
   // Sort by recent production (used as a proxy for confidence when picking within a slot)
@@ -110,6 +123,7 @@ export function generateLineups(
 
   // Score and rank by confidence
   const rankedLineups = candidates
+    .filter(validateLineup)
     .map((lineup) => ({
       ...lineup,
       confidence_score: calculateLineupConfidence(lineup)
@@ -129,38 +143,53 @@ export function generateLineups(
 
 function generateShowdownLineups(players: LineupPlayerDraft[], _sport: string): DraftLineup[] {
   const lineups: DraftLineup[] = [];
+  const signatures = new Set<string>();
   const salaryCapShowdown = 50000;
-
-  // Try different captain selections
-  const topCaptains = players.slice(0, 5);
+  const topCaptains = [...players].sort((a, b) => playerValueScore(b) - playerValueScore(a)).slice(0, 12);
 
   for (const captain of topCaptains) {
     const captainWithMultiplier: LineupPlayerDraft = {
       ...captain,
       salary: Math.floor(captain.salary * 1.5),
-      projected_points: (captain.last_5_avg_pts || 0) * 1.5
+      projected_points: (captain.last_5_avg_pts || captain.projected_points || 0) * 1.5
     };
 
     const remainingSalary = salaryCapShowdown - captainWithMultiplier.salary;
-    const fieldPlayers = players
+    const fieldCandidates = players
       .filter((p) => p.player_id !== captain.player_id)
       .filter((p) => p.salary <= remainingSalary)
-      .sort((a, b) => (b.last_5_avg_pts || 0) - (a.last_5_avg_pts || 0))
-      .slice(0, 5);
+      .sort((a, b) => playerValueScore(b) - playerValueScore(a))
+      .slice(0, 30);
 
-    if (fieldPlayers.length === 5) {
-      const lineup: DraftLineup = {
-        players: [captainWithMultiplier, ...fieldPlayers],
-        projected_points: calculateProjectedPoints([captainWithMultiplier, ...fieldPlayers]),
-        salary_used:
-          captainWithMultiplier.salary + fieldPlayers.reduce((sum, p) => sum + p.salary, 0),
-        confidence_score: 0, // Will be calculated later
-        constraint_violations: []
-      };
-
-      if (lineup.salary_used <= salaryCapShowdown) {
-        lineups.push(lineup);
+    function search(startIndex: number, selected: LineupPlayerDraft[], salaryUsed: number) {
+      if (lineups.length >= 50) return;
+      if (selected.length === 5) {
+        const lineupPlayers = [captainWithMultiplier, ...selected];
+        const signature = lineupPlayers.map((player) => player.player_id).sort().join('|');
+        if (signatures.has(signature)) return;
+        signatures.add(signature);
+        lineups.push({
+          players: lineupPlayers,
+          projected_points: calculateProjectedPoints(lineupPlayers),
+          salary_used: salaryUsed,
+          confidence_score: 0,
+          constraint_violations: []
+        });
+        return;
       }
+
+      for (let index = startIndex; index < fieldCandidates.length; index += 1) {
+        const candidate = fieldCandidates[index];
+        if (salaryUsed + candidate.salary > salaryCapShowdown) continue;
+        selected.push(candidate);
+        search(index + 1, selected, salaryUsed + candidate.salary);
+        selected.pop();
+        if (lineups.length >= 50) return;
+      }
+    }
+
+    if (captainWithMultiplier.salary <= salaryCapShowdown) {
+      search(0, [], captainWithMultiplier.salary);
     }
   }
 
@@ -171,57 +200,87 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
   const slots = ROSTER_SLOTS[sport];
   if (!slots) return [];
 
-  const salaryCap = 50000;
   const lineups: DraftLineup[] = [];
-  const excludeIds = new Set<string>();
+  const signatures = new Set<string>();
+  let iterations = 0;
+  const maxIterations = 200_000;
+  const candidateLists = slots.map((slotDef) => players
+    .filter((player) => playerEligibleForSlot(player, slotDef))
+    .sort((a, b) => playerValueScore(b) - playerValueScore(a))
+    .slice(0, 30));
 
-  // Build up to 3 distinct lineups (no player reused across variants)
-  for (let i = 0; i < 3; i++) {
-    const lineup = buildClassicLineup(players, slots, salaryCap, excludeIds);
-    if (!lineup) break;
-    lineups.push(lineup);
-    lineup.players.forEach((p) => excludeIds.add(p.player_id));
+  function search(slotIndex: number, selected: LineupPlayerDraft[], usedIds: Set<string>, salaryUsed: number) {
+    iterations += 1;
+    if (iterations > maxIterations || lineups.length >= 50) return;
+
+    if (slotIndex === slots.length) {
+      const signature = selected.map((player) => player.player_id).sort().join('|');
+      if (signatures.has(signature)) return;
+      signatures.add(signature);
+      lineups.push({
+        players: [...selected],
+        projected_points: calculateProjectedPoints(selected),
+        salary_used: salaryUsed,
+        confidence_score: 0,
+        constraint_violations: []
+      });
+      return;
+    }
+
+    for (const candidate of candidateLists[slotIndex]) {
+      if (usedIds.has(candidate.player_id)) continue;
+      if (salaryUsed + candidate.salary > 50000) continue;
+
+      selected.push(candidate);
+      usedIds.add(candidate.player_id);
+      search(slotIndex + 1, selected, usedIds, salaryUsed + candidate.salary);
+      usedIds.delete(candidate.player_id);
+      selected.pop();
+
+      if (iterations > maxIterations || lineups.length >= 50) return;
+    }
   }
 
+  search(0, [], new Set<string>(), 0);
   return lineups;
 }
 
-function buildClassicLineup(
-  players: LineupPlayerDraft[],
-  slots: RosterSlot[],
-  salaryCap: number,
-  excludeIds: Set<string>
-): DraftLineup | null {
-  const selected: LineupPlayerDraft[] = [];
-  const usedIds = new Set<string>();
-  let totalSalary = 0;
+function playerValueScore(player: LineupPlayerDraft): number {
+  const projected = player.projected_points || player.last_5_avg_pts || 0;
+  const salary = Math.max(player.salary, 1);
+  return projected * 0.7 + (projected / salary) * 10000 * 0.3;
+}
 
-  for (const slotDef of slots) {
-    const candidate = players
-      .filter((p) => !excludeIds.has(p.player_id) && !usedIds.has(p.player_id))
-      .filter((p) => slotDef.eligible.includes(p.position))
-      .filter((p) => totalSalary + p.salary <= salaryCap)
-      .sort((a, b) => (b.last_5_avg_pts || 0) - (a.last_5_avg_pts || 0))[0];
-
-    if (!candidate) return null; // Can't fill this slot within cap
-
-    selected.push(candidate);
-    usedIds.add(candidate.player_id);
-    totalSalary += candidate.salary;
-  }
-
-  return {
-    players: selected,
-    projected_points: calculateProjectedPoints(selected),
-    salary_used: totalSalary,
-    confidence_score: 0, // Calculated later
-    constraint_violations: []
-  };
+function playerEligibleForSlot(player: LineupPlayerDraft, slotDef: RosterSlot): boolean {
+  return String(player.position ?? '')
+    .split('/')
+    .map((position) => position.trim())
+    .some((position) => slotDef.eligible.includes(position));
 }
 
 function calculateProjectedPoints(players: LineupPlayerDraft[]): number {
   // Sum of player average fantasy points
-  return players.reduce((sum, p) => sum + (p.last_5_avg_pts || p.projected_points || 0), 0);
+  return players.reduce((sum, p) => sum + (p.projected_points || p.last_5_avg_pts || 0), 0);
+}
+
+function validateLineup(lineup: DraftLineup): boolean {
+  const violations: string[] = [];
+  if (lineup.salary_used > 50000) violations.push('salary cap exceeded');
+  if (lineup.players.length === 0) violations.push('no players selected');
+  if (new Set(lineup.players.map((player) => player.player_id)).size !== lineup.players.length) {
+    violations.push('duplicate player selected');
+  }
+  if (lineup.projected_points <= 0) violations.push('projected points must be positive');
+  if (lineup.players.some((player) => !player.position || !player.name || player.salary <= 0)) {
+    violations.push('player missing required fields');
+  }
+
+  lineup.constraint_violations = violations;
+  if (violations.length) {
+    console.warn('Lineup validation failed:', violations, lineup);
+    return false;
+  }
+  return true;
 }
 
 function calculateLineupConfidence(lineup: DraftLineup): number {

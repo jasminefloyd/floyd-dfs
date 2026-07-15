@@ -1,6 +1,5 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
-
-type ToastVariant = 'success' | 'error' | 'info';
+import { useCallback, useState, type ReactNode } from 'react';
+import { ToastContext, type ToastVariant } from './toastContext';
 
 interface Toast {
   id: number;
@@ -8,15 +7,10 @@ interface Toast {
   variant: ToastVariant;
 }
 
-interface ToastContextValue {
-  showToast: (message: string, variant: ToastVariant) => void;
-}
-
-const ToastContext = createContext<ToastContextValue | null>(null);
-
 const VARIANT_STYLES: Record<ToastVariant, string> = {
   success: 'bg-success text-white',
   error: 'bg-error text-white',
+  warning: 'bg-warning text-white',
   info: 'bg-primary text-white'
 };
 
@@ -33,6 +27,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }, 3000);
   }, []);
 
+  const removeToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
@@ -40,7 +38,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((toast) => (
           <div
             key={toast.id}
+            onClick={() => removeToast(toast.id)}
             className={`px-4 py-3 rounded-md text-sm shadow-[var(--shadow-medium)] transition-opacity duration-[var(--transition-default)] ${VARIANT_STYLES[toast.variant]}`}
+            role="status"
           >
             {toast.message}
           </div>
@@ -48,10 +48,4 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       </div>
     </ToastContext.Provider>
   );
-}
-
-export function useToast(): ToastContextValue {
-  const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error('useToast must be used within a ToastProvider');
-  return ctx;
 }

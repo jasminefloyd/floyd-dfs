@@ -1,10 +1,16 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { MIOS_FantasyScanner, type ScanParams } from '../components/MIOS_FantasyScanner';
 import { LineupDisplay, type Lineup } from '../components/LineupDisplay';
+import { LineupComparison } from '../components/LineupComparison';
+import { PivotSuggestions } from '../components/PivotSuggestions';
+import { HistoryDashboard, type HistoryItem } from '../components/HistoryDashboard';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
-import { useToast } from '../components/ToastProvider';
-import type { MIOS_FantasyManifest, Player } from '../lib/MIOS_FantasyAgents';
-import { generateLineups, type DraftLineup, type LineupPlayerDraft } from '../lib/PIOS_FantasyGenerator';
+import { useToast } from '../hooks/useToast';
+import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
+import type { DraftLineup } from '../lib/PIOS_FantasyGenerator';
+import { useInjuryAlerts } from '../hooks/useInjuryAlerts';
+import { invokeMiosFantasyScan } from '../lib/miosFunctionClient';
+import { invokePiosLineupGeneration } from '../lib/piosFunctionClient';
 
 type ScanPhase = 'idle' | 'fetching' | 'generating';
 
@@ -13,39 +19,88 @@ export default function ScanPage() {
   const [manifest, setManifest] = useState<MIOS_FantasyManifest | null>(null);
   const [lineups, setLineups] = useState<Lineup[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const { showToast } = useToast();
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('fantasy-ai-scan-history');
+      if (stored) setHistory(JSON.parse(stored));
+    } catch (err) {
+      console.warn('Failed to load scan history:', err);
+      window.localStorage.removeItem('fantasy-ai-scan-history');
+    }
+  }, []);
+
+  const recordHistory = useCallback((item: HistoryItem) => {
+    setHistory((prev) => {
+      const next = [item, ...prev].slice(0, 10);
+      try {
+        window.localStorage.setItem('fantasy-ai-scan-history', JSON.stringify(next));
+      } catch (err) {
+        console.warn('Failed to save scan history:', err);
+      }
+      return next;
+    });
+  }, []);
+
+  useInjuryAlerts(manifest?.player_roster ?? [], lineups.length > 0, (alert) => {
+    showToast(alert.message, 'info');
+  });
 
   const handleScan = async (params: ScanParams) => {
     setPhase('fetching');
     setError(null);
+    setManifest(null);
+    setLineups([]);
 
     try {
-      // Call MIOS_Fantasy orchestrator (server-side, avoids CORS on ESPN/Sleeper/Ergast)
-      const query = new URLSearchParams({
-        sport: params.sport,
-        contestType: params.contestType,
-        contestDate: params.contestDate,
-        userId: 'temp-user-id' // TODO: Replace with actual user ID from auth
-      });
-      const response = await fetch(`/api/mios-fantasy/scan?${query.toString()}`);
-      if (!response.ok) {
-        throw new Error(`Scan failed: ${response.status}`);
+      const miosController = new AbortController();
+      const miosTimeout = window.setTimeout(() => miosController.abort(), 90_000);
+      let data: MIOS_FantasyManifest;
+      try {
+        data = await invokeMiosFantasyScan(params, miosController.signal);
+      } finally {
+        window.clearTimeout(miosTimeout);
       }
-      const data: MIOS_FantasyManifest = await response.json();
 
       setManifest(data);
       setPhase('generating');
 
-      // Generate real PIOS_Fantasy lineups
-      const draftPlayers = mapToDraftPlayers(data.player_roster);
-      const draftLineups = generateLineups(
-        draftPlayers,
-        params.sport,
-        params.contestType,
-        params.excludedPlayers,
-        params.riskTolerance
-      );
-      setLineups(toDisplayLineups(draftLineups));
+      const piosController = new AbortController();
+      const piosTimeout = window.setTimeout(() => piosController.abort(), 30_000);
+      let piosResult;
+      try {
+        piosResult = await invokePiosLineupGeneration(
+          {
+            manifest: data,
+            sport: params.sport,
+            contestType: params.contestType,
+            excludedPlayers: params.excludedPlayers,
+            riskTolerance: params.riskTolerance
+          },
+          piosController.signal
+        );
+      } finally {
+        window.clearTimeout(piosTimeout);
+      }
+      const displayLineups = toDisplayLineups(piosResult.lineups);
+      setLineups(displayLineups);
+      recordHistory({
+        id: data.manifest_id,
+        sport: data.sport,
+        contestDate: data.contest_date,
+        topProjection: displayLineups[0]?.projected_points ?? 0,
+        lineupCount: displayLineups.length,
+        createdAt: data.collected_at
+      });
+      const warnings = [
+        ...(data.data_warnings ?? []),
+        ...(piosResult.data_warnings ?? [])
+      ];
+      if (warnings.length) {
+        showToast('Scan completed with data warnings', 'warning');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -60,7 +115,11 @@ export default function ScanPage() {
     <div className="flex flex-col sm:flex-row min-h-screen bg-gray-50">
       {/* Left sidebar: Scan settings */}
       <div className="w-full sm:w-1/4 lg:w-1/3 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 p-6 overflow-y-auto">
-        <MIOS_FantasyScanner onScan={handleScan} loading={phase !== 'idle'} />
+        <MIOS_FantasyScanner
+          onScan={handleScan}
+          loading={phase !== 'idle'}
+          onValidationError={(errors) => errors.forEach((validationError) => showToast(validationError, 'error'))}
+        />
       </div>
 
       {/* Right: Results display */}
@@ -77,36 +136,35 @@ export default function ScanPage() {
           <LineupSkeleton />
         ) : lineups.length > 0 ? (
           <div>
-            <h2 className="text-3xl font-bold mb-6">Recommended Lineups</h2>
+            <div className="mb-6">
+              <h2 className="text-3xl font-bold">Recommended Lineups</h2>
+              {manifest?.slate ? (
+                <p className="mt-2 text-sm text-gray-600">
+                  {manifest.slate.slate_name} · {manifest.contest_date}
+                  {manifest.game_id ? ` · Game ${manifest.game_id}` : ''}
+                </p>
+              ) : null}
+            </div>
+            <HistoryDashboard items={history} />
+            {manifest?.data_warnings?.length ? (
+              <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+                {manifest.data_warnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
+            ) : null}
+            <LineupComparison lineups={lineups} />
+            <PivotSuggestions lineups={lineups} manifest={manifest} />
             <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
           </div>
         ) : (
           <div className="text-center text-gray-500 py-12">
-            <p>Select sport, contest type, and date, then click Scan to get started.</p>
+            <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and imported DraftKings slate to run MIOS and PIOS.'}</p>
           </div>
         )}
       </div>
     </div>
   );
-}
-
-// TEMPORARY mapping layer: no agent in the MIOS_Fantasy pipeline collects DraftKings
-// salary or live per-player injury_status yet, so those are mocked here until a real
-// salary/injury agent exists. Everything else is real data from the manifest.
-function mapToDraftPlayers(players: Player[]): LineupPlayerDraft[] {
-  return players.map((p, idx) => {
-    const avgPts = p.last_5_stats?.avg_fantasy_pts ?? 0;
-    return {
-      name: p.name,
-      team: p.team ?? '',
-      position: p.position ?? '',
-      salary: 3000 + Math.round(avgPts * 200) + (idx % 5) * 100, // MOCK
-      player_id: p.id,
-      confidence_score: p.last_5_stats?.confidence ?? 0.5,
-      last_5_avg_pts: avgPts,
-      injury_status: p.injury_status ?? 'active' // MOCK default
-    };
-  });
 }
 
 function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
@@ -118,12 +176,26 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       position: p.position,
       team: p.team,
       salary: p.salary,
-      last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts }
+      salary_source: p.salary_source,
+      last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts, trend: 'stable' }
     })),
     projected_points: lu.projected_points,
     salary_used: lu.salary_used,
     confidence_score: lu.confidence_score,
-    // TEMP placeholder narrative; no narration agent has been built yet.
-    narrative: `Confidence ${(lu.confidence_score * 100).toFixed(0)}% — $${lu.salary_used.toLocaleString()} salary used.`
+    simulation_ev: lu.simulation_ev,
+    ceiling_score: lu.ceiling_score,
+    floor_score: lu.floor_score,
+    win_rate: lu.win_rate,
+    top_10_rate: lu.top_10_rate,
+    leverage_score: lu.leverage_score,
+    ownership_sum: lu.ownership_sum,
+    lineup_type: lu.lineup_type,
+    narrative: lineupNarrative(lu, idx)
   }));
+}
+
+function lineupNarrative(lineup: DraftLineup, idx: number): string {
+  const ev = lineup.simulation_ev !== undefined ? `${lineup.simulation_ev.toFixed(1)} simulated EV` : `${lineup.projected_points.toFixed(1)} projected points`;
+  const leverage = lineup.leverage_score !== undefined ? `, ${lineup.leverage_score.toFixed(1)} leverage` : '';
+  return `Lineup #${idx + 1} ranked by ${ev}${leverage}, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.`;
 }

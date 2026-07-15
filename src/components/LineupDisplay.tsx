@@ -1,5 +1,6 @@
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
 import { generateCorrelationPairs, type CorrelationPair } from '../lib/correlationAgent';
+import { ExportLineup } from './ExportLineup';
 
 export interface LineupPlayer {
   id?: string;
@@ -9,8 +10,10 @@ export interface LineupPlayer {
   team?: string;
   nfl_team?: string;
   salary?: number;
+  salary_source?: string;
   last_5_stats?: {
     avg_fantasy_pts?: number;
+    trend?: 'up' | 'down' | 'stable';
   };
 }
 
@@ -20,6 +23,14 @@ export interface Lineup {
   projected_points: number;
   salary_used: number;
   confidence_score: number;
+  simulation_ev?: number;
+  ceiling_score?: number;
+  floor_score?: number;
+  win_rate?: number;
+  top_10_rate?: number;
+  leverage_score?: number;
+  ownership_sum?: number;
+  lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   narrative: string;
 }
 
@@ -76,6 +87,11 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 <p className="text-[13px] text-gray-600">
                   Confidence: {(lineup.confidence_score * 100).toFixed(0)}%
                 </p>
+                {lineup.lineup_type ? (
+                  <p className="mt-1 text-[12px] font-semibold uppercase tracking-wide text-primary">
+                    {lineupTypeLabel(lineup.lineup_type)}
+                  </p>
+                ) : null}
               </div>
               <div className="text-right">
                 <div className="text-2xl font-bold text-primary">
@@ -86,6 +102,15 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </div>
               </div>
             </div>
+
+            {(lineup.simulation_ev || lineup.ceiling_score || lineup.leverage_score) ? (
+              <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
+                <Metric label="Sim EV" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
+                <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
+                <Metric label="Top 10" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
+                <Metric label="Leverage" value={lineup.leverage_score?.toFixed(1) ?? '—'} />
+              </div>
+            ) : null}
 
             {/* Narrative */}
             <p className="text-[13px] text-gray-700 mb-4 italic">{lineup.narrative}</p>
@@ -103,6 +128,8 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
             <div className="space-y-2">
               {lineup.players.map((player, idx) => {
                 const isHighlighted = !!player.id && highlightedIds.has(player.id);
+                const trend = player.last_5_stats?.trend ?? 'stable';
+                const trendSymbol = trend === 'up' ? '↗' : trend === 'down' ? '↘' : '→';
                 return (
                   <div
                     key={idx}
@@ -113,13 +140,14 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     <div>
                       <p className="text-base font-medium">{player.name || player.full_name}</p>
                       <p className="text-[13px] text-gray-600">
-                        {player.position} • {player.team || player.nfl_team}
+                        {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}
                       </p>
                     </div>
                     <div className="text-right">
                       <p className="font-bold">${player.salary ?? '—'}</p>
                       <p className="text-[13px] text-gray-600">
                         {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
+                        {player.salary_source === 'estimated' ? ' • est. salary' : ''}
                       </p>
                     </div>
                   </div>
@@ -135,13 +163,28 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
               >
                 Save Lineup
               </button>
-              <button className="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-900 py-2 rounded font-semibold transition-colors duration-[var(--transition-fast)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-500">
-                Copy to Clipboard
-              </button>
+              <div className="flex-[2]">
+                <ExportLineup lineup={lineup} />
+              </div>
             </div>
           </div>
         );
       })}
     </div>
   );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+      <p className="text-[11px] font-medium uppercase text-gray-500">{label}</p>
+      <p className="text-sm font-bold text-gray-900">{value}</p>
+    </div>
+  );
+}
+
+function lineupTypeLabel(type: NonNullable<Lineup['lineup_type']>): string {
+  if (type === 'contrarian_tournament') return 'Contrarian Tournament';
+  if (type === 'late_swap_candidate') return 'Late Swap Candidate';
+  return 'High EV';
 }

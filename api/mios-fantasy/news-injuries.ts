@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { limitedFetch } from './rate-limiter';
 
 // Agent 1: ESPN RSS News & Injuries
 export async function collectNewsAndInjuries(sport: string, _contestDate: string): Promise<any[]> {
@@ -12,7 +13,7 @@ export async function collectNewsAndInjuries(sport: string, _contestDate: string
 
   try {
     const feedUrl = sportMap[sport] || '';
-    const response = await fetch(feedUrl);
+    const response = await limitedFetch(feedUrl, 'espn-news', { timeoutMs: 5000, retries: 1 });
     const xml = await response.text();
 
     // Parse XML for injury keywords (out, doubtful, questionable, day-to-day)

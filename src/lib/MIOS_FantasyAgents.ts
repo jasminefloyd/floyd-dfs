@@ -1,4 +1,5 @@
 // Type definitions for MIOS_Fantasy pipeline
+import type { DraftKingsSlate } from './draftkingsSlateClient';
 export interface Last5Game {
   date: string;
   opponent: string;
@@ -47,7 +48,11 @@ export interface Player {
   team: string;
   position: string;
   salary: number;
+  salary_source?: 'draftkings_import' | 'estimated';
   injury_status: 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
+  injury_note?: string;
+  projection_source?: 'last_5' | 'position_baseline';
+  projected_points?: number;
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
@@ -62,12 +67,17 @@ export interface MIOS_FantasyManifest {
   sport: string;
   contest_type: string;
   contest_date: string;
+  contest_id?: string;
+  game_id?: string;
+  slate?: DraftKingsSlate;
   player_roster: Player[];
   injury_updates: { player_id: string; status: string; confidence: number }[];
   vegas_context: { game_id: string; spread: number; over_under: number; implied_total: number }[];
   social_sentiment: { player_id: string; mentions: number; sentiment_score: number; themes: string[] }[];
   catalysts: { type: string; player_id?: string; description: string }[];
   narrative_seeds: string[];
+  source_status: Record<string, 'ok' | 'partial' | 'unavailable'>;
+  data_warnings: string[];
   collected_at: string;
 }
 

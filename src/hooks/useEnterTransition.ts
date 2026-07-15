@@ -10,13 +10,13 @@ import { useEffect, useState } from 'react';
 // which wasn't installed for this scope.
 export function useEnterTransition(deps: React.DependencyList = []): boolean {
   const [entered, setEntered] = useState(false);
+  const depKey = JSON.stringify(deps);
 
   useEffect(() => {
     setEntered(false);
     const frame = requestAnimationFrame(() => setEntered(true));
     return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [depKey]);
 
   return entered;
 }

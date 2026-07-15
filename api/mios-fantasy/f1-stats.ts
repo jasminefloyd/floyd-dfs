@@ -1,24 +1,30 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { limitedFetch } from './rate-limiter';
 
-// Agent 5: Ergast F1 API (F1 only)
-// NOTE: ergast.com returned 522 (unreachable) when verified on 2026-07-14, consistent with
-// its known shutdown. Left as a real fetch call that fails gracefully via the existing
-// try/catch, rather than inventing a replacement API. Confirm a real F1 data source before
-// relying on this in production.
+// Agent 5: OpenF1 driver list (F1 only)
+// Verified with GET on 2026-07-15. The old Ergast endpoint was unreachable, so Core
+// uses OpenF1 for the driver roster and keeps performance projections conservative.
 export async function collectF1Stats(season: number, round: number): Promise<any[]> {
   try {
-    const response = await fetch(`https://ergast.com/api/f1/${season}/${round}/drivers.json`);
+    void season;
+    void round;
+    const response = await limitedFetch('https://api.openf1.org/v1/drivers?session_key=latest', 'openf1', {
+      timeoutMs: 10_000,
+      retries: 1
+    });
+    if (!response.ok) throw new Error(`OpenF1 ${response.status}`);
     const data: any = await response.json();
 
-    const drivers = data.MRData?.DriverTable?.Drivers || [];
-    return drivers.map((driver: any) => ({
-      driver_id: driver.driverId,
-      name: `${driver.givenName} ${driver.familyName}`,
-      team: driver.Constructors?.[0]?.name,
-      nationality: driver.nationality
+    return data.map((driver: any) => ({
+      driver_id: String(driver.driver_number),
+      name: driver.full_name,
+      team: driver.team_name,
+      position: 'DRIVER',
+      nationality: driver.country_code,
+      headshot_url: driver.headshot_url
     }));
   } catch (error) {
-    console.error('Ergast F1 error:', error);
+    console.error('OpenF1 error:', error);
     return [];
   }
 }

@@ -1,6 +1,13 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+type ViteImportMeta = ImportMeta & {
+  env: Record<string, string | undefined>
+}
+
+const viteEnv = (import.meta as ViteImportMeta).env
+
+export const supabaseUrl = viteEnv.VITE_SUPABASE_URL ?? ''
+export const supabaseAnonKey = viteEnv.VITE_SUPABASE_ANON_KEY ?? ''
+export const supabaseSchema = viteEnv.VITE_SUPABASE_SCHEMA || 'tenant_fantasy_ai'
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
