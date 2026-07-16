@@ -79,6 +79,7 @@ body {
 
 .ticker-track {
   animation: ticker-scroll var(--ticker-duration, 70s) linear infinite;
+  transform: translate3d(0, 0, 0);
   will-change: transform;
 }
 
@@ -92,16 +93,10 @@ body {
 
 @keyframes ticker-scroll {
   from {
-    transform: translateX(0);
+    transform: translate3d(0, 0, 0);
   }
   to {
-    transform: translateX(-50%);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ticker-track {
-    animation: none;
+    transform: translate3d(-50%, 0, 0);
   }
 }
 

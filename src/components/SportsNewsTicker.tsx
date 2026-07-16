@@ -45,11 +45,11 @@ export function SportsNewsTicker() {
 
   const tickerItems = useMemo(() => {
     if (!items.length) return [];
-    const repetitions = Math.max(2, Math.ceil(12 / items.length));
+    const repetitions = Math.max(2, Math.ceil(16 / items.length));
     return Array.from({ length: repetitions }, () => items).flat();
   }, [items]);
   const tickerStyle = {
-    '--ticker-duration': `${Math.max(45, tickerItems.length * 6)}s`,
+    '--ticker-duration': `${Math.min(36, Math.max(24, tickerItems.length * 2.2))}s`,
   } as CSSProperties;
 
   if (failed && !items.length) return null;
