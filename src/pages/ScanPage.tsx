@@ -80,56 +80,77 @@ export default function ScanPage() {
   };
 
   return (
-    <div className="flex flex-col sm:flex-row min-h-screen bg-gray-50">
-      {/* Left sidebar: Scan settings */}
-      <div className="w-full sm:w-1/4 lg:w-1/3 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 p-6 overflow-y-auto">
-        <MIOS_FantasyScanner
-          onScan={handleScan}
-          loading={phase !== 'idle'}
-          onValidationError={(errors) => errors.forEach((validationError) => showToast(validationError, 'error'))}
-        />
-      </div>
-
-      {/* Right: Results display */}
-      <div className="w-full sm:w-3/4 lg:w-2/3 p-6 overflow-y-auto">
-        {error && (
-          <div className="bg-error/10 border border-error/30 p-4 rounded mb-4">
-            <p className="text-error">{error}</p>
+    <div className="min-h-screen bg-gray-100 text-gray-900">
+      <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:gap-6 lg:py-6">
+        <aside className="w-full lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:w-[360px] lg:shrink-0 lg:overflow-y-auto">
+          <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-[var(--shadow-medium)] sm:p-5">
+            <MIOS_FantasyScanner
+              onScan={handleScan}
+              loading={phase !== 'idle'}
+              onValidationError={(errors) => errors.forEach((validationError) => showToast(validationError, 'error'))}
+            />
           </div>
-        )}
+        </aside>
 
-        {phase === 'fetching' ? (
-          <PlayerListSkeleton />
-        ) : phase === 'generating' ? (
-          <LineupSkeleton />
-        ) : lineups.length > 0 ? (
-          <div>
-            <div className="mb-6">
-              <h2 className="text-3xl font-bold">Recommended Lineups</h2>
-              {manifest?.slate ? (
-                <p className="mt-2 text-sm text-gray-600">
-                  {manifest.slate.slate_name} · {manifest.contest_date}
-                  {manifest.game_id ? ` · Game ${manifest.game_id}` : ''}
-                </p>
-              ) : null}
+        <main className="min-w-0 flex-1">
+          {error && (
+            <div className="mb-4 rounded-lg border border-error/30 bg-error/10 p-4">
+              <p className="text-error">{error}</p>
             </div>
-            {manifest?.data_warnings?.length ? (
-              <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
-                {manifest.data_warnings.map((warning) => (
-                  <p key={warning}>{warning}</p>
-                ))}
+          )}
+
+          {phase === 'fetching' ? (
+            <PlayerListSkeleton />
+          ) : phase === 'generating' ? (
+            <LineupSkeleton />
+          ) : lineups.length > 0 ? (
+            <div>
+              <div className="mb-4 rounded-lg border border-gray-200 bg-white p-4 shadow-[var(--shadow-subtle)] sm:p-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-green-600">Optimizer Board</p>
+                    <h2 className="mt-1 text-2xl font-black text-gray-950 sm:text-3xl">Recommended Lineups</h2>
+                    {manifest?.slate ? (
+                      <p className="mt-2 text-sm text-gray-400">
+                        {manifest.slate.slate_name} · {manifest.contest_date}
+                        {manifest.game_id ? ` · Game ${manifest.game_id}` : ''}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <SummaryPill label="Lineups" value={String(lineups.length)} />
+                    <SummaryPill label="Top FPTS" value={(lineups[0]?.simulation_ev ?? lineups[0]?.projected_points ?? 0).toFixed(1)} />
+                    <SummaryPill label="Salary" value={`$${Math.round((lineups[0]?.salary_used ?? 0) / 1000)}k`} />
+                  </div>
+                </div>
               </div>
-            ) : null}
-            <LineupComparison lineups={lineups} />
-            <PivotSuggestions lineups={lineups} manifest={manifest} />
-            <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
-          </div>
-        ) : (
-          <div className="text-center text-gray-500 py-12">
-            <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and imported DraftKings slate to run MIOS and PIOS.'}</p>
-          </div>
-        )}
+              {manifest?.data_warnings?.length ? (
+                <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+                  {manifest.data_warnings.map((warning) => (
+                    <p key={warning}>{warning}</p>
+                  ))}
+                </div>
+              ) : null}
+              <LineupComparison lineups={lineups} />
+              <PivotSuggestions lineups={lineups} manifest={manifest} />
+              <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-500">
+              <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and DraftKings slate to run MIOS and PIOS.'}</p>
+            </div>
+          )}
+        </main>
       </div>
+    </div>
+  );
+}
+
+function SummaryPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="text-sm font-black text-gray-950">{value}</p>
     </div>
   );
 }

@@ -26,32 +26,32 @@ export default function Navigation() {
   }, []);
 
   return (
-    <nav className="bg-white border-b border-gray-200 px-6 py-4">
-      <div className="flex items-center justify-between max-w-7xl mx-auto">
-        <div className="flex items-center space-x-8">
+    <nav className="border-b border-gray-200 bg-white px-4 py-3 text-gray-900 shadow-[var(--shadow-subtle)] sm:px-6">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-4 sm:gap-8">
           <Link
             to="/"
-            className="font-bold text-lg text-primary hover:underline transition-colors duration-[var(--transition-fast)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            className="text-lg font-black tracking-wide text-gray-950 transition-colors duration-[var(--transition-fast)] hover:text-green-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
           >
-            Fantasy AI
+            FLOYD DFS
           </Link>
           <Link
             to="/"
-            className="text-gray-700 hover:text-gray-900 hover:underline transition-colors duration-[var(--transition-fast)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-sm font-semibold text-green-700 transition-colors duration-[var(--transition-fast)] hover:border-green-500 hover:bg-green-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
           >
             Scan
           </Link>
           {isAdmin ? (
             <Link
               to="/admin/design-system"
-              className="text-gray-700 hover:text-gray-900 hover:underline text-sm transition-colors duration-[var(--transition-fast)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+              className="rounded-full border border-gray-200 px-3 py-1 text-sm text-gray-600 transition-colors duration-[var(--transition-fast)] hover:border-green-500 hover:text-gray-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
             >
               Admin
             </Link>
           ) : null}
         </div>
         <div>
-          <span className="text-gray-600">{email ?? 'Not logged in'}</span>
+          <span className="text-xs font-medium uppercase tracking-wide text-gray-500">{email ?? 'Guest Mode'}</span>
         </div>
       </div>
     </nav>

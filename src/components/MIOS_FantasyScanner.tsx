@@ -86,17 +86,21 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const scanDisabled = loading || slateLoading || (!selectedSlate && !canUseEstimatedScan);
 
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Scan Settings</h2>
+    <div className="space-y-5 text-gray-900">
+      <div>
+        <p className="text-[11px] font-bold uppercase tracking-wide text-green-600">Build A Slate</p>
+        <h2 className="mt-1 text-2xl font-black text-gray-950">Scan Settings</h2>
+        <p className="mt-1 text-sm text-gray-500">Pick a sport, slate, and risk profile to generate DFS plays.</p>
+      </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-3">Sport</label>
+        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Sport</label>
         <div className="grid grid-cols-2 gap-2">
           {SPORTS.map((s) => (
             <label
               key={s}
-              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-sm font-semibold uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-primary ${
-                sport === s ? 'border-primary bg-primary text-white' : 'border-gray-300 bg-white text-gray-700 hover:border-primary'
+              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-3 text-sm font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
+                sport === s ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
               }`}
             >
               <input
@@ -115,13 +119,13 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-3">Contest Type</label>
+        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Contest Type</label>
         <div className="grid grid-cols-2 gap-2">
           {CONTEST_TYPES.map((ct) => (
             <label
               key={ct}
-              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-sm font-semibold capitalize transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-primary ${
-                contestType === ct ? 'border-primary bg-primary text-white' : 'border-gray-300 bg-white text-gray-700 hover:border-primary'
+              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-3 text-sm font-black capitalize transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
+                contestType === ct ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
               }`}
             >
               <input
@@ -141,8 +145,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
-          <label className="block text-sm font-medium text-gray-700">DraftKings Slate</label>
-          {slateLoading ? <span className="rounded-full bg-info/10 px-2 py-1 text-xs font-medium text-info">Loading</span> : null}
+          <label className="block text-xs font-bold uppercase tracking-wide text-gray-500">DraftKings Slate</label>
+          {slateLoading ? <span className="rounded-full border border-green-500/30 bg-green-50 px-2 py-1 text-xs font-bold text-green-700">Loading</span> : null}
         </div>
 
         {slateError ? (
@@ -155,13 +159,13 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
           <div className="space-y-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
             <p>{availabilityMessage(sport, contestType)}</p>
             <label className="block">
-              <span className="mb-1 block text-xs font-medium text-gray-700">Estimated Contest Date</span>
+              <span className="mb-1 block text-xs font-bold uppercase tracking-wide text-gray-700">Estimated Contest Date</span>
               <input
                 type="date"
                 value={estimatedContestDate}
                 onChange={(e) => setEstimatedContestDate(e.target.value)}
                 disabled={loading}
-                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-[var(--transition-fast)]"
+                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 transition-colors duration-[var(--transition-fast)] focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500"
               />
             </label>
           </div>
@@ -171,8 +175,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
           {slates.map((slate) => (
             <label
               key={slate.contest_id}
-              className={`block cursor-pointer rounded-md border bg-white p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-primary ${
-                selectedContestId === slate.contest_id ? 'border-primary ring-2 ring-primary/20' : 'border-gray-200 hover:border-primary'
+              className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
+                selectedContestId === slate.contest_id ? 'border-green-600 bg-green-50 ring-2 ring-green-500/20' : 'border-gray-200 bg-white hover:border-green-500'
               }`}
             >
               <input
@@ -184,9 +188,12 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                 disabled={loading}
                 className="sr-only"
               />
-              <span className="flex items-start justify-between gap-3">
-                <span>
-                  <span className="block text-sm font-semibold text-gray-900">{slate.slate_name}</span>
+              <span className="flex items-start gap-3">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-xs font-black text-green-700">
+                  {sport.slice(0, 3).toUpperCase()}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-bold text-gray-950">{slate.slate_name}</span>
                   <span className="mt-1 block text-xs text-gray-500">
                     {slate.contest_date}
                     {slate.start_time ? ` at ${formatSlateTime(slate.start_time)}` : ''}
@@ -195,7 +202,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                     {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
                   </span>
                 </span>
-                <span className="shrink-0 rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
+                <span className="shrink-0 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
                   {slate.status === 'schedule_derived' ? 'Estimated salaries' : `${slate.salary_count} salaries`}
                 </span>
               </span>
@@ -205,19 +212,19 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Exclude Players</label>
+        <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-gray-500">Exclude Players</label>
         <textarea
           placeholder="LeBron, Luka, Giannis (comma-separated)"
           value={excludedPlayers}
           onChange={(e) => setExcludedPlayers(e.target.value)}
           disabled={loading}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary transition-colors duration-[var(--transition-fast)]"
+          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 transition-colors duration-[var(--transition-fast)] placeholder:text-gray-400 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500"
           rows={3}
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-3">Risk Tolerance</label>
+        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Risk Tolerance</label>
         <input
           type="range"
           min="0"
@@ -229,9 +236,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
             setRiskTolerance(mapping[parseInt(e.target.value, 10)]);
           }}
           disabled={loading}
-          className="w-full"
+          className="w-full accent-green-500"
         />
-        <div className="flex justify-between text-xs text-gray-500 mt-2">
+        <div className="mt-2 flex justify-between text-xs text-gray-500">
           <span>Conservative</span>
           <span>Balanced</span>
           <span>Aggressive</span>
@@ -241,7 +248,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       <button
         onClick={handleScan}
         disabled={scanDisabled}
-        className="w-full bg-primary hover:bg-primary-dark disabled:bg-gray-400 text-white font-bold py-3 px-4 rounded-md transition-colors duration-[var(--transition-fast)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        className="w-full rounded-md bg-green-600 px-4 py-3 font-black uppercase tracking-wide text-white transition-colors duration-[var(--transition-fast)] hover:bg-green-700 disabled:bg-gray-300 disabled:text-gray-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
       >
         {loading ? 'Scanning...' : canUseEstimatedScan ? 'Run Estimated Scan' : 'Run Scan'}
       </button>
