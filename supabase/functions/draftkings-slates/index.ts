@@ -362,7 +362,7 @@ async function fetchEspnScheduleSlates(sport: string, contestType: string): Prom
   const path = espnSportPath(sport);
   if (!path) return [];
 
-  const response = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${path}/scoreboard`);
+  const response = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${path}/scoreboard?dates=${espnDatesRange()}`);
   if (!response.ok) return [];
 
   const data = await response.json() as EspnScoreboardResponse;
@@ -370,29 +370,28 @@ async function fetchEspnScheduleSlates(sport: string, contestType: string): Prom
   if (!events.length) return [];
 
   if (contestType === 'classic') {
-    const firstDate = events[0]?.date ? toDateOnly(events[0].date) : toDateOnly(new Date().toISOString());
-    return [{
-      contest_id: `espn-${sport}-classic-${firstDate}`,
+    return [...groupEventsByDate(events).entries()].map(([contestDate, dateEvents]) => ({
+      contest_id: `espn-${sport}-classic-${contestDate}`,
       external_contest_id: null,
       sport,
       contest_type: contestType,
-      contest_date: firstDate,
-      slate_name: `${sport.toUpperCase()} Classic Schedule Slate${data.week?.number ? ` - Week ${data.week.number}` : ''}`,
-      game_ids: events.map((event) => event.id),
+      contest_date: contestDate,
+      slate_name: `${sport.toUpperCase()} Classic Schedule Slate - ${contestDate}${data.week?.number ? ` - Week ${data.week.number}` : ''}`,
+      game_ids: dateEvents.map((event) => event.id),
       salary_cap: 50_000,
       status: 'schedule_derived',
-      start_time: events[0]?.date ?? null,
+      start_time: dateEvents[0]?.date ?? null,
       salary_count: 0,
       data: {
         source: 'espn_scoreboard',
         salary_source: 'estimated',
         availability_window_days: SCHEDULE_FALLBACK_LOOKAHEAD_DAYS,
-        event_count: events.length,
-        events: events.map(toSlateEvent),
-        team_abbreviations: unique(events.flatMap(teamAbbreviations)),
+        event_count: dateEvents.length,
+        events: dateEvents.map(toSlateEvent),
+        team_abbreviations: unique(dateEvents.flatMap(teamAbbreviations)),
       },
       updated_at: new Date().toISOString(),
-    }];
+    }));
   }
 
   return events.map((event) => {
@@ -425,17 +424,61 @@ function toDateOnly(value: string): string {
   return new Date(value).toISOString().slice(0, 10);
 }
 
+function todayDateOnly(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function addDaysDateOnly(dateOnly: string, days: number): string {
+  const date = new Date(`${dateOnly}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function espnDatesRange(): string {
+  const start = todayDateOnly().replaceAll('-', '');
+  const end = addDaysDateOnly(todayDateOnly(), SCHEDULE_FALLBACK_LOOKAHEAD_DAYS).replaceAll('-', '');
+  return `${start}-${end}`;
+}
+
 function isNearTermEvent(value: string): boolean {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return false;
 
-  const now = new Date();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const lookahead = new Date(now);
-  lookahead.setDate(now.getDate() + SCHEDULE_FALLBACK_LOOKAHEAD_DAYS);
+  const eventDate = toDateOnly(value);
+  const today = todayDateOnly();
+  const lookahead = addDaysDateOnly(today, SCHEDULE_FALLBACK_LOOKAHEAD_DAYS);
 
-  return date >= yesterday && date <= lookahead;
+  return eventDate >= today && eventDate <= lookahead;
+}
+
+function groupEventsByDate(events: EspnEvent[]): Map<string, EspnEvent[]> {
+  const byDate = new Map<string, EspnEvent[]>();
+  for (const event of events) {
+    const date = toDateOnly(event.date);
+    byDate.set(date, [...(byDate.get(date) ?? []), event]);
+  }
+  return byDate;
+}
+
+function slateDate(slate: DraftKingsSlate): string | null {
+  if (slate.start_time) return toDateOnly(slate.start_time);
+  if (slate.contest_date) return slate.contest_date;
+  return null;
+}
+
+function slateMatchesRequest(slate: DraftKingsSlate, sport: string, contestType: string): boolean {
+  const date = slateDate(slate);
+  if (!date || date < todayDateOnly()) return false;
+  if (String(slate.sport).toLowerCase() !== sport) return false;
+  if (String(slate.contest_type).toLowerCase() !== contestType) return false;
+  if (contestType === 'showdown' && slate.game_ids.length > 1) return false;
+  return true;
+}
+
+function filterSlatesForRequest(slates: DraftKingsSlate[], sport: string, contestType: string): DraftKingsSlate[] {
+  return slates
+    .filter((slate) => slateMatchesRequest(slate, sport, contestType))
+    .sort((left, right) => String(left.start_time ?? left.contest_date).localeCompare(String(right.start_time ?? right.contest_date)));
 }
 
 function teamAbbreviations(event: EspnEvent): string[] {
@@ -496,12 +539,13 @@ Deno.serve(async (req) => {
       p_sport: sport,
       p_contest_type: contestType,
     });
-    const liveDraftKingsSlates = slates.length ? [] : await fetchDraftKingsLiveSlates(sport, contestType);
-    const discoveredSlates = slates.length
-      ? slates
+    const storedSlates = filterSlatesForRequest(slates, sport, contestType);
+    const liveDraftKingsSlates = storedSlates.length ? [] : filterSlatesForRequest(await fetchDraftKingsLiveSlates(sport, contestType), sport, contestType);
+    const discoveredSlates = storedSlates.length
+      ? storedSlates
       : liveDraftKingsSlates.length
         ? liveDraftKingsSlates
-        : await fetchEspnScheduleSlates(sport, contestType);
+        : filterSlatesForRequest(await fetchEspnScheduleSlates(sport, contestType), sport, contestType);
 
     return jsonResponse({
       slates: discoveredSlates,
