@@ -123,7 +123,7 @@ export function generateLineups(
 
   // Score and rank by confidence
   const rankedLineups = candidates
-    .filter(validateLineup)
+    .filter((lineup) => validateLineup(lineup, contestType))
     .map((lineup) => ({
       ...lineup,
       confidence_score: calculateLineupConfidence(lineup)
@@ -165,6 +165,7 @@ function generateShowdownLineups(players: LineupPlayerDraft[], _sport: string): 
       if (lineups.length >= 50) return;
       if (selected.length === 5) {
         const lineupPlayers = [captainWithMultiplier, ...selected];
+        if (uniqueTeams(lineupPlayers).length < 2) return;
         const signature = lineupPlayers.map((player) => player.player_id).sort().join('|');
         if (signatures.has(signature)) return;
         signatures.add(signature);
@@ -263,12 +264,15 @@ function calculateProjectedPoints(players: LineupPlayerDraft[]): number {
   return players.reduce((sum, p) => sum + (p.projected_points || p.last_5_avg_pts || 0), 0);
 }
 
-function validateLineup(lineup: DraftLineup): boolean {
+function validateLineup(lineup: DraftLineup, contestType: string): boolean {
   const violations: string[] = [];
   if (lineup.salary_used > 50000) violations.push('salary cap exceeded');
   if (lineup.players.length === 0) violations.push('no players selected');
   if (new Set(lineup.players.map((player) => player.player_id)).size !== lineup.players.length) {
     violations.push('duplicate player selected');
+  }
+  if (contestType === 'showdown' && uniqueTeams(lineup.players).length < 2) {
+    violations.push('showdown lineups must include players from both teams');
   }
   if (lineup.projected_points <= 0) violations.push('projected points must be positive');
   if (lineup.players.some((player) => !player.position || !player.name || player.salary <= 0)) {
@@ -281,6 +285,10 @@ function validateLineup(lineup: DraftLineup): boolean {
     return false;
   }
   return true;
+}
+
+function uniqueTeams(players: LineupPlayerDraft[]): string[] {
+  return [...new Set(players.map((player) => String(player.team ?? '').toUpperCase()).filter(Boolean))];
 }
 
 function calculateLineupConfidence(lineup: DraftLineup): number {
