@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { limitedFetch } from './rate-limiter';
+import { limitedFetch } from './rate-limiter.js';
 
 // Agent 2: ESPN Stats API - Last 5 Games
 // NOTE: this endpoint returned 404 when verified on 2026-07-14 (path looks malformed:

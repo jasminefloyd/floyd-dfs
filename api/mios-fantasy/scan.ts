@@ -1,12 +1,12 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import type { Last5Game, MIOS_FantasyManifest, Player } from '../../src/lib/MIOS_FantasyAgents';
-import { collectNewsAndInjuries } from './news-injuries';
-import { collectLast5Stats } from './last5-stats';
-import { collectRedditSentiment } from './reddit-sentiment';
-import { collectSleeperProps } from './sleeper-props';
-import { collectF1Stats } from './f1-stats';
-import { limitedFetch } from './rate-limiter';
-import { validateApiAuth } from './auth';
+import type { Last5Game, MIOS_FantasyManifest, Player } from '../../src/lib/MIOS_FantasyAgents.js';
+import { collectNewsAndInjuries } from './news-injuries.js';
+import { collectLast5Stats } from './last5-stats.js';
+import { collectRedditSentiment } from './reddit-sentiment.js';
+import { collectSleeperProps } from './sleeper-props.js';
+import { collectF1Stats } from './f1-stats.js';
+import { limitedFetch } from './rate-limiter.js';
+import { validateApiAuth } from './auth.js';
 
 type SourceStatus = MIOS_FantasyManifest['source_status'];
 type CachedManifest = { manifest: MIOS_FantasyManifest; cachedAt: number };

@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { limitedFetch } from './rate-limiter';
+import { limitedFetch } from './rate-limiter.js';
 
 // Agent 5: OpenF1 driver list (F1 only)
 // Verified with GET on 2026-07-15. The old Ergast endpoint was unreachable, so Core

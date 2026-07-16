@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { limitedFetch } from './rate-limiter';
+import { limitedFetch } from './rate-limiter.js';
 
 // Agent 1: ESPN RSS News & Injuries
 export async function collectNewsAndInjuries(sport: string, _contestDate: string): Promise<any[]> {

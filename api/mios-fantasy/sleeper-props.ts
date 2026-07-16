@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { limitedFetch } from './rate-limiter';
+import { limitedFetch } from './rate-limiter.js';
 
 // Agent 4: Sleeper API (NBA/WNBA only)
 // NOTE: verified 2026-07-14. The real endpoint is /v1/players/{sport} (sport as a string

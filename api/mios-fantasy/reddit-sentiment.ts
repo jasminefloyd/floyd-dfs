@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { limitedFetch } from './rate-limiter';
+import { limitedFetch } from './rate-limiter.js';
 
 // Agent 3: Reddit sentiment
 // Reddit's public JSON search returned 403 in a direct verification check on 2026-07-15.
