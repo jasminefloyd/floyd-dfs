@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { listSportsNews, type SportsNewsItem } from '../lib/sportsNewsClient';
 
@@ -43,7 +43,14 @@ export function SportsNewsTicker() {
     };
   }, []);
 
-  const tickerItems = useMemo(() => [...items, ...items], [items]);
+  const tickerItems = useMemo(() => {
+    if (!items.length) return [];
+    const repetitions = Math.max(2, Math.ceil(12 / items.length));
+    return Array.from({ length: repetitions }, () => items).flat();
+  }, [items]);
+  const tickerStyle = {
+    '--ticker-duration': `${Math.max(45, tickerItems.length * 6)}s`,
+  } as CSSProperties;
 
   if (failed && !items.length) return null;
   if (!items.length) {
@@ -60,22 +67,30 @@ export function SportsNewsTicker() {
         <div className="shrink-0 rounded-sm bg-white px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-gray-950">
           News
         </div>
-        <div className="relative min-w-0 flex-1 overflow-hidden">
-          <div className="ticker-track flex w-max items-center gap-5">
-            {tickerItems.map((item, index) => (
-              <a
-                key={`${item.id}-${index}`}
-                href={item.link ?? undefined}
-                target={item.link ? '_blank' : undefined}
-                rel={item.link ? 'noreferrer' : undefined}
-                className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-white ${
-                  item.category === 'injury' ? 'text-warning' : 'text-gray-300'
-                }`}
+        <div className="ticker-viewport relative min-w-0 flex-1 overflow-hidden">
+          <div className="ticker-track flex w-max items-center" style={tickerStyle}>
+            {[0, 1].map((groupIndex) => (
+              <div
+                key={groupIndex}
+                className="ticker-group flex shrink-0 items-center gap-5"
+                aria-hidden={groupIndex === 1}
               >
-                <span className="font-bold text-gray-100">{SPORT_LABELS[item.sport] ?? item.sport.toUpperCase()}</span>
-                {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
-                <span>{item.title}</span>
-              </a>
+                {tickerItems.map((item, index) => (
+                  <a
+                    key={`${groupIndex}-${item.id}-${index}`}
+                    href={item.link ?? undefined}
+                    target={item.link ? '_blank' : undefined}
+                    rel={item.link ? 'noreferrer' : undefined}
+                    className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-white ${
+                      item.category === 'injury' ? 'text-warning' : 'text-gray-300'
+                    }`}
+                  >
+                    <span className="font-bold text-gray-100">{SPORT_LABELS[item.sport] ?? item.sport.toUpperCase()}</span>
+                    {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                    <span>{item.title}</span>
+                  </a>
+                ))}
+              </div>
             ))}
           </div>
         </div>

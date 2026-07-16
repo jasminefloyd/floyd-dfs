@@ -73,12 +73,21 @@ body {
   margin: 0;
 }
 
+.ticker-viewport {
+  mask-image: linear-gradient(90deg, transparent, black 24px, black calc(100% - 24px), transparent);
+}
+
 .ticker-track {
-  animation: ticker-scroll 70s linear infinite;
+  animation: ticker-scroll var(--ticker-duration, 70s) linear infinite;
+  will-change: transform;
 }
 
 .ticker-track:hover {
   animation-play-state: paused;
+}
+
+.ticker-group {
+  padding-right: 1.25rem;
 }
 
 @keyframes ticker-scroll {
