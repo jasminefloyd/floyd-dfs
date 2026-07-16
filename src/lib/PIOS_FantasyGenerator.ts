@@ -3,6 +3,8 @@ import { normalizePlayerName } from './validation';
 export interface LineupPlayerDraft {
   name: string;
   team: string;
+  image_url?: string;
+  team_logo_url?: string;
   position: string;
   salary: number;
   base_salary?: number;

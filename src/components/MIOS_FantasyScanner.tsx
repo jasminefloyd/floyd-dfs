@@ -190,9 +190,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
               />
               <span className="block">
                 <span className="flex items-start gap-3">
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-sm font-black text-green-700">
-                    {sport.slice(0, 3).toUpperCase()}
-                  </span>
+                  <SportMark sport={sport} logoUrl={slateSportLogoUrl(slate)} />
                   <span className="min-w-0 flex-1">
                     <span className="block break-words text-sm font-black leading-tight text-gray-950">{slate.slate_name}</span>
                     <span className="mt-1 block text-xs font-medium text-gray-500">
@@ -208,6 +206,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                   <span className="min-w-0 break-words text-xs text-gray-500">
                     {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
                   </span>
+                  <SlateTeamLogos slate={slate} />
                 </span>
               </span>
             </label>
@@ -294,4 +293,65 @@ function formatSlateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function SportMark({ sport, logoUrl }: { sport: string; logoUrl?: string }) {
+  if (logoUrl) {
+    return (
+      <img
+        src={logoUrl}
+        alt=""
+        className="h-11 w-11 shrink-0 rounded-md border border-green-200 bg-white object-contain p-1"
+      />
+    );
+  }
+
+  return (
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-sm font-black text-green-700">
+      {sport.slice(0, 3).toUpperCase()}
+    </span>
+  );
+}
+
+function SlateTeamLogos({ slate }: { slate: DraftKingsSlate }) {
+  const logos = slateTeamLogoUrls(slate).slice(0, 4);
+  if (!logos.length) return null;
+
+  return (
+    <span className="flex items-center -space-x-2">
+      {logos.map((logoUrl) => (
+        <img
+          key={logoUrl}
+          src={logoUrl}
+          alt=""
+          className="h-6 w-6 rounded-full border border-white bg-white object-contain p-0.5 shadow-[var(--shadow-subtle)]"
+        />
+      ))}
+    </span>
+  );
+}
+
+function slateSportLogoUrl(slate: DraftKingsSlate): string | undefined {
+  const data = slate.data as Record<string, unknown> | undefined;
+  return typeof data?.sport_logo_url === 'string' ? data.sport_logo_url : sportLogoFallback(slate.sport);
+}
+
+function sportLogoFallback(sport: string): string | undefined {
+  const logos: Record<string, string> = {
+    nba: 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png',
+    wnba: 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png',
+    mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
+    nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
+    f1: 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png',
+  };
+  return logos[sport];
+}
+
+function slateTeamLogoUrls(slate: DraftKingsSlate): string[] {
+  const data = slate.data as Record<string, any> | undefined;
+  const events = Array.isArray(data?.events) ? data.events : data?.event ? [data.event] : [];
+  const urls = events.flatMap((event) => Array.isArray(event?.teams)
+    ? event.teams.map((team: Record<string, unknown>) => team.logo_url)
+    : []);
+  return [...new Set(urls.filter((url): url is string => typeof url === 'string' && url.length > 0))];
 }

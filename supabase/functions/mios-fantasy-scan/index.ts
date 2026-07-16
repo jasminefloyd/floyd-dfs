@@ -12,6 +12,8 @@ interface Player {
   espn_id?: string;
   name: string;
   team: string;
+  image_url?: string;
+  team_logo_url?: string;
   position: string;
   salary: number;
   salary_source?: 'draftkings_import' | 'estimated';
@@ -474,6 +476,12 @@ function buildBaselineGames(projectedPoints: number): Last5Game[] {
   }));
 }
 
+function preferredLogoUrl(logos: unknown): string | undefined {
+  if (!Array.isArray(logos)) return undefined;
+  const defaultLogo = logos.find((logo) => Array.isArray(logo?.rel) && logo.rel.includes('default'));
+  return defaultLogo?.href ?? logos.find((logo) => typeof logo?.href === 'string')?.href;
+}
+
 function toPlayer(raw: Record<string, any>, sport: string): Player | null {
   const id = String(raw.player_id ?? raw.driver_id ?? raw.id ?? raw.driver_number ?? '');
   const name = String(raw.name ?? raw.full_name ?? raw.displayName ?? raw.display_name ?? '');
@@ -489,6 +497,8 @@ function toPlayer(raw: Record<string, any>, sport: string): Player | null {
     espn_id: raw.espn_id ? String(raw.espn_id) : undefined,
     name,
     team,
+    image_url: raw.image_url ?? raw.headshot_url ?? raw.headshot?.href,
+    team_logo_url: raw.team_logo_url ?? teamLogoFallbackUrl(sport, team),
     position,
     salary: estimatedSalary(projected, position, sport),
     salary_source: 'estimated',
@@ -630,12 +640,19 @@ async function collectEspnRosters(sport: string): Promise<Player[]> {
           player_id: athlete.id,
           espn_id: athlete.id,
           team: data?.team?.abbreviation,
+          image_url: athlete.headshot?.href,
+          team_logo_url: preferredLogoUrl(data?.team?.logos) ?? teamLogoFallbackUrl(sport, data?.team?.abbreviation),
         }, sport))
         .filter(Boolean) as Player[];
     }),
   );
 
   return rosters.flat();
+}
+
+function teamLogoFallbackUrl(sport: string, abbreviation?: string): string | undefined {
+  if (!abbreviation || sport === 'f1') return undefined;
+  return `https://a.espncdn.com/i/teamlogos/${sport}/500/${String(abbreviation).toLowerCase()}.png`;
 }
 
 async function collectEspnRosterIndex(sport: string): Promise<Map<string, string>> {

@@ -4,6 +4,8 @@ interface ManifestPlayer {
   id: string;
   name: string;
   team: string;
+  image_url?: string;
+  team_logo_url?: string;
   position: string;
   salary: number;
   salary_source?: string;
@@ -22,6 +24,8 @@ interface ManifestPlayer {
 interface LineupPlayerDraft {
   name: string;
   team: string;
+  image_url?: string;
+  team_logo_url?: string;
   position: string;
   salary: number;
   base_salary?: number;
@@ -222,6 +226,8 @@ function mapToDraftPlayers(players: ManifestPlayer[]): LineupPlayerDraft[] {
     return {
       name: player.name,
       team: player.team ?? '',
+      image_url: player.image_url,
+      team_logo_url: player.team_logo_url,
       position: player.position ?? '',
       salary: player.salary,
       base_salary: player.salary,

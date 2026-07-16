@@ -46,6 +46,8 @@ export interface Player {
   id: string;
   name: string;
   team: string;
+  image_url?: string;
+  team_logo_url?: string;
   position: string;
   salary: number;
   salary_source?: 'draftkings_import' | 'estimated';

@@ -89,6 +89,10 @@ interface EspnEvent {
         abbreviation?: string;
         displayName?: string;
         shortDisplayName?: string;
+        logos?: Array<{
+          href?: string;
+          rel?: string[];
+        }>;
       };
     }>;
   }>;
@@ -97,6 +101,12 @@ interface EspnEvent {
 interface EspnScoreboardResponse {
   events?: EspnEvent[];
   week?: { number?: number };
+  leagues?: Array<{
+    logos?: Array<{
+      href?: string;
+      rel?: string[];
+    }>;
+  }>;
 }
 
 const corsHeaders = {
@@ -367,6 +377,7 @@ async function fetchEspnScheduleSlates(sport: string, contestType: string): Prom
 
   const data = await response.json() as EspnScoreboardResponse;
   const events = (data.events ?? []).filter((event) => isNearTermEvent(event.date));
+  const sportLogoUrl = preferredLogoUrl(data.leagues?.[0]?.logos);
   if (!events.length) return [];
 
   if (contestType === 'classic') {
@@ -387,7 +398,8 @@ async function fetchEspnScheduleSlates(sport: string, contestType: string): Prom
         salary_source: 'estimated',
         availability_window_days: SCHEDULE_FALLBACK_LOOKAHEAD_DAYS,
         event_count: dateEvents.length,
-        events: dateEvents.map(toSlateEvent),
+        sport_logo_url: sportLogoUrl,
+        events: dateEvents.map((event) => toSlateEvent(event, sport)),
         team_abbreviations: unique(dateEvents.flatMap(teamAbbreviations)),
       },
       updated_at: new Date().toISOString(),
@@ -412,7 +424,8 @@ async function fetchEspnScheduleSlates(sport: string, contestType: string): Prom
         source: 'espn_scoreboard',
         salary_source: 'estimated',
         availability_window_days: SCHEDULE_FALLBACK_LOOKAHEAD_DAYS,
-        event: toSlateEvent(event),
+        sport_logo_url: sportLogoUrl,
+        event: toSlateEvent(event, sport),
         team_abbreviations: teams,
       },
       updated_at: new Date().toISOString(),
@@ -487,7 +500,7 @@ function teamAbbreviations(event: EspnEvent): string[] {
     .filter((value): value is string => Boolean(value)) ?? [];
 }
 
-function toSlateEvent(event: EspnEvent) {
+function toSlateEvent(event: EspnEvent, sport: string) {
   const competition = event.competitions?.[0];
   const odds = competition?.odds?.find((item) => {
     const provider = `${item.provider?.name ?? ''} ${item.provider?.displayName ?? ''}`.toLowerCase();
@@ -503,6 +516,7 @@ function toSlateEvent(event: EspnEvent) {
       home_away: competitor.homeAway ?? null,
       abbreviation: competitor.team?.abbreviation ?? null,
       display_name: competitor.team?.displayName ?? competitor.team?.shortDisplayName ?? null,
+      logo_url: preferredLogoUrl(competitor.team?.logos) ?? teamLogoFallbackUrl(sport, competitor.team?.abbreviation),
     })) ?? [],
     odds: odds ? {
       provider: odds.provider?.displayName ?? odds.provider?.name ?? null,
@@ -511,6 +525,17 @@ function toSlateEvent(event: EspnEvent) {
       spread: odds.spread ?? null,
     } : null,
   };
+}
+
+function preferredLogoUrl(logos: unknown): string | undefined {
+  if (!Array.isArray(logos)) return undefined;
+  const defaultLogo = logos.find((logo) => Array.isArray(logo?.rel) && logo.rel.includes('default'));
+  return defaultLogo?.href ?? logos.find((logo) => typeof logo?.href === 'string')?.href;
+}
+
+function teamLogoFallbackUrl(sport: string, abbreviation?: string): string | undefined {
+  if (!abbreviation || sport === 'f1') return undefined;
+  return `https://a.espncdn.com/i/teamlogos/${sport}/500/${abbreviation.toLowerCase()}.png`;
 }
 
 function unique(values: string[]): string[] {

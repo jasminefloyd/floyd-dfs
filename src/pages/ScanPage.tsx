@@ -137,7 +137,7 @@ export default function ScanPage() {
             </div>
           ) : (
             <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-500">
-              <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and DraftKings slate to run MIOS and PIOS.'}</p>
+              <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and DraftKings slate to run a DFS Scan.'}</p>
             </div>
           )}
         </main>
@@ -161,6 +161,8 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     players: lu.players.map((p) => ({
       id: p.player_id,
       name: p.name,
+      image_url: p.image_url,
+      team_logo_url: p.team_logo_url,
       position: p.position,
       team: p.team,
       salary: p.salary,

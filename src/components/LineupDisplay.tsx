@@ -7,6 +7,7 @@ export interface LineupPlayer {
   name?: string;
   full_name?: string;
   image_url?: string;
+  team_logo_url?: string;
   position?: string;
   team?: string;
   nfl_team?: string;
@@ -140,7 +141,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     }`}
                   >
                     <PlayerPortrait player={player} />
-                    <TeamMark team={player.team || player.nfl_team || 'FA'} />
+                    <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-bold text-gray-950 sm:text-base">
                         {player.roster_slot ? (
@@ -218,7 +219,17 @@ function PlayerPortrait({ player }: { player: LineupPlayer }) {
   );
 }
 
-function TeamMark({ team }: { team: string }) {
+function TeamMark({ team, logoUrl }: { team: string; logoUrl?: string }) {
+  if (logoUrl) {
+    return (
+      <img
+        src={logoUrl}
+        alt=""
+        className="hidden h-9 w-9 shrink-0 rounded-full border border-green-200 bg-white object-contain p-1 sm:block"
+      />
+    );
+  }
+
   return (
     <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full border border-green-200 bg-green-50 text-[10px] font-black text-green-700 sm:flex">
       {team.slice(0, 3).toUpperCase()}
