@@ -5,6 +5,9 @@ export interface LineupPlayerDraft {
   team: string;
   position: string;
   salary: number;
+  base_salary?: number;
+  salary_multiplier?: number;
+  roster_slot?: string;
   salary_source?: string;
   player_id: string;
   confidence_score: number;
@@ -150,7 +153,10 @@ function generateShowdownLineups(players: LineupPlayerDraft[], _sport: string): 
   for (const captain of topCaptains) {
     const captainWithMultiplier: LineupPlayerDraft = {
       ...captain,
+      base_salary: captain.base_salary ?? captain.salary,
       salary: Math.floor(captain.salary * 1.5),
+      salary_multiplier: 1.5,
+      roster_slot: 'CPT',
       projected_points: (captain.last_5_avg_pts || captain.projected_points || 0) * 1.5
     };
 
@@ -164,7 +170,15 @@ function generateShowdownLineups(players: LineupPlayerDraft[], _sport: string): 
     function search(startIndex: number, selected: LineupPlayerDraft[], salaryUsed: number) {
       if (lineups.length >= 50) return;
       if (selected.length === 5) {
-        const lineupPlayers = [captainWithMultiplier, ...selected];
+        const lineupPlayers = [
+          captainWithMultiplier,
+          ...selected.map((player) => ({
+            ...player,
+            base_salary: player.base_salary ?? player.salary,
+            salary_multiplier: 1,
+            roster_slot: 'FLEX'
+          }))
+        ];
         if (uniqueTeams(lineupPlayers).length < 2) return;
         const signature = lineupPlayers.map((player) => player.player_id).sort().join('|');
         if (signatures.has(signature)) return;
@@ -232,7 +246,7 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
       if (usedIds.has(candidate.player_id)) continue;
       if (salaryUsed + candidate.salary > 50000) continue;
 
-      selected.push(candidate);
+      selected.push({ ...candidate, roster_slot: slots[slotIndex].slot, salary_multiplier: 1, base_salary: candidate.base_salary ?? candidate.salary });
       usedIds.add(candidate.player_id);
       search(slotIndex + 1, selected, usedIds, salaryUsed + candidate.salary);
       usedIds.delete(candidate.player_id);

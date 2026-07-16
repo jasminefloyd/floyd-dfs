@@ -10,18 +10,25 @@ function csvEscape(value: unknown): string {
 
 export function ExportLineup({ lineup }: ExportLineupProps) {
   const rows = [
-    ['Player', 'Position', 'Team', 'Salary', 'Projected'],
+    ['Slot', 'Player', 'Position', 'Team', 'Salary', 'Base Salary', 'Multiplier', 'Projected'],
     ...lineup.players.map((player) => [
+      player.roster_slot || '',
       player.name || player.full_name || '',
       player.position || '',
       player.team || player.nfl_team || '',
       player.salary ?? '',
+      player.base_salary ?? player.salary ?? '',
+      player.salary_multiplier ?? 1,
       player.last_5_stats?.avg_fantasy_pts ?? ''
     ])
   ];
   const csv = rows.map((row) => row.map(csvEscape).join(',')).join('\n');
   const copyText = lineup.players
-    .map((player) => `${player.name || player.full_name} (${player.position}) $${player.salary ?? 0}`)
+    .map((player) => {
+      const slot = player.roster_slot ? `${player.roster_slot} ` : '';
+      const multiplier = player.salary_multiplier && player.salary_multiplier > 1 ? `, ${player.salary_multiplier}x` : '';
+      return `${slot}${player.name || player.full_name} (${player.position}) $${player.salary ?? 0}${multiplier}`;
+    })
     .join('\n');
 
   return (

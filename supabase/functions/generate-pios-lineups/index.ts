@@ -24,6 +24,9 @@ interface LineupPlayerDraft {
   team: string;
   position: string;
   salary: number;
+  base_salary?: number;
+  salary_multiplier?: number;
+  roster_slot?: string;
   salary_source?: string;
   player_id: string;
   confidence_score: number;
@@ -221,6 +224,8 @@ function mapToDraftPlayers(players: ManifestPlayer[]): LineupPlayerDraft[] {
       team: player.team ?? '',
       position: player.position ?? '',
       salary: player.salary,
+      base_salary: player.salary,
+      salary_multiplier: 1,
       salary_source: player.salary_source,
       player_id: player.id,
       confidence_score: player.last_5_stats?.confidence ?? 0.5,
@@ -280,7 +285,10 @@ function generateShowdownLineups(players: LineupPlayerDraft[], rosterSize = 6): 
   for (const captain of topCaptains) {
     const captainWithMultiplier: LineupPlayerDraft = {
       ...captain,
+      base_salary: captain.base_salary ?? captain.salary,
       salary: Math.floor(captain.salary * 1.5),
+      salary_multiplier: 1.5,
+      roster_slot: 'CPT',
       projected_points: (captain.last_5_avg_pts || captain.projected_points || 0) * 1.5,
     };
     const remainingSalary = salaryCapShowdown - captainWithMultiplier.salary;
@@ -293,7 +301,15 @@ function generateShowdownLineups(players: LineupPlayerDraft[], rosterSize = 6): 
     function search(startIndex: number, selected: LineupPlayerDraft[], salaryUsed: number) {
       if (lineups.length >= MAX_CANDIDATE_LINEUPS) return;
       if (selected.length === rosterSize - 1) {
-        const lineupPlayers = [captainWithMultiplier, ...selected];
+        const lineupPlayers = [
+          captainWithMultiplier,
+          ...selected.map((player) => ({
+            ...player,
+            base_salary: player.base_salary ?? player.salary,
+            salary_multiplier: 1,
+            roster_slot: 'FLEX',
+          })),
+        ];
         if (uniqueTeams(lineupPlayers).length < 2) return;
         const signature = lineupPlayers.map((player) => player.player_id).sort().join('|');
         if (signatures.has(signature)) return;
@@ -368,7 +384,7 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
       if (usedIds.has(candidate.player_id)) continue;
       if (salaryUsed + candidate.salary > 50_000) continue;
 
-      selected.push(candidate);
+      selected.push({ ...candidate, roster_slot: slots[slotIndex].slot, salary_multiplier: 1, base_salary: candidate.base_salary ?? candidate.salary });
       usedIds.add(candidate.player_id);
       search(slotIndex + 1, selected, usedIds, salaryUsed + candidate.salary);
       usedIds.delete(candidate.player_id);

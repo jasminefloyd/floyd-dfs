@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { MIOS_FantasyScanner, type ScanParams } from '../components/MIOS_FantasyScanner';
 import { LineupDisplay, type Lineup } from '../components/LineupDisplay';
 import { LineupComparison } from '../components/LineupComparison';
 import { PivotSuggestions } from '../components/PivotSuggestions';
-import { HistoryDashboard, type HistoryItem } from '../components/HistoryDashboard';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
 import { useToast } from '../hooks/useToast';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
@@ -19,30 +18,7 @@ export default function ScanPage() {
   const [manifest, setManifest] = useState<MIOS_FantasyManifest | null>(null);
   const [lineups, setLineups] = useState<Lineup[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
   const { showToast } = useToast();
-
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem('fantasy-ai-scan-history');
-      if (stored) setHistory(JSON.parse(stored));
-    } catch (err) {
-      console.warn('Failed to load scan history:', err);
-      window.localStorage.removeItem('fantasy-ai-scan-history');
-    }
-  }, []);
-
-  const recordHistory = useCallback((item: HistoryItem) => {
-    setHistory((prev) => {
-      const next = [item, ...prev].slice(0, 10);
-      try {
-        window.localStorage.setItem('fantasy-ai-scan-history', JSON.stringify(next));
-      } catch (err) {
-        console.warn('Failed to save scan history:', err);
-      }
-      return next;
-    });
-  }, []);
 
   useInjuryAlerts(manifest?.player_roster ?? [], lineups.length > 0, (alert) => {
     showToast(alert.message, 'info');
@@ -86,14 +62,6 @@ export default function ScanPage() {
       }
       const displayLineups = toDisplayLineups(piosResult.lineups);
       setLineups(displayLineups);
-      recordHistory({
-        id: data.manifest_id,
-        sport: data.sport,
-        contestDate: data.contest_date,
-        topProjection: displayLineups[0]?.projected_points ?? 0,
-        lineupCount: displayLineups.length,
-        createdAt: data.collected_at
-      });
       const warnings = [
         ...(data.data_warnings ?? []),
         ...(piosResult.data_warnings ?? [])
@@ -145,7 +113,6 @@ export default function ScanPage() {
                 </p>
               ) : null}
             </div>
-            <HistoryDashboard items={history} />
             {manifest?.data_warnings?.length ? (
               <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
                 {manifest.data_warnings.map((warning) => (
@@ -176,6 +143,9 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       position: p.position,
       team: p.team,
       salary: p.salary,
+      base_salary: p.base_salary,
+      salary_multiplier: p.salary_multiplier,
+      roster_slot: p.roster_slot,
       salary_source: p.salary_source,
       last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts, trend: 'stable' }
     })),

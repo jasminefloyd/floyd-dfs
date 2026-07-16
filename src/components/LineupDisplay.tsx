@@ -10,6 +10,9 @@ export interface LineupPlayer {
   team?: string;
   nfl_team?: string;
   salary?: number;
+  base_salary?: number;
+  salary_multiplier?: number;
+  roster_slot?: string;
   salary_source?: string;
   last_5_stats?: {
     avg_fantasy_pts?: number;
@@ -138,15 +141,25 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     }`}
                   >
                     <div>
-                      <p className="text-base font-medium">{player.name || player.full_name}</p>
+                      <p className="text-base font-medium">
+                        {player.roster_slot ? (
+                          <span className="mr-2 rounded-sm bg-gray-900 px-1.5 py-0.5 text-[11px] font-bold text-white">
+                            {player.roster_slot}
+                          </span>
+                        ) : null}
+                        {player.name || player.full_name}
+                      </p>
                       <p className="text-[13px] text-gray-600">
                         {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="font-bold">${player.salary ?? '—'}</p>
+                      <p className="font-bold">{formatSalary(player.salary)}</p>
                       <p className="text-[13px] text-gray-600">
                         {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
+                        {player.salary_multiplier && player.salary_multiplier > 1
+                          ? ` • ${player.salary_multiplier}x from ${formatSalary(player.base_salary)}`
+                          : ''}
                         {player.salary_source === 'estimated' ? ' • est. salary' : ''}
                       </p>
                     </div>
@@ -172,6 +185,10 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
       })}
     </div>
   );
+}
+
+function formatSalary(salary?: number): string {
+  return salary === undefined ? '$—' : `$${salary.toLocaleString()}`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
