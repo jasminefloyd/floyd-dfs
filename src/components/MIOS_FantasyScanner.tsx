@@ -188,22 +188,26 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                 disabled={loading}
                 className="sr-only"
               />
-              <span className="flex items-start gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-xs font-black text-green-700">
-                  {sport.slice(0, 3).toUpperCase()}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-bold text-gray-950">{slate.slate_name}</span>
-                  <span className="mt-1 block text-xs text-gray-500">
-                    {slate.contest_date}
-                    {slate.start_time ? ` at ${formatSlateTime(slate.start_time)}` : ''}
+              <span className="block">
+                <span className="flex items-start gap-3">
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-sm font-black text-green-700">
+                    {sport.slice(0, 3).toUpperCase()}
                   </span>
-                  <span className="mt-1 block text-xs text-gray-500">
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-words text-sm font-black leading-tight text-gray-950">{slate.slate_name}</span>
+                    <span className="mt-1 block text-xs font-medium text-gray-500">
+                      {slate.contest_date}
+                      {slate.start_time ? ` at ${formatSlateTime(slate.start_time)}` : ''}
+                    </span>
+                  </span>
+                </span>
+                <span className="mt-3 flex flex-wrap items-center gap-2 pl-14">
+                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
+                    {slate.status === 'schedule_derived' ? 'Estimated salaries' : `${slate.salary_count} salaries`}
+                  </span>
+                  <span className="min-w-0 break-words text-xs text-gray-500">
                     {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
                   </span>
-                </span>
-                <span className="shrink-0 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
-                  {slate.status === 'schedule_derived' ? 'Estimated salaries' : `${slate.salary_count} salaries`}
                 </span>
               </span>
             </label>
