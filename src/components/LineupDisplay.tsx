@@ -108,7 +108,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
 
             {(lineup.simulation_ev || lineup.ceiling_score || lineup.leverage_score) ? (
               <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
-                <Metric label="Sim EV" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
+                <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                 <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
                 <Metric label="Top 10" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
                 <Metric label="Leverage" value={lineup.leverage_score?.toFixed(1) ?? '—'} />

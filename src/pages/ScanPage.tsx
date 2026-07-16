@@ -165,7 +165,7 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
 }
 
 function lineupNarrative(lineup: DraftLineup, idx: number): string {
-  const ev = lineup.simulation_ev !== undefined ? `${lineup.simulation_ev.toFixed(1)} simulated EV` : `${lineup.projected_points.toFixed(1)} projected points`;
-  const leverage = lineup.leverage_score !== undefined ? `, ${lineup.leverage_score.toFixed(1)} leverage` : '';
-  return `Lineup #${idx + 1} ranked by ${ev}${leverage}, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.`;
+  const expectedFpts = lineup.simulation_ev !== undefined ? lineup.simulation_ev : lineup.projected_points;
+  const leverage = lineup.leverage_score !== undefined ? ` Secondary leverage score: ${lineup.leverage_score.toFixed(1)}.` : '';
+  return `Lineup #${idx + 1} ranked by ${expectedFpts.toFixed(1)} expected total FPTS, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.${leverage}`;
 }

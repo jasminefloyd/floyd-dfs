@@ -124,24 +124,21 @@ export function generateLineups(
       ? generateShowdownLineups(sortedPlayers, sport)
       : generateClassicLineups(sortedPlayers, sport);
 
-  // Score and rank by confidence
+  // Score and rank by highest probable total fantasy points.
   const rankedLineups = candidates
     .filter((lineup) => validateLineup(lineup, contestType))
     .map((lineup) => ({
       ...lineup,
       confidence_score: calculateLineupConfidence(lineup)
     }))
-    .sort((a, b) => b.confidence_score - a.confidence_score)
+    .sort((a, b) => lineupRankScore(b) - lineupRankScore(a))
     .slice(0, 5); // Top 5
 
-  // Apply risk tolerance filter
-  if (riskTolerance === 'conservative') {
-    return rankedLineups.filter((lu) => lu.confidence_score > 0.75);
-  } else if (riskTolerance === 'aggressive') {
+  // Return the highest expected-FPTS lineups; risk tolerance affects the number shown.
+  if (riskTolerance === 'aggressive') {
     return rankedLineups; // Keep all
-  } else {
-    return rankedLineups.slice(0, 3); // Balanced: top 3
   }
+  return rankedLineups.slice(0, 3); // Conservative/balanced: top 3
 }
 
 function generateShowdownLineups(players: LineupPlayerDraft[], _sport: string): DraftLineup[] {
@@ -320,4 +317,10 @@ function calculateLineupConfidence(lineup: DraftLineup): number {
   const injuryPenalty = injuryCount * 0.05;
 
   return Math.min(Math.max(avgConfidence + efficiencyBoost - injuryPenalty, 0), 1);
+}
+
+function lineupRankScore(lineup: DraftLineup): number {
+  const expectedFpts = lineup.simulation_ev ?? lineup.projected_points;
+  const ceiling = lineup.ceiling_score ?? lineup.projected_points;
+  return expectedFpts * 100 + ceiling * 0.4 + lineup.confidence_score * 2;
 }

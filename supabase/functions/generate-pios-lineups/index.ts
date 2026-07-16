@@ -271,9 +271,8 @@ function generateLineups(
     }))
     .sort((a, b) => lineupRankScore(b, riskTolerance) - lineupRankScore(a, riskTolerance));
 
-  if (riskTolerance === 'conservative') return rankedLineups.filter((lineup) => lineup.confidence_score > 0.68).slice(0, 5);
-  if (riskTolerance === 'aggressive') return diversifyLineups(rankedLineups, 5);
-  return diversifyLineups(rankedLineups, 3);
+  if (riskTolerance === 'aggressive') return rankedLineups.slice(0, 5);
+  return rankedLineups.slice(0, 3);
 }
 
 function generateShowdownLineups(players: LineupPlayerDraft[], rosterSize = 6): DraftLineup[] {
@@ -565,13 +564,13 @@ function simulationIterations(riskTolerance: string): number {
 function lineupRankScore(lineup: DraftLineup, riskTolerance: string): number {
   const ev = lineup.simulation_ev ?? lineup.projected_points;
   const ceiling = lineup.ceiling_score ?? lineup.projected_points;
-  const leverage = lineup.leverage_score ?? 0;
   const winRate = lineup.win_rate ?? 0;
-  const ownershipPenalty = (lineup.ownership_sum ?? 0) * 2;
+  const confidence = lineup.confidence_score ?? 0;
+  const floor = lineup.floor_score ?? 0;
 
-  if (riskTolerance === 'conservative') return ev + (lineup.floor_score ?? 0) * 0.25 + lineup.confidence_score * 6;
-  if (riskTolerance === 'aggressive') return ceiling * 0.5 + ev * 0.35 + leverage * 0.3 + winRate * 100 - ownershipPenalty;
-  return ev * 0.6 + ceiling * 0.2 + leverage * 0.15 + winRate * 60 - ownershipPenalty;
+  if (riskTolerance === 'conservative') return ev * 100 + floor * 0.8 + confidence * 4;
+  if (riskTolerance === 'aggressive') return ev * 100 + ceiling * 0.8 + winRate * 8;
+  return ev * 100 + ceiling * 0.4 + winRate * 5 + confidence * 2;
 }
 
 function classifyLineup(lineup: DraftLineup): DraftLineup['lineup_type'] {
@@ -580,24 +579,6 @@ function classifyLineup(lineup: DraftLineup): DraftLineup['lineup_type'] {
   if (ownership < 0.85 && leverage > 0) return 'contrarian_tournament';
   if (lineup.players.some((player) => ['questionable', 'day_to_day'].includes(player.injury_status))) return 'late_swap_candidate';
   return 'high_ev';
-}
-
-function diversifyLineups(lineups: DraftLineup[], limit: number): DraftLineup[] {
-  const selected: DraftLineup[] = [];
-  for (const lineup of lineups) {
-    const playerIds = new Set(lineup.players.map((player) => player.player_id));
-    const overlapsTooMuch = selected.some((existing) => {
-      const existingIds = new Set(existing.players.map((player) => player.player_id));
-      let overlap = 0;
-      for (const playerId of playerIds) {
-        if (existingIds.has(playerId)) overlap += 1;
-      }
-      return overlap >= Math.max(4, lineup.players.length - 1);
-    });
-    if (!overlapsTooMuch) selected.push(lineup);
-    if (selected.length >= limit) break;
-  }
-  return selected.length ? selected : lineups.slice(0, limit);
 }
 
 Deno.serve(async (req) => {
