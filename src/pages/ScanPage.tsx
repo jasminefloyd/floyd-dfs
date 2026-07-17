@@ -3,6 +3,7 @@ import { MIOS_FantasyScanner, type ScanParams } from '../components/MIOS_Fantasy
 import { LineupDisplay, type Lineup } from '../components/LineupDisplay';
 import { LineupComparison } from '../components/LineupComparison';
 import { PivotSuggestions } from '../components/PivotSuggestions';
+import { InjuryReport } from '../components/InjuryReport';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
 import { useToast } from '../hooks/useToast';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
@@ -53,7 +54,8 @@ export default function ScanPage() {
             sport: params.sport,
             contestType: params.contestType,
             excludedPlayers: params.excludedPlayers,
-            riskTolerance: params.riskTolerance
+            riskTolerance: params.riskTolerance,
+            lineupMode: params.lineupMode
           },
           piosController.signal
         );
@@ -124,6 +126,7 @@ export default function ScanPage() {
                   </div>
                 </div>
               </div>
+              <InjuryReport manifest={manifest} />
               {manifest?.data_warnings?.length ? (
                 <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
                   {manifest.data_warnings.map((warning) => (

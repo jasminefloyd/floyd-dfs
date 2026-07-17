@@ -12,6 +12,7 @@ export interface ScanParams {
   slate: DraftKingsSlate;
   excludedPlayers: string[];
   riskTolerance: string;
+  lineupMode: string;
 }
 
 interface MIOS_FantasyScannerProps {
@@ -25,11 +26,11 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const [contestType, setContestType] = useState('showdown');
   const [slates, setSlates] = useState<DraftKingsSlate[]>([]);
   const [selectedContestId, setSelectedContestId] = useState('');
-  const [estimatedContestDate, setEstimatedContestDate] = useState(new Date().toISOString().split('T')[0]);
   const [slateLoading, setSlateLoading] = useState(false);
   const [slateError, setSlateError] = useState<string | null>(null);
   const [excludedPlayers, setExcludedPlayers] = useState('');
   const [riskTolerance, setRiskTolerance] = useState('balanced');
+  const [lineupMode, setLineupMode] = useState('max_fpts');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -40,8 +41,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
     listDraftKingsSlates({ sport, contestType }, controller.signal)
       .then((nextSlates) => {
-        setSlates(nextSlates);
-        setSelectedContestId(nextSlates[0]?.contest_id ?? '');
+        const eligibleSlates = nextSlates.filter(isWithinScanWindow);
+        setSlates(eligibleSlates);
+        setSelectedContestId(eligibleSlates[0]?.contest_id ?? '');
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -55,15 +57,13 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   }, [sport, contestType]);
 
   const handleScan = () => {
-    const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId) ?? (
-      slates.length === 0 && !slateLoading ? buildEstimatedSlate(sport, contestType, estimatedContestDate) : null
-    );
+    const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId) ?? null;
     if (!selectedSlate) {
-      onValidationError?.(['Choose an imported DraftKings slate or use the estimated scan fallback.']);
+      onValidationError?.(['Choose a DraftKings slate with verified salary data.']);
       return;
     }
 
-    const errors = validateScanInput({ sport, contestType, contestDate: selectedSlate.contest_date, riskTolerance });
+    const errors = validateScanInput({ sport, contestType, contestDate: selectedSlate.contest_date, riskTolerance, lineupMode });
     if (errors.length) {
       onValidationError?.(errors);
       return;
@@ -77,13 +77,13 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       gameId: selectedSlate.game_ids[0],
       slate: selectedSlate,
       excludedPlayers: parseExcludedPlayers(excludedPlayers),
-      riskTolerance
+      riskTolerance,
+      lineupMode
     });
   };
 
   const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId);
-  const canUseEstimatedScan = !slateLoading && !slateError && slates.length === 0;
-  const scanDisabled = loading || slateLoading || (!selectedSlate && !canUseEstimatedScan);
+  const scanDisabled = loading || slateLoading || !selectedSlate;
 
   return (
     <div className="space-y-5 text-gray-900">
@@ -156,61 +156,52 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         ) : null}
 
         {!slateLoading && !slateError && slates.length === 0 ? (
-          <div className="space-y-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
             <p>{availabilityMessage(sport, contestType)}</p>
-            <label className="block">
-              <span className="mb-1 block text-xs font-bold uppercase tracking-wide text-gray-700">Estimated Contest Date</span>
-              <input
-                type="date"
-                value={estimatedContestDate}
-                onChange={(e) => setEstimatedContestDate(e.target.value)}
-                disabled={loading}
-                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 transition-colors duration-[var(--transition-fast)] focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500"
-              />
-            </label>
           </div>
         ) : null}
 
         <div className="space-y-2">
-          {slates.map((slate) => (
-            <label
-              key={slate.contest_id}
-              className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
-                selectedContestId === slate.contest_id ? 'border-green-600 bg-green-50 ring-2 ring-green-500/20' : 'border-gray-200 bg-white hover:border-green-500'
-              }`}
-            >
-              <input
-                type="radio"
-                name="selectedSlate"
-                value={slate.contest_id}
-                checked={selectedContestId === slate.contest_id}
-                onChange={(e) => setSelectedContestId(e.target.value)}
-                disabled={loading}
-                className="sr-only"
-              />
-              <span className="block">
-                <span className="flex items-start gap-3">
-                  <SportMark sport={sport} logoUrl={slateSportLogoUrl(slate)} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-words text-sm font-black leading-tight text-gray-950">{slate.slate_name}</span>
-                    <span className="mt-1 block text-xs font-medium text-gray-500">
-                      {slate.contest_date}
-                      {slate.start_time ? ` at ${formatSlateTime(slate.start_time)}` : ''}
+          {slates.map((slate) => {
+            const matchup = slateMatchup(slate);
+            return (
+              <label
+                key={slate.contest_id}
+                className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
+                  selectedContestId === slate.contest_id ? 'border-green-600 bg-green-50 ring-2 ring-green-500/20' : 'border-gray-200 bg-white hover:border-green-500'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="selectedSlate"
+                  value={slate.contest_id}
+                  checked={selectedContestId === slate.contest_id}
+                  onChange={(e) => setSelectedContestId(e.target.value)}
+                  disabled={loading}
+                  className="sr-only"
+                />
+                <span className="block">
+                  <span className="flex items-start gap-3">
+                    <MatchupMark sport={sport} teams={matchup.teams} fallbackLogoUrl={slateSportLogoUrl(slate)} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block break-words text-sm font-black leading-tight text-gray-950">{matchup.label}</span>
+                      <span className="mt-1 block text-xs font-medium text-gray-500">
+                        {formatSlateDateTime(slate.start_time ?? slate.contest_date)}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="mt-3 flex flex-wrap items-center gap-2 pl-14">
+                    <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
+                      {salaryStatusLabel(slate)}
+                    </span>
+                    <span className="min-w-0 break-words text-xs text-gray-500">
+                      {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
                     </span>
                   </span>
                 </span>
-                <span className="mt-3 flex flex-wrap items-center gap-2 pl-14">
-                  <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
-                    {slate.status === 'schedule_derived' ? 'Estimated salaries' : `${slate.salary_count} salaries`}
-                  </span>
-                  <span className="min-w-0 break-words text-xs text-gray-500">
-                    {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
-                  </span>
-                  <SlateTeamLogos slate={slate} />
-                </span>
-              </span>
-            </label>
-          ))}
+              </label>
+            );
+          })}
         </div>
       </div>
 
@@ -224,6 +215,36 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
           className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 transition-colors duration-[var(--transition-fast)] placeholder:text-gray-400 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500"
           rows={3}
         />
+      </div>
+
+      <div>
+        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Lineup Mode</label>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            ['max_fpts', 'Max FPTS'],
+            ['balanced_ev', 'Balanced EV'],
+            ['tournament', 'Tournament'],
+            ['safe', 'Safe'],
+          ].map(([mode, label]) => (
+            <label
+              key={mode}
+              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-xs font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
+                lineupMode === mode ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
+              }`}
+            >
+              <input
+                type="radio"
+                name="lineupMode"
+                value={mode}
+                checked={lineupMode === mode}
+                onChange={(e) => setLineupMode(e.target.value)}
+                disabled={loading}
+                className="sr-only"
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
       </div>
 
       <div>
@@ -253,53 +274,69 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         disabled={scanDisabled}
         className="w-full rounded-md bg-green-600 px-4 py-3 font-black uppercase tracking-wide text-white transition-colors duration-[var(--transition-fast)] hover:bg-green-700 disabled:bg-gray-300 disabled:text-gray-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
       >
-        {loading ? 'Scanning...' : canUseEstimatedScan ? 'Run Estimated Scan' : 'Run Scan'}
+        {loading ? 'Scanning...' : 'Run Scan'}
       </button>
     </div>
   );
 }
 
-function buildEstimatedSlate(sport: string, contestType: string, contestDate: string): DraftKingsSlate {
-  return {
-    contest_id: `estimated-${sport}-${contestType}-${contestDate}`,
-    external_contest_id: null,
-    sport,
-    contest_type: contestType,
-    contest_date: contestDate,
-    slate_name: `${sport.toUpperCase()} ${capitalize(contestType)} Estimated Slate`,
-    game_ids: [],
-    salary_cap: 50_000,
-    status: 'estimated',
-    start_time: null,
-    salary_count: 0,
-    data: { source: 'estimated_fallback' },
-    updated_at: new Date().toISOString(),
-  };
-}
+function isWithinScanWindow(slate: DraftKingsSlate): boolean {
+  const rawValue = slate.start_time ?? `${slate.contest_date}T00:00:00`;
+  const startTime = new Date(rawValue);
+  if (Number.isNaN(startTime.getTime())) return false;
 
-function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
+  const now = new Date();
+  const latestAllowedTime = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+  return startTime >= now && startTime <= latestAllowedTime;
 }
 
 function availabilityMessage(sport: string, contestType: string): string {
   const label = `${sport.toUpperCase()} ${contestType}`;
-  if (sport === 'nfl') {
-    return `No live or near-term ${label} slates were found. NFL is outside its regular slate window, so use an estimated scan only for testing.`;
-  }
-  return `No live DraftKings or near-term free schedule slates were found for ${label}. You can still run an estimated scan while salary/slate data is unavailable.`;
+  return `No DraftKings ${label} slates with verified salary data were found for the next 48 hours.`;
 }
 
-function formatSlateTime(value: string): string {
+function formatSlateDateTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const datePart = date.toLocaleDateString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: 'numeric',
+  });
+  const timePart = date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).toLowerCase();
+  return `${datePart} at ${timePart}`;
 }
 
-function SportMark({ sport, logoUrl }: { sport: string; logoUrl?: string }) {
-  if (logoUrl) {
+interface SlateTeam {
+  abbreviation?: string | null;
+  display_name?: string | null;
+  logo_url?: string | null;
+}
+
+function MatchupMark({ sport, teams, fallbackLogoUrl }: { sport: string; teams: SlateTeam[]; fallbackLogoUrl?: string }) {
+  const logos = teams.map((team) => team.logo_url).filter((url): url is string => Boolean(url)).slice(0, 2);
+  if (logos.length) {
+    return (
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center -space-x-3 rounded-md border border-green-200 bg-white p-1">
+        {logos.map((logoUrl) => (
+          <img
+            key={logoUrl}
+            src={logoUrl}
+            alt=""
+            className="h-7 w-7 rounded-full border border-white bg-white object-contain shadow-[var(--shadow-subtle)]"
+          />
+        ))}
+      </span>
+    );
+  }
+
+  if (fallbackLogoUrl) {
     return (
       <img
-        src={logoUrl}
+        src={fallbackLogoUrl}
         alt=""
         className="h-11 w-11 shrink-0 rounded-md border border-green-200 bg-white object-contain p-1"
       />
@@ -309,24 +346,6 @@ function SportMark({ sport, logoUrl }: { sport: string; logoUrl?: string }) {
   return (
     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-sm font-black text-green-700">
       {sport.slice(0, 3).toUpperCase()}
-    </span>
-  );
-}
-
-function SlateTeamLogos({ slate }: { slate: DraftKingsSlate }) {
-  const logos = slateTeamLogoUrls(slate).slice(0, 4);
-  if (!logos.length) return null;
-
-  return (
-    <span className="flex items-center -space-x-2">
-      {logos.map((logoUrl) => (
-        <img
-          key={logoUrl}
-          src={logoUrl}
-          alt=""
-          className="h-6 w-6 rounded-full border border-white bg-white object-contain p-0.5 shadow-[var(--shadow-subtle)]"
-        />
-      ))}
     </span>
   );
 }
@@ -347,11 +366,49 @@ function sportLogoFallback(sport: string): string | undefined {
   return logos[sport];
 }
 
-function slateTeamLogoUrls(slate: DraftKingsSlate): string[] {
+function slateMatchup(slate: DraftKingsSlate): { label: string; teams: SlateTeam[] } {
+  const teams = slateTeams(slate);
+  if (teams.length >= 2) {
+    return {
+      label: `${teamLabel(teams[0])} vs ${teamLabel(teams[1])}`,
+      teams,
+    };
+  }
+  return {
+    label: slate.slate_name,
+    teams,
+  };
+}
+
+function slateTeams(slate: DraftKingsSlate): SlateTeam[] {
   const data = slate.data as Record<string, any> | undefined;
+  const competition = Array.isArray(data?.competitions) ? data.competitions[0] : undefined;
+  if (competition?.awayTeam || competition?.homeTeam) {
+    return [competition.awayTeam, competition.homeTeam]
+      .filter(Boolean)
+      .map((team: Record<string, unknown>) => ({
+        abbreviation: typeof team.abbreviation === 'string' ? team.abbreviation : null,
+        display_name: team.teamName && team.city ? `${team.city} ${team.teamName}` : typeof team.teamName === 'string' ? team.teamName : null,
+        logo_url: typeof team.teamImageUrl === 'string' ? team.teamImageUrl : null,
+      }));
+  }
+
   const events = Array.isArray(data?.events) ? data.events : data?.event ? [data.event] : [];
-  const urls = events.flatMap((event) => Array.isArray(event?.teams)
-    ? event.teams.map((team: Record<string, unknown>) => team.logo_url)
-    : []);
-  return [...new Set(urls.filter((url): url is string => typeof url === 'string' && url.length > 0))];
+  const eventTeams = events.flatMap((event) => Array.isArray(event?.teams) ? event.teams : []);
+  return eventTeams.map((team: Record<string, unknown>) => ({
+    abbreviation: typeof team.abbreviation === 'string' ? team.abbreviation : null,
+    display_name: typeof team.display_name === 'string' ? team.display_name : null,
+    logo_url: typeof team.logo_url === 'string' ? team.logo_url : null,
+  }));
+}
+
+function teamLabel(team: SlateTeam): string {
+  return team.abbreviation || team.display_name || 'Team';
+}
+
+function salaryStatusLabel(slate: DraftKingsSlate): 'Live' | 'Projected' {
+  const data = slate.data as Record<string, unknown> | undefined;
+  return slate.status === 'draftkings_live' && slate.salary_count > 0 && data?.source === 'draftkings_unofficial_json'
+    ? 'Live'
+    : 'Projected';
 }

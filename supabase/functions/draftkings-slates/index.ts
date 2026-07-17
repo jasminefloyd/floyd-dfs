@@ -43,6 +43,10 @@ interface DraftKingsDraftable {
   salary?: number;
   status?: string;
   teamAbbreviation?: string;
+  playerImage160?: string;
+  playerImage50?: string;
+  altPlayerImage160?: string;
+  altPlayerImage50?: string;
   rosterSlotId?: number;
   competition?: {
     competitionId?: number;
@@ -58,6 +62,11 @@ interface DraftKingsDraftable {
     id?: number;
     value?: string;
   }>;
+  playerGameAttributes?: Array<{
+    id?: number;
+    value?: string;
+  }>;
+  isDisabled?: boolean;
 }
 
 interface DraftKingsDraftablesResponse {
@@ -66,46 +75,8 @@ interface DraftKingsDraftablesResponse {
     competitionId?: number;
     name?: string;
     startTime?: string;
-    homeTeam?: { abbreviation?: string; teamName?: string; city?: string };
-    awayTeam?: { abbreviation?: string; teamName?: string; city?: string };
-  }>;
-}
-
-interface EspnEvent {
-  id: string;
-  date: string;
-  name: string;
-  shortName?: string;
-  competitions?: Array<{
-    odds?: Array<{
-      provider?: { name?: string; displayName?: string };
-      details?: string;
-      overUnder?: number;
-      spread?: number;
-    }>;
-    competitors?: Array<{
-      homeAway?: string;
-      team?: {
-        abbreviation?: string;
-        displayName?: string;
-        shortDisplayName?: string;
-        logos?: Array<{
-          href?: string;
-          rel?: string[];
-        }>;
-      };
-    }>;
-  }>;
-}
-
-interface EspnScoreboardResponse {
-  events?: EspnEvent[];
-  week?: { number?: number };
-  leagues?: Array<{
-    logos?: Array<{
-      href?: string;
-      rel?: string[];
-    }>;
+    homeTeam?: { abbreviation?: string; teamName?: string; city?: string; teamImageUrl?: string; darkModeImageUrl?: string };
+    awayTeam?: { abbreviation?: string; teamName?: string; city?: string; teamImageUrl?: string; darkModeImageUrl?: string };
   }>;
 }
 
@@ -117,7 +88,12 @@ const corsHeaders = {
 
 const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'f1']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
-const SCHEDULE_FALLBACK_LOOKAHEAD_DAYS = 10;
+const SLATE_LOOKAHEAD_HOURS = 48;
+const DRAFTKINGS_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'Mozilla/5.0 (compatible; fantasy-ai/1.0; +https://floyd-dfs.vercel.app)',
+  Referer: 'https://www.draftkings.com/',
+};
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -174,9 +150,9 @@ async function fetchDraftKingsLiveSlates(sport: string, contestType: string): Pr
   if (!sportCode) return [];
 
   const response = await fetch(`https://www.draftkings.com/lobby/getcontests?sport=${encodeURIComponent(sportCode)}`, {
-    headers: { Accept: 'application/json' },
+    headers: DRAFTKINGS_HEADERS,
   });
-  if (!response.ok) return [];
+  if (!response.ok) throw new Error(`DraftKings lobby fetch failed: ${response.status}`);
 
   const data = await response.json() as DraftKingsContestResponse;
   const contests = data.Contests ?? [];
@@ -199,9 +175,9 @@ async function fetchDraftKingsLiveSlates(sport: string, contestType: string): Pr
 
 async function fetchDraftKingsWnbaSlates(contestType: string): Promise<DraftKingsSlate[]> {
   const response = await fetch('https://www.draftkings.com/lobby/getcontests?sport=NBA', {
-    headers: { Accept: 'application/json' },
+    headers: DRAFTKINGS_HEADERS,
   });
-  if (!response.ok) return [];
+  if (!response.ok) throw new Error(`DraftKings lobby fetch failed: ${response.status}`);
 
   const data = await response.json() as DraftKingsContestResponse;
   const contests = data.Contests ?? [];
@@ -236,6 +212,7 @@ function contestMatchesSport(contest: DraftKingsContest, sport: string): boolean
 
 function contestMatchesType(contest: DraftKingsContest, sport: string, contestType: string): boolean {
   const text = `${contest.gameType ?? ''} ${contest.n ?? ''}`.toLowerCase();
+  if (text.includes('snake') || text.includes('single stat') || text.includes('best ball')) return false;
   if (contestType === 'showdown') return text.includes('showdown') || text.includes('captain');
   if (sport === 'wnba') return text.includes('wnba') && !text.includes('showdown') && !text.includes('captain');
   return text.includes('classic') && !text.includes('showdown') && !text.includes('captain');
@@ -252,7 +229,7 @@ async function fetchDraftKingsDraftGroupSlate(
   contest: DraftKingsContest,
 ): Promise<DraftKingsSlate | null> {
   const response = await fetch(`https://api.draftkings.com/draftgroups/v1/draftgroups/${contest.dg}/draftables?format=json`, {
-    headers: { Accept: 'application/json' },
+    headers: DRAFTKINGS_HEADERS,
   });
   if (!response.ok) return null;
 
@@ -272,7 +249,8 @@ async function fetchDraftKingsDraftGroupSlate(
     competition.awayTeam?.abbreviation,
   ].filter((value): value is string => Boolean(value))));
 
-  const normalizedSalaries = normalizeDraftKingsSalaries(draftables, contestType);
+  const rosterSize = draftKingsRosterSize(contest) ?? (contestType === 'showdown' ? 6 : null);
+  const normalizedSalaries = normalizeDraftKingsSalaries(draftables, sport, contestType, rosterSize);
   if (!normalizedSalaries.length) return null;
 
   return {
@@ -294,7 +272,7 @@ async function fetchDraftKingsDraftGroupSlate(
       contest_name: contest.n,
       game_type: contest.gameType ?? null,
       game_type_id: contest.gameTypeId ?? null,
-      roster_size: draftKingsRosterSize(contest),
+      roster_size: rosterSize,
       team_abbreviations: teams,
       competitions,
       salaries: normalizedSalaries,
@@ -303,7 +281,19 @@ async function fetchDraftKingsDraftGroupSlate(
   };
 }
 
-function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], contestType: string) {
+function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: string, contestType: string, rosterSize: number | null) {
+  const activeDraftables = draftables.filter((draftable) => {
+    const playerName = draftable.displayName ?? `${draftable.firstName ?? ''} ${draftable.lastName ?? ''}`.trim();
+    const position = draftable.position ?? '';
+    const salary = Number(draftable.salary);
+    if (!playerName || !position || !Number.isFinite(salary) || salary <= 0) return false;
+    if (draftable.isDisabled) return false;
+    if (String(draftable.status ?? '').toLowerCase() === 'il') return false;
+    return true;
+  });
+  const starterDraftables = activeDraftables.filter(hasDraftKingsStarterSignal);
+  const minimumRows = rosterSize ?? (contestType === 'showdown' ? 6 : 1);
+  const shouldUseStarterOnly = sport === 'mlb' && starterDraftables.length >= minimumRows;
   const byPlayerPosition = new Map<string, {
     player_id: string | null;
     player_name: string;
@@ -312,16 +302,21 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], contestT
     salary: number;
     game_id: string | null;
     projected_points?: number;
+    status?: string | null;
+    is_disabled?: boolean;
+    is_confirmed_starter?: boolean;
+    image_url?: string | null;
+    team_logo_url?: string | null;
   }>();
+  const teamLogos = teamLogoMap(draftables);
 
-  for (const draftable of draftables) {
+  for (const draftable of shouldUseStarterOnly ? starterDraftables : activeDraftables) {
     const playerName = draftable.displayName ?? `${draftable.firstName ?? ''} ${draftable.lastName ?? ''}`.trim();
     const position = draftable.position ?? '';
     const salary = Number(draftable.salary);
-    if (!playerName || !position || !Number.isFinite(salary) || salary <= 0) continue;
 
     const key = `${draftable.playerId ?? draftable.playerDkId ?? playerName}:${position}`;
-    const projectedPoints = Number(draftable.draftStatAttributes?.find((attr) => attr.id === 90)?.value);
+    const projectedPoints = Number(draftable.draftStatAttributes?.find((attr) => attr.id === 90 || attr.id === 408)?.value);
     const row = {
       player_id: draftable.playerId ? String(draftable.playerId) : draftable.playerDkId ? String(draftable.playerDkId) : null,
       player_name: playerName,
@@ -330,6 +325,11 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], contestT
       salary: contestType === 'showdown' && isCaptainSlot(draftable.rosterSlotId) ? Math.round(salary / 1.5) : salary,
       game_id: draftable.competition?.competitionId ? String(draftable.competition.competitionId) : null,
       projected_points: Number.isFinite(projectedPoints) ? projectedPoints : undefined,
+      status: draftable.status ?? null,
+      is_disabled: draftable.isDisabled ?? false,
+      is_confirmed_starter: hasDraftKingsStarterSignal(draftable),
+      image_url: draftable.playerImage160 || draftable.playerImage50 || draftable.altPlayerImage160 || draftable.altPlayerImage50 || null,
+      team_logo_url: teamLogos.get(String(draftable.teamAbbreviation ?? '').toUpperCase()) ?? null,
     };
 
     const existing = byPlayerPosition.get(key);
@@ -337,6 +337,33 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], contestT
   }
 
   return [...byPlayerPosition.values()];
+}
+
+function teamLogoMap(draftables: DraftKingsDraftable[]): Map<string, string> {
+  const logos = new Map<string, string>();
+  for (const draftable of draftables) {
+    for (const competition of draftable.competitions ?? [draftable.competition].filter(Boolean)) {
+      const teams = [
+        (competition as any)?.homeTeam,
+        (competition as any)?.awayTeam,
+      ];
+      for (const team of teams) {
+        const abbreviation = String(team?.abbreviation ?? '').toUpperCase();
+        const logoUrl = team?.teamImageUrl ?? team?.darkModeImageUrl;
+        if (abbreviation && typeof logoUrl === 'string') logos.set(abbreviation, logoUrl);
+      }
+    }
+  }
+  return logos;
+}
+
+function hasDraftKingsStarterSignal(draftable: DraftKingsDraftable): boolean {
+  const truthyAttributeIds = new Set([1, 100, 110, 130, 137]);
+  return draftable.playerGameAttributes?.some((attribute) => (
+    attribute.id !== undefined &&
+    truthyAttributeIds.has(attribute.id) &&
+    String(attribute.value).toLowerCase() === 'true'
+  )) ?? false;
 }
 
 function isCaptainSlot(rosterSlotId?: number): boolean {
@@ -357,131 +384,24 @@ function parseDraftKingsDate(value?: string): string | null {
   return new Date(Number(match[1])).toISOString();
 }
 
-function espnSportPath(sport: string): string | null {
-  const paths: Record<string, string> = {
-    nba: 'basketball/nba',
-    wnba: 'basketball/wnba',
-    nfl: 'football/nfl',
-    mlb: 'baseball/mlb',
-    f1: 'racing/f1',
-  };
-  return paths[sport] ?? null;
-}
-
-async function fetchEspnScheduleSlates(sport: string, contestType: string): Promise<DraftKingsSlate[]> {
-  const path = espnSportPath(sport);
-  if (!path) return [];
-
-  const response = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${path}/scoreboard?dates=${espnDatesRange()}`);
-  if (!response.ok) return [];
-
-  const data = await response.json() as EspnScoreboardResponse;
-  const events = (data.events ?? []).filter((event) => isNearTermEvent(event.date));
-  const sportLogoUrl = preferredLogoUrl(data.leagues?.[0]?.logos);
-  if (!events.length) return [];
-
-  if (contestType === 'classic') {
-    return [...groupEventsByDate(events).entries()].map(([contestDate, dateEvents]) => ({
-      contest_id: `espn-${sport}-classic-${contestDate}`,
-      external_contest_id: null,
-      sport,
-      contest_type: contestType,
-      contest_date: contestDate,
-      slate_name: `${sport.toUpperCase()} Classic Schedule Slate - ${contestDate}${data.week?.number ? ` - Week ${data.week.number}` : ''}`,
-      game_ids: dateEvents.map((event) => event.id),
-      salary_cap: 50_000,
-      status: 'schedule_derived',
-      start_time: dateEvents[0]?.date ?? null,
-      salary_count: 0,
-      data: {
-        source: 'espn_scoreboard',
-        salary_source: 'estimated',
-        availability_window_days: SCHEDULE_FALLBACK_LOOKAHEAD_DAYS,
-        event_count: dateEvents.length,
-        sport_logo_url: sportLogoUrl,
-        events: dateEvents.map((event) => toSlateEvent(event, sport)),
-        team_abbreviations: unique(dateEvents.flatMap(teamAbbreviations)),
-      },
-      updated_at: new Date().toISOString(),
-    }));
-  }
-
-  return events.map((event) => {
-    const teams = teamAbbreviations(event);
-    return {
-      contest_id: `espn-${sport}-showdown-${event.id}`,
-      external_contest_id: event.id,
-      sport,
-      contest_type: contestType,
-      contest_date: toDateOnly(event.date),
-      slate_name: event.shortName ? `${event.shortName} Schedule Slate` : `${event.name} Schedule Slate`,
-      game_ids: [event.id],
-      salary_cap: 50_000,
-      status: 'schedule_derived',
-      start_time: event.date,
-      salary_count: 0,
-      data: {
-        source: 'espn_scoreboard',
-        salary_source: 'estimated',
-        availability_window_days: SCHEDULE_FALLBACK_LOOKAHEAD_DAYS,
-        sport_logo_url: sportLogoUrl,
-        event: toSlateEvent(event, sport),
-        team_abbreviations: teams,
-      },
-      updated_at: new Date().toISOString(),
-    };
-  });
-}
-
 function toDateOnly(value: string): string {
   return new Date(value).toISOString().slice(0, 10);
 }
 
-function todayDateOnly(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function addDaysDateOnly(dateOnly: string, days: number): string {
-  const date = new Date(`${dateOnly}T00:00:00.000Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-function espnDatesRange(): string {
-  const start = todayDateOnly().replaceAll('-', '');
-  const end = addDaysDateOnly(todayDateOnly(), SCHEDULE_FALLBACK_LOOKAHEAD_DAYS).replaceAll('-', '');
-  return `${start}-${end}`;
-}
-
-function isNearTermEvent(value: string): boolean {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return false;
-
-  const eventDate = toDateOnly(value);
-  const today = todayDateOnly();
-  const lookahead = addDaysDateOnly(today, SCHEDULE_FALLBACK_LOOKAHEAD_DAYS);
-
-  return eventDate >= today && eventDate <= lookahead;
-}
-
-function groupEventsByDate(events: EspnEvent[]): Map<string, EspnEvent[]> {
-  const byDate = new Map<string, EspnEvent[]>();
-  for (const event of events) {
-    const date = toDateOnly(event.date);
-    byDate.set(date, [...(byDate.get(date) ?? []), event]);
-  }
-  return byDate;
-}
-
-function slateDate(slate: DraftKingsSlate): string | null {
-  if (slate.start_time) return toDateOnly(slate.start_time);
-  if (slate.contest_date) return slate.contest_date;
-  return null;
+function slateStartTime(slate: DraftKingsSlate): Date | null {
+  const rawValue = slate.start_time ?? (slate.contest_date ? `${slate.contest_date}T00:00:00.000Z` : null);
+  if (!rawValue) return null;
+  const date = new Date(rawValue);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function slateMatchesRequest(slate: DraftKingsSlate, sport: string, contestType: string): boolean {
-  const date = slateDate(slate);
-  if (!date || date < todayDateOnly()) return false;
+  const startTime = slateStartTime(slate);
+  const now = new Date();
+  const latestAllowedTime = new Date(now.getTime() + SLATE_LOOKAHEAD_HOURS * 60 * 60 * 1000);
+  if (!startTime || startTime < now || startTime > latestAllowedTime) return false;
+  if (slate.salary_count <= 0) return false;
+  if (slate.status === 'schedule_derived' || slate.status === 'estimated') return false;
   if (String(slate.sport).toLowerCase() !== sport) return false;
   if (String(slate.contest_type).toLowerCase() !== contestType) return false;
   if (contestType === 'showdown' && slate.game_ids.length > 1) return false;
@@ -492,50 +412,6 @@ function filterSlatesForRequest(slates: DraftKingsSlate[], sport: string, contes
   return slates
     .filter((slate) => slateMatchesRequest(slate, sport, contestType))
     .sort((left, right) => String(left.start_time ?? left.contest_date).localeCompare(String(right.start_time ?? right.contest_date)));
-}
-
-function teamAbbreviations(event: EspnEvent): string[] {
-  return event.competitions?.[0]?.competitors
-    ?.map((competitor) => competitor.team?.abbreviation)
-    .filter((value): value is string => Boolean(value)) ?? [];
-}
-
-function toSlateEvent(event: EspnEvent, sport: string) {
-  const competition = event.competitions?.[0];
-  const odds = competition?.odds?.find((item) => {
-    const provider = `${item.provider?.name ?? ''} ${item.provider?.displayName ?? ''}`.toLowerCase();
-    return provider.includes('draft');
-  }) ?? competition?.odds?.[0];
-
-  return {
-    id: event.id,
-    name: event.name,
-    short_name: event.shortName ?? null,
-    start_time: event.date,
-    teams: competition?.competitors?.map((competitor) => ({
-      home_away: competitor.homeAway ?? null,
-      abbreviation: competitor.team?.abbreviation ?? null,
-      display_name: competitor.team?.displayName ?? competitor.team?.shortDisplayName ?? null,
-      logo_url: preferredLogoUrl(competitor.team?.logos) ?? teamLogoFallbackUrl(sport, competitor.team?.abbreviation),
-    })) ?? [],
-    odds: odds ? {
-      provider: odds.provider?.displayName ?? odds.provider?.name ?? null,
-      details: odds.details ?? null,
-      over_under: odds.overUnder ?? null,
-      spread: odds.spread ?? null,
-    } : null,
-  };
-}
-
-function preferredLogoUrl(logos: unknown): string | undefined {
-  if (!Array.isArray(logos)) return undefined;
-  const defaultLogo = logos.find((logo) => Array.isArray(logo?.rel) && logo.rel.includes('default'));
-  return defaultLogo?.href ?? logos.find((logo) => typeof logo?.href === 'string')?.href;
-}
-
-function teamLogoFallbackUrl(sport: string, abbreviation?: string): string | undefined {
-  if (!abbreviation || sport === 'f1') return undefined;
-  return `https://a.espncdn.com/i/teamlogos/${sport}/500/${abbreviation.toLowerCase()}.png`;
 }
 
 function unique(values: string[]): string[] {
@@ -568,9 +444,7 @@ Deno.serve(async (req) => {
     const liveDraftKingsSlates = storedSlates.length ? [] : filterSlatesForRequest(await fetchDraftKingsLiveSlates(sport, contestType), sport, contestType);
     const discoveredSlates = storedSlates.length
       ? storedSlates
-      : liveDraftKingsSlates.length
-        ? liveDraftKingsSlates
-        : filterSlatesForRequest(await fetchEspnScheduleSlates(sport, contestType), sport, contestType);
+      : liveDraftKingsSlates;
 
     return jsonResponse({
       slates: discoveredSlates,

@@ -15,7 +15,7 @@ export function PivotSuggestions({ lineups, manifest }: PivotSuggestionsProps) {
     .map((player) => {
       const replacement = manifest.player_roster
         .filter((candidate) => !lineupIds.has(candidate.id))
-        .filter((candidate) => candidate.injury_status !== 'out')
+        .filter((candidate) => candidate.injury_status === 'active')
         .filter((candidate) => candidate.position === player.position)
         .filter((candidate) => candidate.salary <= (player.salary ?? 0))
         .sort((a, b) => (b.projected_points ?? 0) - (a.projected_points ?? 0))[0];

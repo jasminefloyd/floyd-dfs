@@ -14,7 +14,7 @@ type CachedManifest = { manifest: MIOS_FantasyManifest; cachedAt: number };
 const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'f1']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const manifestCache = new Map<string, CachedManifest>();
-const FRESH_CACHE_MS = 2 * 60 * 60 * 1000;
+const SCAN_LOOKAHEAD_DAYS = 2;
 
 const SPORT_ROUTE: Record<string, { path: string; league: string; teamLimit: number }> = {
   nba: { path: 'basketball/nba', league: 'nba', teamLimit: 8 },
@@ -54,7 +54,10 @@ function validateContestDate(contestDate: string) {
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const latestAllowedDate = new Date(today);
+  latestAllowedDate.setDate(today.getDate() + SCAN_LOOKAHEAD_DAYS);
   if (selected < today) throw new Error('Contest date must be today or later');
+  if (selected > latestAllowedDate) throw new Error('Contest date must be today or within the next 2 days');
 }
 
 function normalizeInjuryStatus(raw: unknown): Player['injury_status'] {
@@ -239,6 +242,16 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
   };
 }
 
+// Legacy helpers are retained for reference, but this endpoint now fails closed
+// because verified DraftKings salary rows are required for scans.
+void collectNewsAndInjuries;
+void collectLast5Stats;
+void collectRedditSentiment;
+void dedupePlayers;
+void enoughForClassic;
+void collectRoster;
+void applyLast5Stats;
+
 export async function orchestrateMIOS_FantasyScan(
   sport: string,
   contestType: string,
@@ -249,76 +262,7 @@ export async function orchestrateMIOS_FantasyScan(
   if (!VALID_SPORTS.has(sport)) throw new Error(`Unsupported sport: ${sport}`);
   if (!VALID_CONTEST_TYPES.has(contestType)) throw new Error(`Unsupported contest type: ${contestType}`);
   validateContestDate(contestDate);
-
-  const sourceStatus: SourceStatus = {};
-  const warnings: string[] = [];
-
-  const [injuries, roster] = await Promise.all([
-    collectNewsAndInjuries(sport, contestDate),
-    collectRoster(sport, warnings, sourceStatus)
-  ]);
-  sourceStatus.espn_news = injuries.length ? 'partial' : 'partial';
-
-  let playerRoster = dedupePlayers(roster);
-  if (!playerRoster.length) warnings.push('No roster players were collected; lineups cannot be generated.');
-
-  if (playerRoster.some((player) => player.salary_source === 'estimated')) {
-    warnings.push('DraftKings salary import not found; using deterministic estimated salaries.');
-  }
-  if (!enoughForClassic(playerRoster, sport) && contestType === 'classic') {
-    warnings.push('Roster may not contain enough position depth for a complete classic lineup.');
-  }
-
-  const statAndSentiment = await Promise.all(
-    playerRoster.slice(0, 30).map(async (player) => {
-      const [stats, sentiment] = await Promise.all([
-        collectLast5Stats(player.id, sport),
-        collectRedditSentiment(player.name, sport)
-      ]);
-      return { playerId: player.id, stats, sentiment };
-    })
-  );
-
-  const statsByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.stats]));
-  playerRoster = playerRoster.map((player) => applyLast5Stats(player, statsByPlayer.get(player.id), sport));
-  sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
-  sourceStatus.reddit_sentiment = statAndSentiment.some((item) => item.sentiment?.source_status === 'ok') ? 'partial' : 'unavailable';
-
-  if (sourceStatus.espn_last5 === 'unavailable') {
-    warnings.push('Verified last-5 game stats are unavailable; using position baseline projections.');
-  }
-  if (sourceStatus.reddit_sentiment === 'unavailable') {
-    warnings.push('Reddit sentiment unavailable or blocked; sentiment score is neutral.');
-  }
-
-  const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({
-    player_id: item.player_id,
-    mentions: item.reddit_mentions,
-    sentiment_score: item.sentiment_score,
-    themes: item.key_themes
-  }));
-
-  return {
-    manifest_id: crypto.randomUUID(),
-    sport,
-    contest_type: contestType,
-    contest_date: contestDate,
-    player_roster: playerRoster,
-    injury_updates: playerRoster
-      .filter((player) => player.injury_status !== 'active')
-      .map((player) => ({
-        player_id: player.id,
-        status: player.injury_status,
-        confidence: 0.8
-      })),
-    vegas_context: [],
-    social_sentiment: socialSentiment,
-    catalysts: warnings.map((description) => ({ type: 'data_warning', description })),
-    narrative_seeds: warnings,
-    source_status: sourceStatus,
-    data_warnings: warnings,
-    collected_at: new Date().toISOString()
-  };
+  throw new Error('Legacy MIOS scan API is disabled because verified DraftKings salary rows are required.');
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -331,21 +275,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const auth = await validateApiAuth(req, userId);
     const effectiveUserId = auth.userId ?? userId;
-    const cached = manifestCache.get(cacheKey);
-    if (cached && Date.now() - cached.cachedAt < FRESH_CACHE_MS) {
-      res.status(200).json({
-        ...cached.manifest,
-        data_warnings: [
-          ...cached.manifest.data_warnings,
-          'Using cached scan data from the last two hours.'
-        ],
-        source_status: {
-          ...cached.manifest.source_status,
-          scan_cache: 'ok'
-        }
-      });
-      return;
-    }
 
     const manifest = await withTimeout(
       orchestrateMIOS_FantasyScan(sport, contestType, contestDate, effectiveUserId ?? ''),

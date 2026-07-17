@@ -49,7 +49,7 @@ export function SportsNewsTicker() {
     return Array.from({ length: repetitions }, () => items).flat();
   }, [items]);
   const tickerStyle = {
-    '--ticker-duration': `${Math.min(303, Math.max(202, tickerItems.length * 15.2))}s`,
+    '--ticker-duration': `${Math.min(606, Math.max(404, tickerItems.length * 30.4))}s`,
   } as CSSProperties;
 
   if (failed && !items.length) return null;

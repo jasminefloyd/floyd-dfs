@@ -110,9 +110,9 @@ export function generateLineups(
 ): DraftLineup[] {
   const excludedLower = excludedPlayers.map(normalizePlayerName);
 
-  // Filter roster: remove injured, remove excluded
+  // Filter roster: remove injury-flagged players and manual exclusions.
   const eligiblePlayers = roster.filter(
-    (p) => p.injury_status !== 'out' && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
+    (p) => p.injury_status === 'active' && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
   );
 
   // Sort by recent production (used as a proxy for confidence when picking within a slot)

@@ -8,6 +8,7 @@ export interface PiosLineupRequest {
   contestType: string;
   excludedPlayers: string[];
   riskTolerance: string;
+  lineupMode: string;
 }
 
 interface PiosFunctionResponse {
@@ -53,6 +54,7 @@ export async function invokePiosLineupGeneration(
       playerRoster: params.manifest.player_roster,
       excludedPlayers: params.excludedPlayers,
       riskTolerance: params.riskTolerance,
+      lineupMode: params.lineupMode,
       userId,
     }),
   });

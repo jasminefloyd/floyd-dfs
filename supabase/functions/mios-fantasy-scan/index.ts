@@ -21,6 +21,8 @@ interface Player {
   injury_note?: string;
   projection_source?: 'last_5' | 'position_baseline';
   projected_points?: number;
+  news_score?: number;
+  news_note?: string;
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
@@ -85,6 +87,13 @@ interface SlateEventData {
   } | null;
 }
 
+interface OddsContext {
+  game_id: string;
+  spread: number;
+  over_under: number;
+  implied_total: number;
+}
+
 interface AuthResult {
   userId: string | null;
   email: string | null;
@@ -99,6 +108,11 @@ interface DraftKingsSalaryRow {
   salary: number;
   game_id?: string | null;
   projected_points?: number;
+  status?: string | null;
+  is_disabled?: boolean;
+  is_confirmed_starter?: boolean;
+  image_url?: string | null;
+  team_logo_url?: string | null;
 }
 
 interface CachedSentimentRow {
@@ -108,6 +122,13 @@ interface CachedSentimentRow {
   sentiment_score: number;
   key_themes: string[];
   last_updated_at: string;
+}
+
+interface RedditFeedItem {
+  title: string;
+  content: string;
+  link: string;
+  updated: string;
 }
 
 const corsHeaders = {
@@ -120,8 +141,11 @@ const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'f1']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const manifestCache = new Map<string, { manifest: MiosManifest; cachedAt: number }>();
 const lastRequestAt = new Map<string, number>();
-const FRESH_CACHE_MS = 2 * 60 * 60 * 1000;
 const LAST5_CACHE_HOURS = 24;
+const SCAN_LOOKAHEAD_DAYS = 2;
+const SCAN_LOOKAHEAD_HOURS = 48;
+const REDDIT_RSS_CACHE_MS = 15 * 60 * 1000;
+const redditRssCache = new Map<string, { items: RedditFeedItem[]; cachedAt: number }>();
 
 const SPORT_ROUTE: Record<string, { path: string; teamLimit: number }> = {
   nba: { path: 'basketball/nba', teamLimit: 30 },
@@ -169,12 +193,23 @@ function envSupabaseServiceRoleKey() {
   return Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? Deno.env.get('SERVICE_ROLE_KEY');
 }
 
-function envRedditClientId() {
-  return Deno.env.get('REDDIT_CLIENT_ID') ?? Deno.env.get('VITE_REDDIT_CLIENT_ID');
+function envOddsApiKey() {
+  return Deno.env.get('THE_ODDS_API_KEY') ?? Deno.env.get('VITE_THE_ODDS_API_KEY');
 }
 
-function envRedditClientSecret() {
-  return Deno.env.get('REDDIT_CLIENT_SECRET') ?? Deno.env.get('VITE_REDDIT_CLIENT_SECRET');
+function envOddsApiBaseUrl() {
+  return Deno.env.get('THE_ODDS_API_BASE_URL') ?? Deno.env.get('VITE_ODDS_API_BASE_URL') ?? 'https://api.the-odds-api.com/v4';
+}
+
+function envBalldontlieApiKey() {
+  return Deno.env.get('BALLDONTLIE_API_KEY') ?? Deno.env.get('VITE_BALLDONTLIE_API_KEY') ?? Deno.env.get('VITE_BALLDONTLIE_KEY');
+}
+
+function envSportsDataIoKey() {
+  return Deno.env.get('SPORTSDATAIO_API_KEY')
+    ?? Deno.env.get('SPORTS_DATA_IO_KEY')
+    ?? Deno.env.get('VITE_SPORTSDATAIO_API_KEY')
+    ?? Deno.env.get('VITE_SPORTS_DATA_IO_KEY');
 }
 
 async function callSupabaseRpc<T>(
@@ -265,7 +300,22 @@ function validateContestDate(contestDate: string) {
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
+  const latestAllowedDate = new Date(today);
+  latestAllowedDate.setDate(today.getDate() + SCAN_LOOKAHEAD_DAYS);
   if (selected < today) throw new Error('Contest date must be today or later');
+  if (selected > latestAllowedDate) throw new Error('Contest date is outside the supported slate window');
+}
+
+function validateSlateStartWindow(slate?: DraftKingsSlate) {
+  if (!slate?.start_time) return;
+  const startTime = new Date(slate.start_time);
+  if (Number.isNaN(startTime.getTime())) throw new Error('Selected slate start time is invalid');
+
+  const now = new Date();
+  const latestAllowedTime = new Date(now.getTime() + SCAN_LOOKAHEAD_HOURS * 60 * 60 * 1000);
+  if (startTime < now || startTime > latestAllowedTime) {
+    throw new Error('Selected slate must start within the next 48 hours');
+  }
 }
 
 async function validateFunctionAuth(req: Request, requestedUserId: string): Promise<AuthResult> {
@@ -382,11 +432,22 @@ function slateSalaryRows(slate?: DraftKingsSlate): DraftKingsSalaryRow[] {
       salary: Number(row.salary),
       game_id: row.game_id ? String(row.game_id) : null,
       projected_points: Number.isFinite(Number(row.projected_points)) ? Number(row.projected_points) : undefined,
+      status: row.status ? String(row.status) : null,
+      is_disabled: Boolean(row.is_disabled),
+      is_confirmed_starter: Boolean(row.is_confirmed_starter),
+      image_url: row.image_url ? String(row.image_url) : null,
+      team_logo_url: row.team_logo_url ? String(row.team_logo_url) : null,
     }))
     .filter((row) => row.player_name && row.position && Number.isFinite(row.salary) && row.salary > 0);
 }
 
-function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRow[]) {
+function draftKingsStatusToInjuryStatus(row: DraftKingsSalaryRow): InjuryStatus {
+  const status = String(row.status ?? '').toLowerCase();
+  if (row.is_disabled || status === 'il' || status.includes('out')) return 'out';
+  return 'active';
+}
+
+function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRow[], sport: string): Player[] {
   if (!salaries.length) return players;
 
   const byPlayerId = new Map(salaries.filter((row) => row.player_id).map((row) => [String(row.player_id), row]));
@@ -406,22 +467,63 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       .filter(([, rows]) => rows.length === 1)
       .map(([name, rows]) => [name, rows[0]]),
   );
+  const usedSalaryRows = new Set<DraftKingsSalaryRow>();
 
-  return players.map((player) => {
+  const matchedPlayers = players.map((player) => {
     const salaryRow = byPlayerId.get(player.id)
       ?? byNamePosition.get(salaryKey(player.name, player.position))
       ?? byNameTeam.get(salaryNameTeamKey(player.name, player.team))
       ?? byUniqueName.get(normalizeName(player.name));
     if (!salaryRow) return player;
+    usedSalaryRows.add(salaryRow);
     return {
       ...player,
       salary: salaryRow.salary,
       salary_source: 'draftkings_import' as const,
+      injury_status: draftKingsStatusToInjuryStatus(salaryRow),
+      injury_note: salaryRow.status && salaryRow.status !== 'None' ? `DraftKings status: ${salaryRow.status}` : player.injury_note,
+      image_url: player.image_url ?? salaryRow.image_url ?? undefined,
+      team_logo_url: player.team_logo_url ?? salaryRow.team_logo_url ?? teamLogoFallbackUrl(sport, salaryRow.team ?? undefined),
       projected_points: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
         ? salaryRow.projected_points
         : player.projected_points,
     };
-  });
+  }).filter((player) => player.salary_source === 'draftkings_import');
+
+  const unmatchedPlayers = salaries
+    .filter((salaryRow) => !usedSalaryRows.has(salaryRow))
+    .map((salaryRow) => draftKingsSalaryRowToPlayer(salaryRow, sport));
+
+  return dedupePlayers([...matchedPlayers, ...unmatchedPlayers]);
+}
+
+function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): Player {
+  const position = normalizePosition(row.position, sport);
+  const projected = typeof row.projected_points === 'number' && row.projected_points > 0
+    ? row.projected_points
+    : baselineProjection(position, sport);
+
+  return {
+    id: row.player_id ? `dk:${row.player_id}` : `dk:${normalizeName(row.player_name)}:${position}`,
+    name: row.player_name,
+    team: row.team ?? '',
+    image_url: row.image_url ?? undefined,
+    team_logo_url: row.team_logo_url ?? teamLogoFallbackUrl(sport, row.team ?? undefined),
+    position,
+    salary: row.salary,
+    salary_source: 'draftkings_import',
+    injury_status: draftKingsStatusToInjuryStatus(row),
+    injury_note: row.status && row.status !== 'None' ? `DraftKings status: ${row.status}` : undefined,
+    projection_source: 'position_baseline',
+    projected_points: projected,
+    last_5_stats: {
+      avg_points: projected,
+      avg_fantasy_pts: projected,
+      trend: 'stable',
+      confidence: row.projected_points ? 0.62 : 0.45,
+      games: buildBaselineGames(projected),
+    },
+  };
 }
 
 function slateTeamAbbreviations(slate?: DraftKingsSlate): string[] {
@@ -449,8 +551,8 @@ function slateEvents(slate?: DraftKingsSlate): SlateEventData[] {
   return [];
 }
 
-function buildVegasContext(slate?: DraftKingsSlate): MiosManifest['vegas_context'] {
-  return slateEvents(slate)
+function buildVegasContext(slate?: DraftKingsSlate, fallbackOdds: OddsContext[] = []): MiosManifest['vegas_context'] {
+  const slateOdds = slateEvents(slate)
     .map((event) => {
       const overUnder = Number(event.odds?.over_under);
       const spread = Number(event.odds?.spread);
@@ -462,10 +564,163 @@ function buildVegasContext(slate?: DraftKingsSlate): MiosManifest['vegas_context
       };
     })
     .filter((context) => context.game_id);
+  return slateOdds.some((context) => context.over_under || context.spread) ? slateOdds : fallbackOdds;
 }
 
-function hasFreeOddsContext(slate?: DraftKingsSlate): boolean {
-  return buildVegasContext(slate).some((context) => context.over_under || context.spread);
+function hasFreeOddsContext(slate?: DraftKingsSlate, fallbackOdds: OddsContext[] = []): boolean {
+  return buildVegasContext(slate, fallbackOdds).some((context) => context.over_under || context.spread);
+}
+
+function oddsApiSportKey(sport: string): string | null {
+  const keys: Record<string, string> = {
+    nba: 'basketball_nba',
+    wnba: 'basketball_wnba',
+    nfl: 'americanfootball_nfl',
+    mlb: 'baseball_mlb',
+  };
+  return keys[sport] ?? null;
+}
+
+const ODDS_TEAM_NAMES: Record<string, Record<string, string[]>> = {
+  nba: {
+    ATL: ['atlanta hawks'],
+    BOS: ['boston celtics'],
+    BKN: ['brooklyn nets'],
+    CHA: ['charlotte hornets'],
+    CHI: ['chicago bulls'],
+    CLE: ['cleveland cavaliers'],
+    DAL: ['dallas mavericks'],
+    DEN: ['denver nuggets'],
+    DET: ['detroit pistons'],
+    GSW: ['golden state warriors'],
+    HOU: ['houston rockets'],
+    IND: ['indiana pacers'],
+    LAC: ['los angeles clippers', 'la clippers'],
+    LAL: ['los angeles lakers', 'la lakers'],
+    MEM: ['memphis grizzlies'],
+    MIA: ['miami heat'],
+    MIL: ['milwaukee bucks'],
+    MIN: ['minnesota timberwolves'],
+    NOP: ['new orleans pelicans'],
+    NYK: ['new york knicks'],
+    OKC: ['oklahoma city thunder'],
+    ORL: ['orlando magic'],
+    PHI: ['philadelphia 76ers', 'philadelphia sixers'],
+    PHX: ['phoenix suns'],
+    POR: ['portland trail blazers'],
+    SAC: ['sacramento kings'],
+    SAS: ['san antonio spurs'],
+    TOR: ['toronto raptors'],
+    UTA: ['utah jazz'],
+    WAS: ['washington wizards'],
+  },
+  wnba: {
+    ATL: ['atlanta dream'],
+    CHI: ['chicago sky'],
+    CON: ['connecticut sun'],
+    DAL: ['dallas wings'],
+    GSV: ['golden state valkyries'],
+    IND: ['indiana fever'],
+    LVA: ['las vegas aces'],
+    LAS: ['los angeles sparks'],
+    MIN: ['minnesota lynx'],
+    NYL: ['new york liberty'],
+    PHO: ['phoenix mercury'],
+    SEA: ['seattle storm'],
+    WAS: ['washington mystics'],
+  },
+  mlb: {
+    ARI: ['arizona diamondbacks'],
+    ATL: ['atlanta braves'],
+    BAL: ['baltimore orioles'],
+    BOS: ['boston red sox'],
+    CHC: ['chicago cubs'],
+    CWS: ['chicago white sox'],
+    CIN: ['cincinnati reds'],
+    CLE: ['cleveland guardians'],
+    COL: ['colorado rockies'],
+    DET: ['detroit tigers'],
+    HOU: ['houston astros'],
+    KC: ['kansas city royals'],
+    LAA: ['los angeles angels'],
+    LAD: ['los angeles dodgers'],
+    MIA: ['miami marlins'],
+    MIL: ['milwaukee brewers'],
+    MIN: ['minnesota twins'],
+    NYM: ['new york mets'],
+    NYY: ['new york yankees'],
+    OAK: ['oakland athletics', 'athletics'],
+    ATH: ['athletics'],
+    PHI: ['philadelphia phillies'],
+    PIT: ['pittsburgh pirates'],
+    SD: ['san diego padres'],
+    SEA: ['seattle mariners'],
+    SF: ['san francisco giants'],
+    STL: ['st. louis cardinals', 'saint louis cardinals'],
+    TB: ['tampa bay rays'],
+    TEX: ['texas rangers'],
+    TOR: ['toronto blue jays'],
+    WSH: ['washington nationals'],
+  },
+};
+
+function oddsTeamMatches(sport: string, teamAbbr: string, teamName: string): boolean {
+  const normalized = teamName.toLowerCase();
+  return (ODDS_TEAM_NAMES[sport]?.[teamAbbr] ?? [teamAbbr.toLowerCase()])
+    .some((name) => normalized.includes(name));
+}
+
+function oddsEventMatchesSlate(sport: string, event: any, slate?: DraftKingsSlate): boolean {
+  const teams = slateTeamAbbreviations(slate);
+  if (teams.length < 2) return false;
+  const home = String(event?.home_team ?? '');
+  const away = String(event?.away_team ?? '');
+  return teams.every((team) => oddsTeamMatches(sport, team, home) || oddsTeamMatches(sport, team, away));
+}
+
+function marketPoint(bookmakers: any[], marketKey: string, outcomeName?: string): number | null {
+  for (const bookmaker of bookmakers) {
+    const market = (bookmaker?.markets ?? []).find((item: any) => item?.key === marketKey);
+    const outcomes = market?.outcomes ?? [];
+    const outcome = outcomeName
+      ? outcomes.find((item: any) => String(item?.name ?? '').toLowerCase() === outcomeName.toLowerCase())
+      : outcomes[0];
+    const point = Number(outcome?.point);
+    if (Number.isFinite(point)) return point;
+  }
+  return null;
+}
+
+async function collectOddsApiContext(sport: string, slate?: DraftKingsSlate): Promise<OddsContext[]> {
+  const apiKey = envOddsApiKey();
+  const sportKey = oddsApiSportKey(sport);
+  if (!apiKey || !sportKey || !slateTeamAbbreviations(slate).length) return [];
+
+  try {
+    const url = `${envOddsApiBaseUrl().replace(/\/$/, '')}/sports/${sportKey}/odds?apiKey=${encodeURIComponent(apiKey)}&regions=us&markets=spreads,totals&oddsFormat=american`;
+    const response = await limitedFetch(url, 'the-odds-api', {
+      headers: { Accept: 'application/json' },
+      timeoutMs: 12_000,
+      retries: 1,
+      dedupeMs: 1_000,
+    });
+    if (!response.ok) throw new Error(`The Odds API ${response.status}`);
+    const events = await response.json() as any[];
+    const matched = events.find((event) => oddsEventMatchesSlate(sport, event, slate));
+    if (!matched) return [];
+
+    const overUnder = marketPoint(matched.bookmakers ?? [], 'totals', 'Over') ?? 0;
+    const spread = marketPoint(matched.bookmakers ?? [], 'spreads', matched.home_team) ?? 0;
+    return [{
+      game_id: String(slate?.game_ids?.[0] ?? matched.id ?? slate?.contest_id ?? ''),
+      spread,
+      over_under: overUnder,
+      implied_total: overUnder ? Number((overUnder / 2).toFixed(2)) : 0,
+    }];
+  } catch (error) {
+    console.error('The Odds API fallback error:', error);
+    return [];
+  }
 }
 
 function buildBaselineGames(projectedPoints: number): Last5Game[] {
@@ -550,12 +805,130 @@ async function collectNewsAndInjuries(sport: string): Promise<any[]> {
   try {
     const response = await limitedFetch(sportMap[sport], 'espn-news', { timeoutMs: 5000, retries: 1 });
     const xml = await response.text();
-    return xml
+    const espnItems = xml
       .split('\n')
       .filter((line) => line.includes('out') || line.includes('injured') || line.includes('questionable'))
       .map((raw) => ({ raw, timestamp: new Date().toISOString() }));
+    return [
+      ...espnItems,
+      ...await collectBalldontlieInjuries(sport),
+      ...await collectSportsDataIoNewsAndInjuries(sport),
+    ];
   } catch (error) {
     console.error('ESPN RSS error:', error);
+    return [
+      ...await collectBalldontlieInjuries(sport),
+      ...await collectSportsDataIoNewsAndInjuries(sport),
+    ];
+  }
+}
+
+async function balldontlieFetch(path: string, params: Record<string, string | number | Array<string | number>> = {}) {
+  const apiKey = envBalldontlieApiKey();
+  if (!apiKey) return null;
+
+  const url = new URL(`https://api.balldontlie.io${path}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value)) {
+      value.forEach((item) => url.searchParams.append(`${key}[]`, String(item)));
+    } else {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const response = await limitedFetch(url.toString(), 'balldontlie', {
+    headers: {
+      Accept: 'application/json',
+      Authorization: apiKey,
+    },
+    timeoutMs: 12_000,
+    retries: 1,
+    dedupeMs: 700,
+  });
+  if (!response.ok) throw new Error(`Balldontlie ${response.status}`);
+  return await response.json() as any;
+}
+
+async function collectBalldontlieInjuries(sport: string): Promise<any[]> {
+  if (sport !== 'nba' || !envBalldontlieApiKey()) return [];
+
+  try {
+    const data = await balldontlieFetch('/v1/player_injuries', { per_page: 100 });
+    const injuries = data?.data ?? [];
+    return injuries.map((item: any) => {
+      const playerName = `${item?.player?.first_name ?? ''} ${item?.player?.last_name ?? ''}`.trim();
+      return {
+        raw: `${playerName} ${item?.status ?? ''}: ${item?.description ?? ''}`,
+        timestamp: new Date().toISOString(),
+        source: 'balldontlie_injuries',
+      };
+    }).filter((item: any) => item.raw.trim());
+  } catch (error) {
+    console.error('Balldontlie injuries error:', error);
+    return [];
+  }
+}
+
+async function sportsDataIoFetch(path: string) {
+  const apiKey = envSportsDataIoKey();
+  if (!apiKey) return null;
+  const url = new URL(`https://api.sportsdata.io${path}`);
+  url.searchParams.set('key', apiKey);
+  const response = await limitedFetch(url.toString(), 'sportsdataio', {
+    headers: {
+      Accept: 'application/json',
+      'Ocp-Apim-Subscription-Key': apiKey,
+    },
+    timeoutMs: 12_000,
+    retries: 1,
+    dedupeMs: 700,
+  });
+  if (!response.ok) throw new Error(`SportsDataIO ${response.status}`);
+  return await response.json() as any;
+}
+
+function sportsDataIoDateKey(date = new Date()) {
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  return `${date.getUTCFullYear()}-${months[date.getUTCMonth()]}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+async function collectSportsDataIoNewsAndInjuries(sport: string): Promise<any[]> {
+  if (sport !== 'nba' || !envSportsDataIoKey()) return [];
+
+  try {
+    const [players, latestNews, datedNews] = await Promise.all([
+      sportsDataIoFetch('/v3/nba/scores/json/Players').catch(() => []),
+      sportsDataIoFetch('/v3/nba/scores/json/News').catch(() => []),
+      sportsDataIoFetch(`/v3/nba/scores/json/NewsByDate/${sportsDataIoDateKey()}`).catch(() => []),
+    ]);
+
+    const playerItems = (Array.isArray(players) ? players : [])
+      .filter((player: any) => player?.InjuryStatus || player?.InjuryNotes)
+      .map((player: any) => ({
+        raw: `${player?.FirstName ?? ''} ${player?.LastName ?? ''} ${player?.InjuryStatus ?? ''}: ${player?.InjuryNotes ?? ''}`,
+        timestamp: new Date().toISOString(),
+        source: 'sportsdataio_players',
+      }))
+      .filter((item: any) => item.raw.trim());
+
+    const seenNews = new Set<number | string>();
+    const newsItems = [...(Array.isArray(latestNews) ? latestNews : []), ...(Array.isArray(datedNews) ? datedNews : [])]
+      .filter((item: any) => {
+        const key = item?.NewsID ?? `${item?.Title ?? ''}:${item?.Updated ?? ''}`;
+        if (seenNews.has(key)) return false;
+        seenNews.add(key);
+        return true;
+      })
+      .map((item: any) => ({
+        raw: `${item?.Title ?? ''} ${item?.Content ?? ''}`,
+        timestamp: String(item?.Updated ?? new Date().toISOString()),
+        source: 'sportsdataio_news',
+      }))
+      .filter((item: any) => item.raw.trim());
+
+    return [...playerItems, ...newsItems];
+  } catch (error) {
+    console.error('SportsDataIO news/injuries error:', error);
     return [];
   }
 }
@@ -722,17 +1095,43 @@ function parseNumber(value: unknown): number {
 }
 
 function fantasyPointsForGame(game: Record<string, number>, sport: string) {
+  const stat = (key: string) => Number.isFinite(Number(game[key])) ? Number(game[key]) : 0;
   if (sport === 'nba' || sport === 'wnba') {
     return (
-      game.points +
-      game.totalRebounds * 1.25 +
-      game.assists * 1.5 +
-      game.steals * 2 +
-      game.blocks * 2 -
-      game.turnovers * 0.5
+      stat('points') +
+      stat('totalRebounds') * 1.25 +
+      stat('assists') * 1.5 +
+      stat('steals') * 2 +
+      stat('blocks') * 2 -
+      stat('turnovers') * 0.5
     );
   }
-  return game.points;
+  if (sport === 'mlb') {
+    if (stat('inningsPitched') || stat('strikeOuts') || stat('earnedRuns')) {
+      return (
+        stat('inningsPitched') * 2.25 +
+        stat('strikeOuts') * 2 +
+        stat('wins') * 4 -
+        stat('earnedRuns') * 2 -
+        (stat('hits') + stat('baseOnBalls') + stat('hitBatsmen')) * 0.6 +
+        stat('completeGames') * 2.5 +
+        stat('shutouts') * 2.5 +
+        stat('noHitters') * 5
+      );
+    }
+    const singles = Math.max(0, stat('hits') - stat('doubles') - stat('triples') - stat('homeRuns'));
+    return (
+      singles * 3 +
+      stat('doubles') * 5 +
+      stat('triples') * 8 +
+      stat('homeRuns') * 10 +
+      stat('rbi') * 2 +
+      stat('runs') * 2 +
+      (stat('baseOnBalls') + stat('hitByPitch')) * 2 +
+      stat('stolenBases') * 5
+    );
+  }
+  return stat('points');
 }
 
 function aggregateGames(games: Record<string, any>[], sport: string) {
@@ -778,6 +1177,155 @@ function parseEspnGamelog(data: any, sport: string) {
   };
 }
 
+function nbaSeasonCandidates() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  return [year, year - 1];
+}
+
+async function findBalldontliePlayerId(player: Player): Promise<number | null> {
+  if (!envBalldontlieApiKey()) return null;
+  const data = await balldontlieFetch('/v1/players', { search: player.name, per_page: 10 });
+  const players = data?.data ?? [];
+  const playerKey = normalizeName(player.name);
+  const matched = players.find((candidate: any) => {
+    const name = normalizeName(`${candidate?.first_name ?? ''} ${candidate?.last_name ?? ''}`);
+    const team = String(candidate?.team?.abbreviation ?? '').toUpperCase();
+    return name === playerKey && (!player.team || team === String(player.team).toUpperCase());
+  }) ?? players.find((candidate: any) => normalizeName(`${candidate?.first_name ?? ''} ${candidate?.last_name ?? ''}`) === playerKey);
+  const id = Number(matched?.id);
+  return Number.isFinite(id) ? id : null;
+}
+
+function parseBalldontlieStats(data: any, sport: string) {
+  const rows = [...(data?.data ?? [])]
+    .filter((row: any) => row?.game)
+    .sort((a: any, b: any) => String(b?.game?.date ?? '').localeCompare(String(a?.game?.date ?? '')))
+    .slice(0, 5);
+  const games = rows.map((row: any) => {
+    const game = {
+      date: String(row?.game?.date ?? ''),
+      opponent: String(row?.game?.home_team_id === row?.team?.id ? row?.game?.visitor_team_id : row?.game?.home_team_id ?? 'N/A'),
+      points: Number(row?.pts ?? 0),
+      totalRebounds: Number(row?.reb ?? 0),
+      assists: Number(row?.ast ?? 0),
+      steals: Number(row?.stl ?? 0),
+      blocks: Number(row?.blk ?? 0),
+      turnovers: Number(row?.turnover ?? 0),
+    };
+    return {
+      ...game,
+      fantasy_points: Number(fantasyPointsForGame(game, sport).toFixed(2)),
+    };
+  });
+  if (!games.length) return null;
+  return {
+    games_data: games,
+    aggregated_stats: aggregateGames(games, sport),
+    confidence_score: games.length === 5 ? 0.82 : 0.64,
+    last_updated_at: new Date().toISOString(),
+  };
+}
+
+async function collectBalldontlieLast5Stats(player: Player, sport: string): Promise<any | null> {
+  if (sport !== 'nba' || !envBalldontlieApiKey()) return null;
+
+  try {
+    const playerId = await findBalldontliePlayerId(player);
+    if (!playerId) return null;
+    const data = await balldontlieFetch('/v1/stats', {
+      player_ids: [playerId],
+      seasons: nbaSeasonCandidates(),
+      per_page: 100,
+    });
+    return parseBalldontlieStats(data, sport);
+  } catch (error) {
+    console.error(`Balldontlie last-5 error for ${player.name}:`, error);
+    return null;
+  }
+}
+
+function parseMlbInnings(value: unknown): number {
+  const raw = String(value ?? '0');
+  const [whole, outs] = raw.split('.');
+  return Number(whole || 0) + Number(outs || 0) / 3;
+}
+
+async function findMlbPersonId(player: Player): Promise<number | null> {
+  const response = await limitedFetch(
+    `https://statsapi.mlb.com/api/v1/people/search?names=${encodeURIComponent(player.name)}`,
+    'mlb-people-search',
+    { headers: { Accept: 'application/json' }, timeoutMs: 10_000, retries: 1, dedupeMs: 400 },
+  );
+  if (!response.ok) return null;
+  const data = await response.json() as any;
+  const playerKey = normalizeName(player.name);
+  const matched = (data?.people ?? []).find((person: any) => normalizeName(person?.fullName ?? '') === playerKey);
+  const id = Number(matched?.id);
+  return Number.isFinite(id) ? id : null;
+}
+
+function parseMlbGameLog(data: any) {
+  const splits = data?.stats?.[0]?.splits ?? [];
+  const games = splits.slice(0, 5).map((split: any) => {
+    const stat = split?.stat ?? {};
+    const game = {
+      date: String(split?.date ?? ''),
+      opponent: String(split?.opponent?.abbreviation ?? split?.opponent?.name ?? 'N/A'),
+      points: 0,
+      hits: Number(stat.hits ?? 0),
+      doubles: Number(stat.doubles ?? 0),
+      triples: Number(stat.triples ?? 0),
+      homeRuns: Number(stat.homeRuns ?? 0),
+      rbi: Number(stat.rbi ?? 0),
+      runs: Number(stat.runs ?? 0),
+      baseOnBalls: Number(stat.baseOnBalls ?? 0),
+      hitByPitch: Number(stat.hitByPitch ?? stat.hitBatsmen ?? 0),
+      hitBatsmen: Number(stat.hitBatsmen ?? 0),
+      stolenBases: Number(stat.stolenBases ?? 0),
+      inningsPitched: parseMlbInnings(stat.inningsPitched),
+      strikeOuts: Number(stat.strikeOuts ?? 0),
+      wins: Number(stat.wins ?? 0),
+      earnedRuns: Number(stat.earnedRuns ?? 0),
+      completeGames: Number(stat.completeGames ?? 0),
+      shutouts: Number(stat.shutouts ?? 0),
+      noHitters: Number(stat.noHitters ?? 0),
+    };
+    return {
+      ...game,
+      fantasy_points: Number(fantasyPointsForGame(game, 'mlb').toFixed(2)),
+    };
+  });
+  if (!games.length) return null;
+  return {
+    games_data: games,
+    aggregated_stats: aggregateGames(games, 'mlb'),
+    confidence_score: games.length === 5 ? 0.82 : 0.64,
+    last_updated_at: new Date().toISOString(),
+    source: 'mlb_stats_api',
+  };
+}
+
+async function collectMlbStatsApiLast5Stats(player: Player): Promise<any | null> {
+  if (player.position === 'DST') return null;
+  try {
+    const personId = await findMlbPersonId(player);
+    if (!personId) return null;
+    const group = /P|SP|RP/i.test(player.position) ? 'pitching' : 'hitting';
+    const season = new Date().getUTCFullYear();
+    const response = await limitedFetch(
+      `https://statsapi.mlb.com/api/v1/people/${personId}/stats?stats=gameLog&group=${group}&season=${season}`,
+      'mlb-game-log',
+      { headers: { Accept: 'application/json' }, timeoutMs: 10_000, retries: 1, dedupeMs: 400 },
+    );
+    if (!response.ok) return null;
+    return parseMlbGameLog(await response.json());
+  } catch (error) {
+    console.error(`MLB Stats API last-5 error for ${player.name}:`, error);
+    return null;
+  }
+}
+
 async function getCachedLast5Stats(playerId: string, sport: string): Promise<any | null> {
   const rows = await callSupabaseRpc<CachedLast5Row[]>('fantasy_ai_get_cached_last5_stats', {
     p_player_id: playerId,
@@ -803,7 +1351,10 @@ async function cacheLast5Stats(playerId: string, sport: string, stats: any) {
 async function collectLast5Stats(player: Player, sport: string): Promise<any> {
   const cached = await getCachedLast5Stats(player.id, sport);
   if (cached?.games_data?.length) return cached;
-  if (!player.espn_id || sport === 'f1') return null;
+  if (!player.espn_id || sport === 'f1') {
+    if (sport === 'mlb') return await collectMlbStatsApiLast5Stats(player);
+    return await collectBalldontlieLast5Stats(player, sport);
+  }
 
   const sportPath: Record<string, string> = {
     nba: 'basketball/nba',
@@ -827,7 +1378,8 @@ async function collectLast5Stats(player: Player, sport: string): Promise<any> {
     return stats;
   } catch (error) {
     console.error(`ESPN gamelog error for ${player.name}:`, error);
-    return null;
+    if (sport === 'mlb') return await collectMlbStatsApiLast5Stats(player);
+    return await collectBalldontlieLast5Stats(player, sport);
   }
 }
 
@@ -860,27 +1412,111 @@ async function cacheSocialSentiment(sentiment: any, sport: string) {
   });
 }
 
-async function getRedditAccessToken(): Promise<string | null> {
-  const clientId = envRedditClientId();
-  const clientSecret = envRedditClientSecret();
-  if (!clientId || !clientSecret) return null;
+function redditSubredditsForSport(sport: string): string[] {
+  const map: Record<string, string[]> = {
+    nba: ['nba', 'fantasybball', 'dfsports'],
+    wnba: ['wnba', 'fantasybball', 'dfsports'],
+    nfl: ['nfl', 'fantasyfootball', 'dfsports'],
+    mlb: ['mlb', 'fantasybaseball', 'dfsports'],
+    f1: ['formula1'],
+  };
+  return map[sport] ?? ['dfsports'];
+}
 
-  const credentials = btoa(`${clientId}:${clientSecret}`);
-  const response = await limitedFetch('https://www.reddit.com/api/v1/access_token', 'reddit-auth', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': 'fantasy-ai-core/1.0',
-    },
-    body: 'grant_type=client_credentials',
-    timeoutMs: 10_000,
+function redditRssUserAgent() {
+  return 'fantasy-ai/1.0 public-rss monitor; contact: https://floyd-dfs.vercel.app';
+}
+
+function decodeXmlEntities(value: string) {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function textFromXmlBlock(block: string, tagName: string): string {
+  const match = block.match(new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+  return decodeXmlEntities(match?.[1] ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function linkFromXmlBlock(block: string): string {
+  const alternate = block.match(/<link[^>]+rel=["']alternate["'][^>]+href=["']([^"']+)["'][^>]*>/i);
+  const anyLink = block.match(/<link[^>]+href=["']([^"']+)["'][^>]*>/i);
+  return decodeXmlEntities(alternate?.[1] ?? anyLink?.[1] ?? '').trim();
+}
+
+function parseRedditAtom(xml: string): RedditFeedItem[] {
+  const entries = [...xml.matchAll(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi)].map((match) => match[1] ?? '');
+  return entries.map((entry) => {
+    return {
+      title: textFromXmlBlock(entry, 'title'),
+      content: textFromXmlBlock(entry, 'content'),
+      link: linkFromXmlBlock(entry),
+      updated: textFromXmlBlock(entry, 'updated'),
+    };
+  }).filter((item) => item.title || item.content);
+}
+
+async function fetchRedditRss(url: string, cacheKey: string): Promise<RedditFeedItem[]> {
+  const cached = redditRssCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < REDDIT_RSS_CACHE_MS) return cached.items;
+
+  const headers = {
+    Accept: 'application/atom+xml, application/rss+xml, text/xml',
+    'User-Agent': redditRssUserAgent(),
+  };
+  const response = await limitedFetch(url, `reddit-rss:${cacheKey}`, {
+    headers,
+    timeoutMs: 12_000,
     retries: 1,
+    dedupeMs: 1_000,
+  }).catch(() => null);
+  const retryUrl = url.replace('https://www.reddit.com/', 'https://old.reddit.com/');
+  const finalResponse = response?.ok ? response : await limitedFetch(retryUrl, `reddit-rss-old:${cacheKey}`, {
+    headers,
+    timeoutMs: 12_000,
+    retries: 1,
+    dedupeMs: 1_000,
   });
+  if (!finalResponse.ok) throw new Error(`Reddit RSS ${finalResponse.status}`);
 
-  if (!response.ok) return null;
-  const data = await response.json() as { access_token?: string };
-  return data.access_token ?? null;
+  const items = parseRedditAtom(await finalResponse.text()).slice(0, 40);
+  redditRssCache.set(cacheKey, { items, cachedAt: Date.now() });
+  return items;
+}
+
+async function collectSportRedditItems(sport: string): Promise<RedditFeedItem[]> {
+  const subreddits = redditSubredditsForSport(sport).join('+');
+  return await fetchRedditRss(
+    `https://www.reddit.com/r/${subreddits}/new.rss?limit=40`,
+    `${sport}:subreddits:${subreddits}`,
+  );
+}
+
+async function collectPlayerRedditSearchItems(playerName: string, sport: string): Promise<RedditFeedItem[]> {
+  const query = `"${playerName}" (${sport} OR DFS OR fantasy OR injury OR starting OR out OR questionable)`;
+  return await fetchRedditRss(
+    `https://www.reddit.com/search.rss?q=${encodeURIComponent(query)}&sort=new&limit=25`,
+    `${sport}:search:${normalizeName(playerName)}`,
+  );
+}
+
+function redditItemsMatchingPlayer(items: RedditFeedItem[], playerName: string): RedditFeedItem[] {
+  const playerKey = normalizeName(playerName);
+  if (!playerKey) return [];
+  return items.filter((item) => normalizeName(`${item.title} ${item.content}`).includes(playerKey));
+}
+
+function scoreRedditItems(items: RedditFeedItem[]) {
+  const text = items.map((item) => `${item.title} ${item.content}`).join(' ').toLowerCase();
+  const positive = ['breakout', 'hot', 'healthy', 'starting', 'upgrade', 'smash', 'available', 'confirmed'];
+  const negative = ['injury', 'injured', 'out', 'questionable', 'limited', 'slump', 'bench', 'inactive', 'doubtful'];
+  const posHits = positive.reduce((sum, word) => sum + (text.includes(word) ? 1 : 0), 0);
+  const negHits = negative.reduce((sum, word) => sum + (text.includes(word) ? 1 : 0), 0);
+  return Math.max(-1, Math.min(1, (posHits - negHits) / 5));
 }
 
 async function collectRedditSentiment(playerId: string, sport: string): Promise<any> {
@@ -888,57 +1524,18 @@ async function collectRedditSentiment(playerId: string, sport: string): Promise<
   if (cached) return cached;
 
   try {
-    const token = await getRedditAccessToken();
-    if (!token) {
-      return {
-        player_id: playerId,
-        reddit_mentions: 0,
-        sentiment_score: 0,
-        key_themes: ['reddit_credentials_missing'],
-        source_status: 'unavailable',
-        last_updated_at: new Date().toISOString(),
-      };
-    }
-
-    const subreddit = sport === 'f1' ? 'formula1' : sport;
-    const response = await limitedFetch(
-      `https://oauth.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(playerId)}&restrict_sr=1&limit=10&sort=new`,
-      'reddit',
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'User-Agent': 'fantasy-ai-core/1.0',
-        },
-        timeoutMs: 30_000,
-        retries: 1,
-      },
-    );
-
-    if (!response.ok) {
-      return {
-        player_id: playerId,
-        reddit_mentions: 0,
-        sentiment_score: 0,
-        key_themes: ['reddit_unavailable'],
-        source_status: 'unavailable',
-        last_updated_at: new Date().toISOString(),
-      };
-    }
-
-    const data = await response.json() as any;
-    const posts = data?.data?.children ?? [];
-    const text = posts.map((post: any) => `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`).join(' ').toLowerCase();
-    const positive = ['breakout', 'hot', 'healthy', 'starting', 'upgrade', 'smash'];
-    const negative = ['injury', 'out', 'questionable', 'limited', 'slump', 'bench'];
-    const posHits = positive.reduce((sum, word) => sum + (text.includes(word) ? 1 : 0), 0);
-    const negHits = negative.reduce((sum, word) => sum + (text.includes(word) ? 1 : 0), 0);
-    const sentiment = Math.max(-1, Math.min(1, (posHits - negHits) / 5));
+    const sportMatches = redditItemsMatchingPlayer(await collectSportRedditItems(sport), playerId);
+    const searchMatches = sportMatches.length ? [] : await collectPlayerRedditSearchItems(playerId, sport);
+    const posts = sportMatches.length ? sportMatches : redditItemsMatchingPlayer(searchMatches, playerId);
+    const sentiment = scoreRedditItems(posts);
 
     const sentimentResult = {
       player_id: playerId,
       reddit_mentions: posts.length,
       sentiment_score: sentiment,
-      key_themes: posts.length === 0 ? ['no_mentions'] : ['neutral'],
+      key_themes: posts.length === 0
+        ? ['rss_no_mentions']
+        : [sportMatches.length ? 'subreddit_rss_match' : 'search_rss_match'],
       source_status: 'ok',
       last_updated_at: new Date().toISOString(),
     };
@@ -977,6 +1574,61 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
   };
 }
 
+function matchingNewsItems(player: Player, newsItems: any[]): string[] {
+  const playerKey = normalizeName(player.name);
+  if (!playerKey) return [];
+  return newsItems
+    .map((item) => String(item?.raw ?? ''))
+    .filter((raw) => normalizeName(raw).includes(playerKey));
+}
+
+function newsInjuryStatus(rawNews: string[]): InjuryStatus | null {
+  const text = rawNews.join(' ').toLowerCase();
+  if (!text) return null;
+  if (/(ruled out|will not play|inactive|out indefinitely|injured reserve|placed on)/.test(text)) return 'out';
+  if (/(doubtful|unlikely to play)/.test(text)) return 'doubtful';
+  if (/(questionable|game-time decision|uncertain)/.test(text)) return 'questionable';
+  if (/(probable|expected to play|available)/.test(text)) return 'probable';
+  if (/(day-to-day|day to day|limited)/.test(text)) return 'day_to_day';
+  return null;
+}
+
+function applyPlayerNewsSignals(player: Player, newsItems: any[], sentiment: any): Player {
+  const matchedNews = matchingNewsItems(player, newsItems);
+  const injuryFromNews = newsInjuryStatus(matchedNews);
+  const sentimentScore = typeof sentiment?.sentiment_score === 'number' ? sentiment.sentiment_score : 0;
+  const hasNews = matchedNews.length > 0 || sentiment?.source_status === 'ok';
+  if (!hasNews && !injuryFromNews) return player;
+
+  const negativeNews = matchedNews.some((raw) => /(bench|limited|slump|injur|questionable|doubtful|out)/i.test(raw));
+  const positiveNews = matchedNews.some((raw) => /(starting|available|healthy|upgrade|breakout|hot)/i.test(raw));
+  const projectionMultiplier = Math.min(
+    Math.max(1 + sentimentScore * 0.04 + (positiveNews ? 0.03 : 0) - (negativeNews ? 0.08 : 0), 0.75),
+    1.08,
+  );
+  const confidenceDelta = sentimentScore * 0.08 + (positiveNews ? 0.04 : 0) - (negativeNews ? 0.12 : 0);
+  const confidence = Math.min(Math.max((player.last_5_stats?.confidence ?? 0.5) + confidenceDelta, 0.2), 0.95);
+  const projectedPoints = player.projected_points ? Number((player.projected_points * projectionMultiplier).toFixed(2)) : player.projected_points;
+  const noteParts = [
+    matchedNews.length ? `${matchedNews.length} matched news item${matchedNews.length === 1 ? '' : 's'}` : '',
+    sentiment?.source_status === 'ok' ? `Reddit sentiment ${sentimentScore.toFixed(2)}` : '',
+  ].filter(Boolean);
+
+  return {
+    ...player,
+    injury_status: injuryFromNews ?? player.injury_status,
+    injury_note: injuryFromNews ? `News signal: ${injuryFromNews}` : player.injury_note,
+    projected_points: projectedPoints,
+    news_score: Number((sentimentScore + (positiveNews ? 0.5 : 0) - (negativeNews ? 0.75 : 0)).toFixed(2)),
+    news_note: noteParts.join('; ') || undefined,
+    last_5_stats: player.last_5_stats ? {
+      ...player.last_5_stats,
+      avg_fantasy_pts: projectedPoints ?? player.last_5_stats.avg_fantasy_pts,
+      confidence,
+    } : player.last_5_stats,
+  };
+}
+
 async function orchestrateMiosFantasyScan(
   sport: string,
   contestType: string,
@@ -1001,25 +1653,23 @@ async function orchestrateMiosFantasyScan(
   ]);
   const liveSlateSalaryRows = slateSalaryRows(slate);
   const effectiveSalaryRows = salaryRows.length ? salaryRows : liveSlateSalaryRows;
+  if (!effectiveSalaryRows.length) {
+    throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
+  }
+  const fallbackOddsContext = hasFreeOddsContext(slate) ? [] : await collectOddsApiContext(sport, slate);
   sourceStatus.espn_news = injuries.length ? 'partial' : 'partial';
   sourceStatus.draftkings_salaries = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.draftkings_salary_source = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
-  sourceStatus.free_odds = hasFreeOddsContext(slate) ? 'ok' : 'unavailable';
+  sourceStatus.free_odds = hasFreeOddsContext(slate, fallbackOddsContext) ? 'ok' : 'unavailable';
 
-  let playerRoster = filterRosterBySlateTeams(applyDraftKingsSalaries(dedupePlayers(roster), effectiveSalaryRows), slate);
+  let playerRoster = filterRosterBySlateTeams(applyDraftKingsSalaries(dedupePlayers(roster), effectiveSalaryRows, sport), slate);
   if (slateTeamAbbreviations(slate).length && playerRoster.length === roster.length) {
     warnings.push('Selected slate included team metadata, but roster filtering did not reduce the player pool.');
   }
   if (!playerRoster.length) warnings.push('No roster players were collected; lineups cannot be generated.');
-  if (playerRoster.some((player) => player.salary_source === 'estimated')) {
-    warnings.push(
-      salaryRows.length
-        ? 'Persisted DraftKings salary slate was partially matched; unmatched players use deterministic estimated salaries.'
-        : liveSlateSalaryRows.length
-          ? 'Live DraftKings salary slate was partially matched; unmatched players use deterministic estimated salaries.'
-        : 'No DraftKings salary slate rows found for this sport/date/contest type; using deterministic estimated salaries.',
-    );
+  if (playerRoster.length < effectiveSalaryRows.length) {
+    warnings.push('Some DraftKings salary rows could not be matched to roster metadata and were omitted.');
   }
   if (sourceStatus.free_odds === 'unavailable') {
     warnings.push('Verified free odds context is unavailable for the selected game; lineup confidence excludes odds signals.');
@@ -1039,20 +1689,22 @@ async function orchestrateMiosFantasyScan(
   );
 
   const statsByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.stats]));
+  const sentimentByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.sentiment]));
   playerRoster = playerRoster.map((player) => applyLast5Stats(player, statsByPlayer.get(player.id), sport));
+  playerRoster = playerRoster.map((player) => applyPlayerNewsSignals(player, injuries, sentimentByPlayer.get(player.id)));
   sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
   sourceStatus.projections = sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
   sourceStatus.reddit_sentiment = statAndSentiment.some((item) => item.sentiment?.source_status === 'ok') ? 'partial' : 'unavailable';
+  sourceStatus.player_news = playerRoster.some((player) => player.news_note) ? 'partial' : 'unavailable';
 
   if (sourceStatus.espn_last5 === 'unavailable') {
     warnings.push('Verified last-5 game stats are unavailable; using position baseline projections.');
   }
   if (sourceStatus.reddit_sentiment === 'unavailable') {
-    warnings.push(
-      envRedditClientId() && envRedditClientSecret()
-        ? 'Reddit sentiment unavailable or blocked; sentiment score is neutral.'
-        : 'Reddit API credentials are not configured and no cached sentiment was found; sentiment score is neutral.',
-    );
+    warnings.push('Reddit public RSS signals were unavailable and no cached sentiment was found; sentiment score is neutral.');
+  }
+  if (sourceStatus.player_news === 'unavailable') {
+    warnings.push('Player-specific news signals were unavailable or did not match players in this slate.');
   }
 
   const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({
@@ -1074,7 +1726,7 @@ async function orchestrateMiosFantasyScan(
     injury_updates: playerRoster
       .filter((player) => player.injury_status !== 'active')
       .map((player) => ({ player_id: player.id, status: player.injury_status, confidence: 0.8 })),
-    vegas_context: buildVegasContext(slate),
+    vegas_context: buildVegasContext(slate, fallbackOddsContext),
     social_sentiment: socialSentiment,
     catalysts: warnings.map((description) => ({ type: 'data_warning', description })),
     narrative_seeds: warnings,
@@ -1160,19 +1812,11 @@ Deno.serve(async (req) => {
       if (String(slate.contest_type).toLowerCase() !== contestType) throw new Error('Selected slate contest type does not match request contest type');
       if (String(slate.contest_date) !== contestDate) throw new Error('Selected slate date does not match request contest date');
       if (contestId && String(slate.contest_id) !== contestId) throw new Error('Selected slate contest_id does not match request contestId');
+      validateSlateStartWindow(slate);
     }
 
     const auth = await validateFunctionAuth(req, userId);
     const effectiveUserId = auth.userId ?? userId;
-    const cached = manifestCache.get(cacheKey);
-    if (cached && Date.now() - cached.cachedAt < FRESH_CACHE_MS) {
-      return jsonResponse({
-        ...cached.manifest,
-        data_warnings: [...cached.manifest.data_warnings, 'Using cached scan data from the last two hours.'],
-        source_status: { ...cached.manifest.source_status, scan_cache: 'ok' },
-      });
-    }
-
     const manifest = await withTimeout(
       orchestrateMiosFantasyScan(sport, contestType, contestDate, effectiveUserId ?? '', contestId, gameId, slate),
       90_000,
