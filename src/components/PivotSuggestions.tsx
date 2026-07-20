@@ -33,11 +33,11 @@ export function PivotSuggestions({ lineups, manifest }: PivotSuggestionsProps) {
   if (!pivots.length) return null;
 
   return (
-    <section className="mb-4 rounded-lg border border-green-200 bg-green-50 p-4">
-      <h3 className="mb-3 text-sm font-black text-green-800">Pivot Suggestions</h3>
+    <section className="mb-3 rounded-lg border border-cyan-200 bg-cyan-50 p-3 sm:p-4">
+      <h3 className="mb-3 text-sm font-black text-cyan-900">Pivot Suggestions</h3>
       <div className="space-y-2">
         {pivots.map((pivot) => (
-          <p key={`${pivot!.out.id}-${pivot!.replacement.id}`} className="text-sm text-green-900">
+          <p key={`${pivot!.out.id}-${pivot!.replacement.id}`} className="text-sm font-medium text-slate-800">
             If {pivot!.out.name} is ruled out, pivot to {pivot!.replacement.name} ({pivot!.replacement.team || 'FA'}). Projection change: {pivot!.delta >= 0 ? '+' : ''}{pivot!.delta.toFixed(1)}.
           </p>
         ))}

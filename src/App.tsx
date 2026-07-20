@@ -37,8 +37,8 @@ function App() {
     <BrowserRouter>
       <ToastProvider>
         <ErrorBoundary>
-          <Navigation />
           <SportsNewsTicker />
+          <Navigation />
           <RouteFade>
             <Routes>
               <Route path="/" element={<ScanPage />} />

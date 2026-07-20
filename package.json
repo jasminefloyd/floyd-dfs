@@ -9,6 +9,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "import:dk": "node scripts/import-draftkings-slate.mjs",
+    "import:mlb-actuals": "node scripts/import-mlb-actual-results.mjs",
+    "import:results": "node scripts/import-projection-results.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

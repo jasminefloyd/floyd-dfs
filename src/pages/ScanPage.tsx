@@ -4,6 +4,7 @@ import { LineupDisplay, type Lineup } from '../components/LineupDisplay';
 import { LineupComparison } from '../components/LineupComparison';
 import { PivotSuggestions } from '../components/PivotSuggestions';
 import { InjuryReport } from '../components/InjuryReport';
+import { CalibrationDashboard } from '../components/CalibrationDashboard';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
 import { useToast } from '../hooks/useToast';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
@@ -11,6 +12,7 @@ import type { DraftLineup } from '../lib/PIOS_FantasyGenerator';
 import { useInjuryAlerts } from '../hooks/useInjuryAlerts';
 import { invokeMiosFantasyScan } from '../lib/miosFunctionClient';
 import { invokePiosLineupGeneration } from '../lib/piosFunctionClient';
+import { getProjectionCalibration, type ProjectionCalibration } from '../lib/calibrationClient';
 
 type ScanPhase = 'idle' | 'fetching' | 'generating';
 
@@ -18,6 +20,7 @@ export default function ScanPage() {
   const [phase, setPhase] = useState<ScanPhase>('idle');
   const [manifest, setManifest] = useState<MIOS_FantasyManifest | null>(null);
   const [lineups, setLineups] = useState<Lineup[]>([]);
+  const [calibration, setCalibration] = useState<ProjectionCalibration | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { showToast } = useToast();
 
@@ -30,6 +33,7 @@ export default function ScanPage() {
     setError(null);
     setManifest(null);
     setLineups([]);
+    setCalibration(null);
 
     try {
       const miosController = new AbortController();
@@ -55,7 +59,13 @@ export default function ScanPage() {
             contestType: params.contestType,
             excludedPlayers: params.excludedPlayers,
             riskTolerance: params.riskTolerance,
-            lineupMode: params.lineupMode
+            lineupMode: params.lineupMode,
+            contestStrategy: params.contestStrategy,
+            maxPlayerExposure: params.maxPlayerExposure,
+            maxTeamExposure: params.maxTeamExposure,
+            minPrimaryStack: params.minPrimaryStack,
+            diversifyLineups: params.diversifyLineups,
+            lateSwapMode: params.lateSwapMode
           },
           piosController.signal
         );
@@ -64,6 +74,12 @@ export default function ScanPage() {
       }
       const displayLineups = toDisplayLineups(piosResult.lineups);
       setLineups(displayLineups);
+      getProjectionCalibration(params.sport)
+        .then(setCalibration)
+        .catch((calibrationError) => {
+          console.warn('Calibration unavailable:', calibrationError);
+          setCalibration(null);
+        });
       const warnings = [
         ...(data.data_warnings ?? []),
         ...(piosResult.data_warnings ?? [])
@@ -82,10 +98,10 @@ export default function ScanPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 text-gray-900">
-      <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:gap-6 lg:py-6">
-        <aside className="w-full lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:w-[360px] lg:shrink-0 lg:overflow-y-auto">
-          <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-[var(--shadow-medium)] sm:p-5">
+    <div className="min-h-screen bg-[#f4f7fb] text-slate-900">
+      <div className="mx-auto flex max-w-7xl flex-col gap-3 px-3 py-3 sm:px-5 lg:grid lg:grid-cols-[380px_minmax(0,1fr)] lg:gap-5 lg:py-5">
+        <aside className="w-full lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:overflow-y-auto">
+          <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[var(--shadow-medium)] sm:p-4">
             <MIOS_FantasyScanner
               onScan={handleScan}
               loading={phase !== 'idle'}
@@ -96,7 +112,7 @@ export default function ScanPage() {
 
         <main className="min-w-0 flex-1">
           {error && (
-            <div className="mb-4 rounded-lg border border-error/30 bg-error/10 p-4">
+            <div className="mb-3 rounded-lg border border-error/25 bg-red-50 p-3">
               <p className="text-error">{error}</p>
             </div>
           )}
@@ -107,13 +123,13 @@ export default function ScanPage() {
             <LineupSkeleton />
           ) : lineups.length > 0 ? (
             <div>
-              <div className="mb-4 rounded-lg border border-gray-200 bg-white p-4 shadow-[var(--shadow-subtle)] sm:p-5">
+              <div className="mb-3 rounded-lg border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                   <div>
-                    <p className="text-[11px] font-bold uppercase tracking-wide text-green-600">Optimizer Board</p>
-                    <h2 className="mt-1 text-2xl font-black text-gray-950 sm:text-3xl">Recommended Lineups</h2>
+                    <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Optimizer Board</p>
+                    <h2 className="mt-1 text-xl font-black text-[#0b1f3a] sm:text-2xl">Recommended Lineups</h2>
                     {manifest?.slate ? (
-                      <p className="mt-2 text-sm text-gray-400">
+                      <p className="mt-1 text-xs font-medium text-slate-500 sm:text-sm">
                         {manifest.slate.slate_name} · {manifest.contest_date}
                         {manifest.game_id ? ` · Game ${manifest.game_id}` : ''}
                       </p>
@@ -127,8 +143,9 @@ export default function ScanPage() {
                 </div>
               </div>
               <InjuryReport manifest={manifest} />
+              <CalibrationDashboard manifest={manifest} lineups={lineups} calibration={calibration} />
               {manifest?.data_warnings?.length ? (
-                <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+                <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-800">
                   {manifest.data_warnings.map((warning) => (
                     <p key={warning}>{warning}</p>
                   ))}
@@ -139,7 +156,7 @@ export default function ScanPage() {
               <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
             </div>
           ) : (
-            <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-gray-500">
+            <div className="rounded-lg border border-slate-200 bg-white p-6 text-center text-slate-500 shadow-[var(--shadow-subtle)]">
               <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and DraftKings slate to run a DFS Scan.'}</p>
             </div>
           )}
@@ -151,9 +168,9 @@ export default function ScanPage() {
 
 function SummaryPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-gray-500">{label}</p>
-      <p className="text-sm font-black text-gray-950">{value}</p>
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="text-sm font-black text-[#0b1f3a]">{value}</p>
     </div>
   );
 }
@@ -173,6 +190,8 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       salary_multiplier: p.salary_multiplier,
       roster_slot: p.roster_slot,
       salary_source: p.salary_source,
+      context_score: p.context_score,
+      news_note: p.news_note,
       last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts, trend: 'stable' }
     })),
     projected_points: lu.projected_points,
@@ -186,6 +205,12 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     leverage_score: lu.leverage_score,
     ownership_sum: lu.ownership_sum,
     lineup_type: lu.lineup_type,
+    primary_stack_team: lu.primary_stack_team,
+    primary_stack_size: lu.primary_stack_size,
+    anti_correlation_flags: lu.anti_correlation_flags,
+    exposure_flags: lu.exposure_flags,
+    late_swap_flags: lu.late_swap_flags,
+    strategy_notes: lu.strategy_notes,
     narrative: lineupNarrative(lu, idx)
   }));
 }

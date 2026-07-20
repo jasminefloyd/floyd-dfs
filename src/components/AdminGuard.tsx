@@ -33,7 +33,7 @@ export function AdminGuard({ children }: AdminGuardProps) {
   }, []);
 
   if (state === 'checking') {
-    return <div className="p-6 text-sm text-gray-600">Checking admin access...</div>;
+    return <div className="p-6 text-sm text-slate-600">Checking admin access...</div>;
   }
 
   if (state === 'denied') return <Navigate to="/" replace />;

@@ -20,6 +20,9 @@ export interface LineupPlayerDraft {
   minutes_projection?: number;
   usage_rate?: number;
   pace_metric?: number;
+  context_score?: number;
+  news_score?: number;
+  news_note?: string;
 }
 
 export interface DraftLineup {
@@ -35,6 +38,12 @@ export interface DraftLineup {
   leverage_score?: number;
   ownership_sum?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
+  primary_stack_team?: string;
+  primary_stack_size?: number;
+  anti_correlation_flags?: string[];
+  exposure_flags?: string[];
+  late_swap_flags?: string[];
+  strategy_notes?: string[];
   constraint_violations: string[];
 }
 
@@ -262,7 +271,9 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
 function playerValueScore(player: LineupPlayerDraft): number {
   const projected = player.projected_points || player.last_5_avg_pts || 0;
   const salary = Math.max(player.salary, 1);
-  return projected * 0.7 + (projected / salary) * 10000 * 0.3;
+  const contextBoost = (player.context_score ?? 0) * 2.5;
+  const newsBoost = (player.news_score ?? 0) * 0.8;
+  return projected * 0.7 + (projected / salary) * 10000 * 0.3 + contextBoost + newsBoost;
 }
 
 function playerEligibleForSlot(player: LineupPlayerDraft, slotDef: RosterSlot): boolean {

@@ -55,16 +55,16 @@ export function SportsNewsTicker() {
   if (failed && !items.length) return null;
   if (!items.length) {
     return (
-      <div className="border-b border-gray-200 bg-white px-6 py-2 text-xs text-gray-500">
+      <div className="border-b border-white/10 bg-[#061426] px-4 py-2 text-xs text-blue-100">
         <div className="mx-auto max-w-7xl">Loading sports news...</div>
       </div>
     );
   }
 
   return (
-    <div className="border-b border-gray-200 bg-white text-gray-900">
-      <div className="mx-auto flex max-w-7xl items-center gap-3 overflow-hidden px-6 py-2">
-        <div className="shrink-0 rounded-sm bg-green-600 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-white">
+    <div className="border-b border-white/10 bg-[#061426] text-blue-50">
+      <div className="mx-auto flex max-w-7xl items-center gap-3 overflow-hidden px-3 py-2 sm:px-6">
+        <div className="shrink-0 rounded-sm bg-cyan-400 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-[#061426]">
           News
         </div>
         <div className="ticker-viewport relative min-w-0 flex-1 overflow-hidden">
@@ -81,11 +81,11 @@ export function SportsNewsTicker() {
                     href={item.link ?? undefined}
                     target={item.link ? '_blank' : undefined}
                     rel={item.link ? 'noreferrer' : undefined}
-                    className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-gray-950 ${
-                      item.category === 'injury' ? 'text-warning' : 'text-gray-600'
+                    className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-white ${
+                      item.category === 'injury' ? 'text-amber-300' : 'text-blue-100'
                     }`}
                   >
-                    <span className="font-bold text-gray-950">{SPORT_LABELS[item.sport] ?? item.sport.toUpperCase()}</span>
+                    <span className="font-black text-white">{SPORT_LABELS[item.sport] ?? item.sport.toUpperCase()}</span>
                     {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
                     <span>{item.title}</span>
                   </a>

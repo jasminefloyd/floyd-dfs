@@ -9,6 +9,12 @@ export interface PiosLineupRequest {
   excludedPlayers: string[];
   riskTolerance: string;
   lineupMode: string;
+  contestStrategy: string;
+  maxPlayerExposure: number;
+  maxTeamExposure: number;
+  minPrimaryStack: number;
+  diversifyLineups: boolean;
+  lateSwapMode: boolean;
 }
 
 interface PiosFunctionResponse {
@@ -55,18 +61,25 @@ export async function invokePiosLineupGeneration(
       excludedPlayers: params.excludedPlayers,
       riskTolerance: params.riskTolerance,
       lineupMode: params.lineupMode,
+      contestStrategy: params.contestStrategy,
+      maxPlayerExposure: params.maxPlayerExposure,
+      maxTeamExposure: params.maxTeamExposure,
+      minPrimaryStack: params.minPrimaryStack,
+      diversifyLineups: params.diversifyLineups,
+      lateSwapMode: params.lateSwapMode,
       userId,
     }),
   });
 
   const contentType = response.headers.get('content-type') ?? '';
+  const responseText = await response.text();
   if (!contentType.includes('application/json')) {
-    throw new Error('PIOS_Fantasy Edge Function did not return JSON.');
+    throw new Error(`PIOS_Fantasy Edge Function did not return JSON (${response.status}): ${responseText.slice(0, 280)}`);
   }
 
-  const data = await response.json() as PiosFunctionResponse | PiosFunctionError;
+  const data = responseText ? JSON.parse(responseText) as PiosFunctionResponse | PiosFunctionError : {};
   if (!response.ok) {
-    throw new Error('error' in data && data.error ? data.error : `PIOS_Fantasy generation failed: ${response.status}`);
+    throw new Error('error' in data && data.error ? data.error : `PIOS_Fantasy generation failed: ${response.status}: ${responseText.slice(0, 280)}`);
   }
 
   return data as PiosFunctionResponse;

@@ -1,9 +1,9 @@
 export const COLORS = {
-  primary: '#2563eb', // blue-600
-  secondary: '#374151', // gray-700
-  success: '#16a34a', // green-600
-  warning: '#d97706', // amber-600
-  error: '#dc2626' // red-600
+  primary: '#0b1f3a',
+  secondary: '#3b5b7d',
+  success: '#0f766e',
+  warning: '#b45309',
+  error: '#b91c1c'
 };
 
 export const TYPOGRAPHY = {
@@ -28,9 +28,9 @@ export const SPACING = {
 };
 
 export const SHADOWS = {
-  subtle: '0 1px 2px rgba(0, 0, 0, 0.05)',
-  medium: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1)',
-  strong: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)'
+  subtle: '0 1px 2px rgba(11, 31, 58, 0.06)',
+  medium: '0 12px 30px -22px rgba(11, 31, 58, 0.5)',
+  strong: '0 24px 60px -38px rgba(11, 31, 58, 0.7)'
 };
 
 export const RADIUS = {

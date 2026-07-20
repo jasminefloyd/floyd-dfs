@@ -4,6 +4,7 @@ interface DraftKingsSalaryImport {
   team?: string;
   position: string;
   salary: number;
+  projected_points?: number;
   game_id?: string;
 }
 
@@ -89,6 +90,9 @@ function validateSlate(slate: DraftKingsSlateImport) {
   for (const salary of slate.salaries ?? []) {
     if (!salary.player_name || !salary.position || !Number.isFinite(Number(salary.salary)) || Number(salary.salary) <= 0) {
       throw new Error('Each salary row requires player_name, position, and positive salary.');
+    }
+    if (salary.projected_points !== undefined && !Number.isFinite(Number(salary.projected_points))) {
+      throw new Error('projected_points must be numeric when provided.');
     }
   }
 }

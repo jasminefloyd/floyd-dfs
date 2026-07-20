@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Info } from 'lucide-react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
 import { parseExcludedPlayers, validateScanInput } from '../lib/validation';
@@ -13,6 +14,12 @@ export interface ScanParams {
   excludedPlayers: string[];
   riskTolerance: string;
   lineupMode: string;
+  contestStrategy: string;
+  maxPlayerExposure: number;
+  maxTeamExposure: number;
+  minPrimaryStack: number;
+  diversifyLineups: boolean;
+  lateSwapMode: boolean;
 }
 
 interface MIOS_FantasyScannerProps {
@@ -31,6 +38,12 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const [excludedPlayers, setExcludedPlayers] = useState('');
   const [riskTolerance, setRiskTolerance] = useState('balanced');
   const [lineupMode, setLineupMode] = useState('max_fpts');
+  const [contestStrategy, setContestStrategy] = useState('single_entry');
+  const [maxPlayerExposure, setMaxPlayerExposure] = useState(70);
+  const [maxTeamExposure, setMaxTeamExposure] = useState(75);
+  const [minPrimaryStack, setMinPrimaryStack] = useState(3);
+  const [diversifyLineups, setDiversifyLineups] = useState(true);
+  const [lateSwapMode, setLateSwapMode] = useState(true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -78,30 +91,39 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       slate: selectedSlate,
       excludedPlayers: parseExcludedPlayers(excludedPlayers),
       riskTolerance,
-      lineupMode
+      lineupMode,
+      contestStrategy,
+      maxPlayerExposure: maxPlayerExposure / 100,
+      maxTeamExposure: maxTeamExposure / 100,
+      minPrimaryStack,
+      diversifyLineups,
+      lateSwapMode
     });
   };
 
   const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId);
   const scanDisabled = loading || slateLoading || !selectedSlate;
+  const fieldClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 shadow-[var(--shadow-subtle)] transition-colors duration-[var(--transition-fast)] placeholder:text-slate-400 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30';
+  const labelClass = 'block text-[11px] font-black uppercase tracking-wide text-slate-500';
+  const optionClass = (active: boolean) => `flex min-h-10 cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-xs font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cyan-500 ${
+    active ? 'border-[#0b1f3a] bg-[#0b1f3a] text-white shadow-[var(--shadow-subtle)]' : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-cyan-500 hover:bg-cyan-50'
+  }`;
 
   return (
-    <div className="space-y-5 text-gray-900">
+    <div className="space-y-4 text-slate-900">
       <div>
-        <p className="text-[11px] font-bold uppercase tracking-wide text-green-600">Build A Slate</p>
-        <h2 className="mt-1 text-2xl font-black text-gray-950">Scan Settings</h2>
-        <p className="mt-1 text-sm text-gray-500">Pick a sport, slate, and risk profile to generate DFS plays.</p>
+        <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Build A Slate</p>
+        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Scan Settings</h2>
+        <p className="mt-1 text-sm text-slate-500">Pick a sport, slate, and risk profile to generate DFS plays.</p>
       </div>
 
       <div>
-        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Sport</label>
+        <label className={`mb-2 ${labelClass}`}>Sport</label>
         <div className="grid grid-cols-2 gap-2">
           {SPORTS.map((s) => (
             <label
               key={s}
-              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-3 text-sm font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
-                sport === s ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
-              }`}
+              className={optionClass(sport === s)}
             >
               <input
                 type="radio"
@@ -119,14 +141,12 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       </div>
 
       <div>
-        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Contest Type</label>
+        <label className={`mb-2 ${labelClass}`}>Contest Type</label>
         <div className="grid grid-cols-2 gap-2">
           {CONTEST_TYPES.map((ct) => (
             <label
               key={ct}
-              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-3 text-sm font-black capitalize transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
-                contestType === ct ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
-              }`}
+              className={optionClass(contestType === ct)}
             >
               <input
                 type="radio"
@@ -145,18 +165,18 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
-          <label className="block text-xs font-bold uppercase tracking-wide text-gray-500">DraftKings Slate</label>
-          {slateLoading ? <span className="rounded-full border border-green-500/30 bg-green-50 px-2 py-1 text-xs font-bold text-green-700">Loading</span> : null}
+          <label className="block text-[11px] font-black uppercase tracking-wide text-slate-500">DraftKings Slate</label>
+          {slateLoading ? <span className="rounded-md border border-cyan-500/30 bg-cyan-50 px-2 py-1 text-xs font-black text-cyan-800">Loading</span> : null}
         </div>
 
         {slateError ? (
-          <div className="rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">
+          <div className="rounded-md border border-error/30 bg-red-50 p-3 text-sm font-medium text-error">
             {slateError}
           </div>
         ) : null}
 
         {!slateLoading && !slateError && slates.length === 0 ? (
-          <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          <div className="rounded-md border border-warning/30 bg-amber-50 p-3 text-sm font-medium text-warning">
             <p>{availabilityMessage(sport, contestType)}</p>
           </div>
         ) : null}
@@ -167,8 +187,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
             return (
               <label
                 key={slate.contest_id}
-                className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
-                  selectedContestId === slate.contest_id ? 'border-green-600 bg-green-50 ring-2 ring-green-500/20' : 'border-gray-200 bg-white hover:border-green-500'
+                className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cyan-500 ${
+                  selectedContestId === slate.contest_id ? 'border-[#0b1f3a] bg-blue-50 ring-2 ring-cyan-500/20' : 'border-slate-200 bg-white hover:border-cyan-500'
                 }`}
               >
                 <input
@@ -184,17 +204,17 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                   <span className="flex items-start gap-3">
                     <MatchupMark sport={sport} teams={matchup.teams} fallbackLogoUrl={slateSportLogoUrl(slate)} />
                     <span className="min-w-0 flex-1">
-                      <span className="block break-words text-sm font-black leading-tight text-gray-950">{matchup.label}</span>
-                      <span className="mt-1 block text-xs font-medium text-gray-500">
+                      <span className="block break-words text-sm font-black leading-tight text-[#0b1f3a]">{matchup.label}</span>
+                      <span className="mt-1 block text-xs font-medium text-slate-500">
                         {formatSlateDateTime(slate.start_time ?? slate.contest_date)}
                       </span>
                     </span>
                   </span>
                   <span className="mt-3 flex flex-wrap items-center gap-2 pl-14">
-                    <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-xs font-bold text-gray-700">
+                    <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
                       {salaryStatusLabel(slate)}
                     </span>
-                    <span className="min-w-0 break-words text-xs text-gray-500">
+                    <span className="min-w-0 break-words text-xs text-slate-500">
                       {slate.game_ids.length ? `${slate.game_ids.length} game${slate.game_ids.length === 1 ? '' : 's'}: ${slate.game_ids.join(', ')}` : 'Game IDs not imported'}
                     </span>
                   </span>
@@ -206,19 +226,19 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       </div>
 
       <div>
-        <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-gray-500">Exclude Players</label>
+        <label className={`mb-2 ${labelClass}`}>Exclude Players</label>
         <textarea
           placeholder="LeBron, Luka, Giannis (comma-separated)"
           value={excludedPlayers}
           onChange={(e) => setExcludedPlayers(e.target.value)}
           disabled={loading}
-          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-gray-900 transition-colors duration-[var(--transition-fast)] placeholder:text-gray-400 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500"
+          className={`${fieldClass} font-mono`}
           rows={3}
         />
       </div>
 
       <div>
-        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Lineup Mode</label>
+        <label className={`mb-2 ${labelClass}`}>Lineup Mode</label>
         <div className="grid grid-cols-2 gap-2">
           {[
             ['max_fpts', 'Max FPTS'],
@@ -228,9 +248,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
           ].map(([mode, label]) => (
             <label
               key={mode}
-              className={`flex cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-xs font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-success ${
-                lineupMode === mode ? 'border-green-600 bg-green-600 text-white' : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-green-500 hover:bg-green-50'
-              }`}
+              className={optionClass(lineupMode === mode)}
             >
               <input
                 type="radio"
@@ -248,7 +266,98 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       </div>
 
       <div>
-        <label className="mb-3 block text-xs font-bold uppercase tracking-wide text-gray-500">Risk Tolerance</label>
+        <LabelWithTooltip label="Contest Strategy" description="Sets ranking style: safer builds favor floor and confidence, while GPP builds favor stacks, ceiling, and leverage." />
+        <select
+          value={contestStrategy}
+          onChange={(event) => setContestStrategy(event.target.value)}
+          disabled={loading}
+          className={fieldClass}
+        >
+          <option value="cash">Cash / Safe</option>
+          <option value="single_entry">Single Entry</option>
+          <option value="small_field">Small Field</option>
+          <option value="large_field_gpp">Large Field GPP</option>
+          <option value="showdown">Showdown</option>
+        </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <LabelWithTooltip label="Player Exposure" description="Caps how often the same player can appear across generated lineups when diversification is enabled." />
+          <input
+            type="number"
+            min="20"
+            max="100"
+            step="5"
+            value={maxPlayerExposure}
+            onChange={(event) => setMaxPlayerExposure(Number(event.target.value))}
+            disabled={loading}
+            className={fieldClass}
+          />
+        </div>
+        <div>
+          <LabelWithTooltip label="Stack Exposure" description="Caps repeated use of the same primary team stack across generated MLB lineups." side="right" />
+          <input
+            type="number"
+            min="20"
+            max="100"
+            step="5"
+            value={maxTeamExposure}
+            onChange={(event) => setMaxTeamExposure(Number(event.target.value))}
+            disabled={loading}
+            className={fieldClass}
+          />
+        </div>
+      </div>
+
+      {sport === 'mlb' ? (
+        <div>
+          <label className={`mb-2 ${labelClass}`}>Primary Stack</label>
+          <input
+            type="range"
+            min="0"
+            max="5"
+            step="1"
+            value={minPrimaryStack}
+            onChange={(event) => setMinPrimaryStack(Number(event.target.value))}
+            disabled={loading}
+            className="w-full accent-[#0b1f3a]"
+          />
+          <div className="mt-2 flex justify-between text-xs text-slate-500">
+            <span>None</span>
+            <span>{minPrimaryStack} hitters</span>
+            <span>5 hitters</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">
+          <input
+            type="checkbox"
+            checked={diversifyLineups}
+            onChange={(event) => setDiversifyLineups(event.target.checked)}
+            disabled={loading}
+            className="h-4 w-4 accent-[#0b1f3a]"
+          />
+          Diversify
+          <Tooltip description="Builds a lineup set with less repeated player and stack exposure instead of five near-identical lineups." />
+        </label>
+        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">
+          <input
+            type="checkbox"
+            checked={lateSwapMode}
+            onChange={(event) => setLateSwapMode(event.target.checked)}
+            disabled={loading}
+            className="h-4 w-4 accent-[#0b1f3a]"
+          />
+          Late Swap
+          <Tooltip description="Flags lineup risks like unconfirmed batting orders, non-starters, and injury statuses before lock." side="right" />
+        </label>
+      </div>
+
+      <div>
+        <LabelWithTooltip label="Risk Tolerance" description="Controls how much the optimizer favors floor and confidence versus ceiling, variance, and leverage." />
         <input
           type="range"
           min="0"
@@ -260,9 +369,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
             setRiskTolerance(mapping[parseInt(e.target.value, 10)]);
           }}
           disabled={loading}
-          className="w-full accent-green-500"
+          className="w-full accent-[#0b1f3a]"
         />
-        <div className="mt-2 flex justify-between text-xs text-gray-500">
+        <div className="mt-2 flex justify-between text-xs text-slate-500">
           <span>Conservative</span>
           <span>Balanced</span>
           <span>Aggressive</span>
@@ -272,7 +381,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       <button
         onClick={handleScan}
         disabled={scanDisabled}
-        className="w-full rounded-md bg-green-600 px-4 py-3 font-black uppercase tracking-wide text-white transition-colors duration-[var(--transition-fast)] hover:bg-green-700 disabled:bg-gray-300 disabled:text-gray-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
+        className="w-full rounded-md bg-[#0b1f3a] px-4 py-3 font-black uppercase tracking-wide text-white shadow-[var(--shadow-medium)] transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:bg-slate-300 disabled:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
         {loading ? 'Scanning...' : 'Run Scan'}
       </button>
@@ -293,6 +402,38 @@ function isWithinScanWindow(slate: DraftKingsSlate): boolean {
 function availabilityMessage(sport: string, contestType: string): string {
   const label = `${sport.toUpperCase()} ${contestType}`;
   return `No DraftKings ${label} slates with verified salary data were found for the next 48 hours.`;
+}
+
+function LabelWithTooltip({ label, description, side = 'center' }: { label: string; description: string; side?: TooltipSide }) {
+  return (
+    <div className="mb-2 flex items-center gap-1.5">
+      <label className="block text-[11px] font-black uppercase tracking-wide text-slate-500">{label}</label>
+      <Tooltip description={description} side={side} />
+    </div>
+  );
+}
+
+type TooltipSide = 'center' | 'right';
+
+function Tooltip({ description, side = 'center' }: { description: string; side?: TooltipSide }) {
+  const bubblePosition = side === 'right'
+    ? 'right-0 top-6'
+    : 'left-1/2 top-6 -translate-x-1/2';
+
+  return (
+    <span className="group relative inline-flex">
+      <button
+        type="button"
+        aria-label={description}
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-[#0b1f3a] focus-visible:bg-slate-100 focus-visible:text-[#0b1f3a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
+      >
+        <Info className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+      <span className={`pointer-events-none absolute ${bubblePosition} z-20 hidden w-[min(14rem,calc(100vw-2rem))] rounded-md border border-slate-700 bg-[#0b1f3a] px-3 py-2 text-[11px] font-medium leading-snug text-white shadow-[var(--shadow-medium)] group-hover:block group-focus-within:block`}>
+        {description}
+      </span>
+    </span>
+  );
 }
 
 function formatSlateDateTime(value: string): string {
@@ -320,7 +461,7 @@ function MatchupMark({ sport, teams, fallbackLogoUrl }: { sport: string; teams: 
   const logos = teams.map((team) => team.logo_url).filter((url): url is string => Boolean(url)).slice(0, 2);
   if (logos.length) {
     return (
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center -space-x-3 rounded-md border border-green-200 bg-white p-1">
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center -space-x-3 rounded-md border border-cyan-200 bg-white p-1">
         {logos.map((logoUrl) => (
           <img
             key={logoUrl}
@@ -338,13 +479,13 @@ function MatchupMark({ sport, teams, fallbackLogoUrl }: { sport: string; teams: 
       <img
         src={fallbackLogoUrl}
         alt=""
-        className="h-11 w-11 shrink-0 rounded-md border border-green-200 bg-white object-contain p-1"
+        className="h-11 w-11 shrink-0 rounded-md border border-cyan-200 bg-white object-contain p-1"
       />
     );
   }
 
   return (
-    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-green-200 bg-green-50 text-sm font-black text-green-700">
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-cyan-200 bg-cyan-50 text-sm font-black text-cyan-800">
       {sport.slice(0, 3).toUpperCase()}
     </span>
   );

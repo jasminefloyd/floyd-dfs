@@ -14,15 +14,15 @@
 }
 
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
+  --text: #607087;
+  --text-h: #0b1f3a;
+  --bg: #f4f7fb;
+  --border: #d7e0ec;
+  --code-bg: #e8eef7;
+  --accent: #0b1f3a;
+  --accent-bg: rgba(11, 31, 58, 0.08);
+  --accent-border: rgba(11, 31, 58, 0.28);
+  --social-bg: rgba(232, 238, 247, 0.72);
   --shadow:
     rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
 
@@ -30,8 +30,8 @@
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
+  font: 16px/145% var(--sans);
+  letter-spacing: 0;
   color-scheme: light;
   color: var(--text);
   background: var(--bg);
@@ -54,6 +54,8 @@
 
 body {
   margin: 0;
+  background:
+    linear-gradient(180deg, #07182d 0, #0b1f3a 118px, #eef3f9 118px, #f4f7fb 100%);
 }
 
 .ticker-viewport {

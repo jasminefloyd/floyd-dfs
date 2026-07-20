@@ -35,7 +35,7 @@ export function ExportLineup({ lineup }: ExportLineupProps) {
     <div className="flex gap-2">
       <button
         onClick={() => void navigator.clipboard?.writeText(copyText)}
-        className="flex-1 rounded border border-gray-300 bg-white py-2 font-semibold text-gray-900 transition-colors duration-[var(--transition-fast)] hover:bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-500"
+        className="flex-1 rounded-md border border-slate-300 bg-white py-2 font-bold text-slate-900 transition-colors duration-[var(--transition-fast)] hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
         Copy
       </button>
@@ -49,7 +49,7 @@ export function ExportLineup({ lineup }: ExportLineupProps) {
           link.click();
           URL.revokeObjectURL(url);
         }}
-        className="flex-1 rounded bg-gray-900 py-2 font-semibold text-white transition-colors duration-[var(--transition-fast)] hover:bg-gray-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-secondary"
+        className="flex-1 rounded-md bg-[#0b1f3a] py-2 font-bold text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
         CSV
       </button>

@@ -21,18 +21,18 @@ export function InjuryReport({ manifest }: InjuryReportProps) {
   const checkedAt = formatCheckedAt(manifest.collected_at);
 
   return (
-    <section className="mb-4 rounded-lg border border-amber-200 bg-amber-50/70 p-4 text-gray-900 shadow-[var(--shadow-subtle)]">
+    <section className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-slate-900 shadow-[var(--shadow-subtle)] sm:p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 items-start gap-3">
           <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-white text-amber-600">
             <AlertTriangle className="h-4 w-4" aria-hidden="true" />
           </span>
           <div className="min-w-0">
-            <p className="text-[11px] font-bold uppercase tracking-wide text-amber-700">Injury Report</p>
-            <h3 className="mt-1 text-base font-black text-gray-950">
+            <p className="text-[11px] font-black uppercase tracking-wide text-amber-700">Injury Report</p>
+            <h3 className="mt-1 text-base font-black text-[#0b1f3a]">
               {injuries.length ? `${injuries.length} scan-related injury flag${injuries.length === 1 ? '' : 's'}` : 'No scan-related injury flags'}
             </h3>
-            {checkedAt ? <p className="mt-1 text-xs text-gray-500">Checked {checkedAt}</p> : null}
+            {checkedAt ? <p className="mt-1 text-xs font-medium text-slate-500">Checked {checkedAt}</p> : null}
           </div>
         </div>
         <span className="rounded-full border border-amber-200 bg-white px-2 py-1 text-xs font-bold text-amber-700">
@@ -44,8 +44,8 @@ export function InjuryReport({ manifest }: InjuryReportProps) {
         <div className="mt-3 flex flex-wrap gap-2">
           {injuries.map((player) => (
             <div key={player.id} className="rounded-md border border-amber-200 bg-white px-3 py-2 text-xs">
-              <p className="font-black text-gray-950">{player.name}</p>
-              <p className="mt-0.5 text-gray-600">
+              <p className="font-black text-[#0b1f3a]">{player.name}</p>
+              <p className="mt-0.5 text-slate-600">
                 {STATUS_LABELS[player.injury_status]} · {player.team || 'Team N/A'} · {player.position}
               </p>
               {player.injury_note ? <p className="mt-1 text-amber-700">{player.injury_note}</p> : null}

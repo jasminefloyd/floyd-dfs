@@ -19,8 +19,9 @@ interface Player {
   salary_source?: 'draftkings_import' | 'estimated';
   injury_status: InjuryStatus;
   injury_note?: string;
-  projection_source?: 'last_5' | 'position_baseline';
+  projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated';
   projected_points?: number;
+  context_score?: number;
   news_score?: number;
   news_note?: string;
   last_5_stats?: {
@@ -122,6 +123,38 @@ interface CachedSentimentRow {
   sentiment_score: number;
   key_themes: string[];
   last_updated_at: string;
+}
+
+interface ProjectionCalibrationRow {
+  sport: string;
+  sample_size: number;
+  avg_projection_error: number | null;
+  avg_absolute_error: number | null;
+  projection_bias_multiplier: number | null;
+}
+
+interface MlbGameContext {
+  game_id: string;
+  home_team: string;
+  away_team: string;
+  venue_name?: string;
+  start_time?: string;
+  probable_pitchers: Record<string, { id?: string; name: string }>;
+  batting_orders?: Record<string, Record<string, number>>;
+  confirmed_starters?: Record<string, Set<string>>;
+  park_factor: number;
+  weather_factor: number;
+  run_factor: number;
+  weather_note?: string;
+  lineup_note?: string;
+}
+
+interface StatcastQuality {
+  player_key: string;
+  name_key: string;
+  sample_size: number;
+  quality_score: number;
+  note: string;
 }
 
 interface RedditFeedItem {
@@ -484,6 +517,9 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       injury_note: salaryRow.status && salaryRow.status !== 'None' ? `DraftKings status: ${salaryRow.status}` : player.injury_note,
       image_url: player.image_url ?? salaryRow.image_url ?? undefined,
       team_logo_url: player.team_logo_url ?? salaryRow.team_logo_url ?? teamLogoFallbackUrl(sport, salaryRow.team ?? undefined),
+      projection_source: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
+        ? 'draftkings'
+        : player.projection_source,
       projected_points: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
         ? salaryRow.projected_points
         : player.projected_points,
@@ -514,7 +550,7 @@ function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): P
     salary_source: 'draftkings_import',
     injury_status: draftKingsStatusToInjuryStatus(row),
     injury_note: row.status && row.status !== 'None' ? `DraftKings status: ${row.status}` : undefined,
-    projection_source: 'position_baseline',
+    projection_source: row.projected_points ? 'draftkings' : 'position_baseline',
     projected_points: projected,
     last_5_stats: {
       avg_points: projected,
@@ -664,6 +700,85 @@ const ODDS_TEAM_NAMES: Record<string, Record<string, string[]>> = {
   },
 };
 
+const MLB_TEAM_ABBR_ALIASES: Record<string, string> = {
+  ARI: 'ARI',
+  ATL: 'ATL',
+  BAL: 'BAL',
+  BOS: 'BOS',
+  CHC: 'CHC',
+  CHW: 'CWS',
+  CWS: 'CWS',
+  CIN: 'CIN',
+  CLE: 'CLE',
+  COL: 'COL',
+  DET: 'DET',
+  HOU: 'HOU',
+  KC: 'KC',
+  KCR: 'KC',
+  LAA: 'LAA',
+  LAD: 'LAD',
+  MIA: 'MIA',
+  MIL: 'MIL',
+  MIN: 'MIN',
+  NYM: 'NYM',
+  NYY: 'NYY',
+  OAK: 'OAK',
+  ATH: 'OAK',
+  PHI: 'PHI',
+  PIT: 'PIT',
+  SD: 'SD',
+  SDP: 'SD',
+  SEA: 'SEA',
+  SF: 'SF',
+  SFG: 'SF',
+  STL: 'STL',
+  TB: 'TB',
+  TBR: 'TB',
+  TEX: 'TEX',
+  TOR: 'TOR',
+  WSH: 'WSH',
+  WSN: 'WSH',
+};
+
+const MLB_PARK_CONTEXT: Record<string, {
+  venue: string;
+  lat: number;
+  lon: number;
+  park_factor: number;
+  roof?: boolean;
+}> = {
+  ARI: { venue: 'Chase Field', lat: 33.4455, lon: -112.0667, park_factor: 1.02, roof: true },
+  ATL: { venue: 'Truist Park', lat: 33.8908, lon: -84.4678, park_factor: 1.01 },
+  BAL: { venue: 'Oriole Park at Camden Yards', lat: 39.2839, lon: -76.6217, park_factor: 0.98 },
+  BOS: { venue: 'Fenway Park', lat: 42.3467, lon: -71.0972, park_factor: 1.04 },
+  CHC: { venue: 'Wrigley Field', lat: 41.9484, lon: -87.6553, park_factor: 1.06 },
+  CWS: { venue: 'Rate Field', lat: 41.8300, lon: -87.6339, park_factor: 1.01 },
+  CIN: { venue: 'Great American Ball Park', lat: 39.0979, lon: -84.5082, park_factor: 1.07 },
+  CLE: { venue: 'Progressive Field', lat: 41.4962, lon: -81.6852, park_factor: 0.99 },
+  COL: { venue: 'Coors Field', lat: 39.7561, lon: -104.9942, park_factor: 1.18 },
+  DET: { venue: 'Comerica Park', lat: 42.3390, lon: -83.0485, park_factor: 0.99 },
+  HOU: { venue: 'Daikin Park', lat: 29.7573, lon: -95.3555, park_factor: 1.00, roof: true },
+  KC: { venue: 'Kauffman Stadium', lat: 39.0517, lon: -94.4803, park_factor: 1.00 },
+  LAA: { venue: 'Angel Stadium', lat: 33.8003, lon: -117.8827, park_factor: 0.99 },
+  LAD: { venue: 'Dodger Stadium', lat: 34.0739, lon: -118.2400, park_factor: 0.97 },
+  MIA: { venue: 'loanDepot park', lat: 25.7781, lon: -80.2197, park_factor: 0.96, roof: true },
+  MIL: { venue: 'American Family Field', lat: 43.0280, lon: -87.9712, park_factor: 1.01, roof: true },
+  MIN: { venue: 'Target Field', lat: 44.9817, lon: -93.2776, park_factor: 0.99 },
+  NYM: { venue: 'Citi Field', lat: 40.7571, lon: -73.8458, park_factor: 0.98 },
+  NYY: { venue: 'Yankee Stadium', lat: 40.8296, lon: -73.9262, park_factor: 1.03 },
+  OAK: { venue: 'Sutter Health Park', lat: 38.5804, lon: -121.5139, park_factor: 1.00 },
+  PHI: { venue: 'Citizens Bank Park', lat: 39.9061, lon: -75.1665, park_factor: 1.04 },
+  PIT: { venue: 'PNC Park', lat: 40.4469, lon: -80.0057, park_factor: 0.98 },
+  SD: { venue: 'Petco Park', lat: 32.7073, lon: -117.1566, park_factor: 0.96 },
+  SEA: { venue: 'T-Mobile Park', lat: 47.5914, lon: -122.3325, park_factor: 0.97, roof: true },
+  SF: { venue: 'Oracle Park', lat: 37.7786, lon: -122.3893, park_factor: 0.95 },
+  STL: { venue: 'Busch Stadium', lat: 38.6226, lon: -90.1928, park_factor: 0.99 },
+  TB: { venue: 'George M. Steinbrenner Field', lat: 27.9803, lon: -82.5067, park_factor: 1.00 },
+  TEX: { venue: 'Globe Life Field', lat: 32.7473, lon: -97.0842, park_factor: 1.02, roof: true },
+  TOR: { venue: 'Rogers Centre', lat: 43.6414, lon: -79.3894, park_factor: 1.01, roof: true },
+  WSH: { venue: 'Nationals Park', lat: 38.8730, lon: -77.0074, park_factor: 1.00 },
+};
+
 function oddsTeamMatches(sport: string, teamAbbr: string, teamName: string): boolean {
   const normalized = teamName.toLowerCase();
   return (ODDS_TEAM_NAMES[sport]?.[teamAbbr] ?? [teamAbbr.toLowerCase()])
@@ -721,6 +836,494 @@ async function collectOddsApiContext(sport: string, slate?: DraftKingsSlate): Pr
     console.error('The Odds API fallback error:', error);
     return [];
   }
+}
+
+function normalizeMlbTeam(value: unknown): string {
+  const raw = String(value ?? '').toUpperCase();
+  return MLB_TEAM_ABBR_ALIASES[raw] ?? raw;
+}
+
+function weatherFactorFromForecast(period: any): { factor: number; note?: string } {
+  if (!period) return { factor: 1 };
+  const temp = Number(period.temperature);
+  const windText = String(period.windSpeed ?? '');
+  const windMatch = windText.match(/(\d+)/);
+  const windMph = windMatch ? Number(windMatch[1]) : 0;
+  const shortForecast = String(period.shortForecast ?? '').toLowerCase();
+
+  let factor = 1;
+  if (Number.isFinite(temp)) {
+    if (temp >= 88) factor += 0.035;
+    else if (temp >= 78) factor += 0.02;
+    else if (temp <= 50) factor -= 0.025;
+    else if (temp <= 60) factor -= 0.012;
+  }
+  if (windMph >= 15) factor += 0.018;
+  else if (windMph >= 10) factor += 0.01;
+  if (/rain|thunder|shower|storm/.test(shortForecast)) factor -= 0.03;
+
+  const parts = [
+    Number.isFinite(temp) ? `${temp}F` : '',
+    windText ? `wind ${windText}` : '',
+    period.shortForecast ? String(period.shortForecast) : '',
+  ].filter(Boolean);
+  return {
+    factor: Number(Math.min(Math.max(factor, 0.93), 1.08).toFixed(3)),
+    note: parts.join(', ') || undefined,
+  };
+}
+
+async function collectNwsWeatherFactor(team: string, startTime?: string): Promise<{ factor: number; note?: string }> {
+  const park = MLB_PARK_CONTEXT[team];
+  if (!park || park.roof) return { factor: 1, note: park?.roof ? 'roof/indoor park' : undefined };
+
+  try {
+    const pointsResponse = await limitedFetch(
+      `https://api.weather.gov/points/${park.lat},${park.lon}`,
+      'nws-points',
+      {
+        headers: {
+          Accept: 'application/geo+json, application/json',
+          'User-Agent': 'fantasy-ai/1.0 free-weather-context',
+        },
+        timeoutMs: 8_000,
+        retries: 1,
+        dedupeMs: 600,
+      },
+    );
+    if (!pointsResponse.ok) return { factor: 1 };
+    const pointData = await pointsResponse.json() as any;
+    const hourlyUrl = pointData?.properties?.forecastHourly;
+    if (!hourlyUrl) return { factor: 1 };
+
+    const forecastResponse = await limitedFetch(hourlyUrl, 'nws-hourly', {
+      headers: {
+        Accept: 'application/geo+json, application/json',
+        'User-Agent': 'fantasy-ai/1.0 free-weather-context',
+      },
+      timeoutMs: 8_000,
+      retries: 1,
+      dedupeMs: 600,
+    });
+    if (!forecastResponse.ok) return { factor: 1 };
+    const forecastData = await forecastResponse.json() as any;
+    const periods = forecastData?.properties?.periods ?? [];
+    const targetTime = startTime ? new Date(startTime).getTime() : Date.now();
+    const matched = periods.find((period: any) => {
+      const periodStart = new Date(period?.startTime ?? '').getTime();
+      const periodEnd = new Date(period?.endTime ?? '').getTime();
+      return Number.isFinite(periodStart) && Number.isFinite(periodEnd) && targetTime >= periodStart && targetTime <= periodEnd;
+    }) ?? periods[0];
+    return weatherFactorFromForecast(matched);
+  } catch (error) {
+    console.error(`NWS weather error for ${team}:`, error);
+    return { factor: 1 };
+  }
+}
+
+function parseMlbLiveLineupTeam(teamBox: any): { battingOrder: Record<string, number>; starters: Set<string> } {
+  const players = teamBox?.players ?? {};
+  const battingOrder: Record<string, number> = {};
+  const starters = new Set<string>();
+
+  for (const player of Object.values(players) as any[]) {
+    const personId = player?.person?.id ? String(player.person.id) : '';
+    const fullName = String(player?.person?.fullName ?? '');
+    const order = Number(player?.battingOrder);
+    const isStarter = Boolean(player?.gameStatus?.isCurrentBatter)
+      || Boolean(player?.gameStatus?.isOnBench === false)
+      || Boolean(player?.allPositions?.length)
+      || Number.isFinite(order);
+    if (fullName && isStarter) starters.add(normalizeName(fullName));
+    if (personId && isStarter) starters.add(personId);
+    if (fullName && Number.isFinite(order) && order > 0) {
+      battingOrder[normalizeName(fullName)] = Math.floor(order / 100);
+    }
+    if (personId && Number.isFinite(order) && order > 0) {
+      battingOrder[personId] = Math.floor(order / 100);
+    }
+  }
+
+  return { battingOrder, starters };
+}
+
+async function collectMlbLiveLineupContext(gameId: string, homeTeam: string, awayTeam: string): Promise<{
+  batting_orders: Record<string, Record<string, number>>;
+  confirmed_starters: Record<string, Set<string>>;
+  lineup_note?: string;
+} | null> {
+  if (!gameId) return null;
+
+  try {
+    const response = await limitedFetch(
+      `https://statsapi.mlb.com/api/v1.1/game/${encodeURIComponent(gameId)}/feed/live`,
+      'mlb-live-feed',
+      { headers: { Accept: 'application/json' }, timeoutMs: 10_000, retries: 1, dedupeMs: 500 },
+    );
+    if (!response.ok) return null;
+    const data = await response.json() as any;
+    const home = parseMlbLiveLineupTeam(data?.liveData?.boxscore?.teams?.home);
+    const away = parseMlbLiveLineupTeam(data?.liveData?.boxscore?.teams?.away);
+    const battingOrderCount = Object.keys(home.battingOrder).length + Object.keys(away.battingOrder).length;
+    const starterCount = home.starters.size + away.starters.size;
+    if (!battingOrderCount && !starterCount) return null;
+
+    return {
+      batting_orders: {
+        [homeTeam]: home.battingOrder,
+        [awayTeam]: away.battingOrder,
+      },
+      confirmed_starters: {
+        [homeTeam]: home.starters,
+        [awayTeam]: away.starters,
+      },
+      lineup_note: battingOrderCount
+        ? `MLB live feed batting order detected for ${battingOrderCount} player keys`
+        : `MLB live feed starter context detected for ${starterCount} player keys`,
+    };
+  } catch (error) {
+    console.error(`MLB live lineup error for ${gameId}:`, error);
+    return null;
+  }
+}
+
+async function collectMlbFreeGameContext(contestDate: string, slate?: DraftKingsSlate): Promise<MlbGameContext[]> {
+  const slateTeams = new Set(slateTeamAbbreviations(slate).map(normalizeMlbTeam));
+  try {
+    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${encodeURIComponent(contestDate)}&hydrate=probablePitcher,venue`;
+    const response = await limitedFetch(url, 'mlb-schedule-context', {
+      headers: { Accept: 'application/json' },
+      timeoutMs: 10_000,
+      retries: 1,
+      dedupeMs: 500,
+    });
+    if (!response.ok) throw new Error(`MLB schedule ${response.status}`);
+    const data = await response.json() as any;
+    const games = (data?.dates ?? []).flatMap((date: any) => date?.games ?? []);
+    const filtered = games.filter((game: any) => {
+      if (!slateTeams.size) return true;
+      const home = normalizeMlbTeam(game?.teams?.home?.team?.abbreviation);
+      const away = normalizeMlbTeam(game?.teams?.away?.team?.abbreviation);
+      return slateTeams.has(home) || slateTeams.has(away);
+    });
+
+    return await Promise.all(filtered.map(async (game: any) => {
+      const home = normalizeMlbTeam(game?.teams?.home?.team?.abbreviation);
+      const away = normalizeMlbTeam(game?.teams?.away?.team?.abbreviation);
+      const park = MLB_PARK_CONTEXT[home];
+      const gameId = String(game?.gamePk ?? '');
+      const [weather, lineupContext] = await Promise.all([
+        collectNwsWeatherFactor(home, game?.gameDate),
+        collectMlbLiveLineupContext(gameId, home, away),
+      ]);
+      const parkFactor = park?.park_factor ?? 1;
+      const runFactor = Number(Math.min(Math.max(parkFactor * weather.factor, 0.88), 1.22).toFixed(3));
+      return {
+        game_id: gameId,
+        home_team: home,
+        away_team: away,
+        venue_name: game?.venue?.name ?? park?.venue,
+        start_time: game?.gameDate,
+        probable_pitchers: {
+          [home]: {
+            id: game?.teams?.home?.probablePitcher?.id ? String(game.teams.home.probablePitcher.id) : undefined,
+            name: String(game?.teams?.home?.probablePitcher?.fullName ?? ''),
+          },
+          [away]: {
+            id: game?.teams?.away?.probablePitcher?.id ? String(game.teams.away.probablePitcher.id) : undefined,
+            name: String(game?.teams?.away?.probablePitcher?.fullName ?? ''),
+          },
+        },
+        batting_orders: lineupContext?.batting_orders,
+        confirmed_starters: lineupContext?.confirmed_starters,
+        park_factor: parkFactor,
+        weather_factor: weather.factor,
+        run_factor: runFactor,
+        weather_note: weather.note,
+        lineup_note: lineupContext?.lineup_note,
+      };
+    }));
+  } catch (error) {
+    console.error('MLB free game context error:', error);
+    return [];
+  }
+}
+
+function mlbContextByTeam(contexts: MlbGameContext[]): Map<string, MlbGameContext> {
+  const byTeam = new Map<string, MlbGameContext>();
+  for (const context of contexts) {
+    byTeam.set(context.home_team, context);
+    byTeam.set(context.away_team, context);
+  }
+  return byTeam;
+}
+
+function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Player[] {
+  if (!contexts.length) return players;
+  const byTeam = mlbContextByTeam(contexts);
+  return players.map((player) => {
+    const team = normalizeMlbTeam(player.team);
+    const context = byTeam.get(team);
+    if (!context || !player.projected_points) return player;
+
+    const isPitcher = /^(P|SP|RP)$/.test(player.position);
+    const opponent = team === context.home_team ? context.away_team : context.home_team;
+    const opponentProbablePitcher = context.probable_pitchers[opponent]?.name;
+    const ownProbablePitcher = context.probable_pitchers[team]?.name;
+    const playerKeys = [player.id, normalizeName(player.name)].filter(Boolean);
+    const battingOrder = playerKeys
+      .map((key) => context.batting_orders?.[team]?.[key])
+      .find((order) => Number.isFinite(order) && order > 0);
+    const isConfirmedStarter = playerKeys.some((key) => context.confirmed_starters?.[team]?.has(key));
+    const hasConfirmedTeamLineup = (context.confirmed_starters?.[team]?.size ?? 0) >= 8;
+    let multiplier = isPitcher ? 2 - context.run_factor : context.run_factor;
+    if (isPitcher && ownProbablePitcher && normalizeName(ownProbablePitcher) === normalizeName(player.name)) {
+      multiplier += 0.03;
+    }
+    if (!isPitcher && battingOrder) {
+      if (battingOrder <= 2) multiplier += 0.045;
+      else if (battingOrder <= 5) multiplier += 0.028;
+      else if (battingOrder >= 8) multiplier -= 0.018;
+    } else if (!isPitcher && hasConfirmedTeamLineup && !isConfirmedStarter) {
+      multiplier -= 0.18;
+    }
+    multiplier = Math.min(Math.max(multiplier, isPitcher ? 0.9 : 0.88), isPitcher ? 1.12 : 1.18);
+
+    const projectedPoints = Number((player.projected_points * multiplier).toFixed(2));
+    const noteParts = [
+      `${context.venue_name ?? 'MLB park'} run factor ${context.run_factor.toFixed(2)}`,
+      context.weather_note,
+      opponentProbablePitcher && !isPitcher ? `vs probable ${opponentProbablePitcher}` : '',
+      !isPitcher && battingOrder ? `batting ${battingOrder}` : '',
+      !isPitcher && hasConfirmedTeamLineup && !isConfirmedStarter ? 'not in confirmed lineup' : '',
+      isPitcher && ownProbablePitcher ? `probable starter: ${ownProbablePitcher}` : '',
+    ].filter(Boolean);
+
+    return {
+      ...player,
+      context_score: Number((multiplier - 1).toFixed(3)),
+      projected_points: projectedPoints,
+      news_score: Number(((player.news_score ?? 0) + (multiplier - 1) * 3).toFixed(2)),
+      news_note: [player.news_note, noteParts.join('; ')].filter(Boolean).join(' | '),
+      last_5_stats: player.last_5_stats ? {
+        ...player.last_5_stats,
+        avg_fantasy_pts: projectedPoints,
+      } : player.last_5_stats,
+    };
+  });
+}
+
+function dateDaysAgo(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function parseCsvLine(line: string): string[] {
+  const values: string[] = [];
+  let current = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === ',' && !quoted) {
+      values.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  values.push(current);
+  return values;
+}
+
+function parseCsv(text: string): Record<string, string>[] {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return [];
+  const headers = parseCsvLine(lines[0]).map((header) => header.trim());
+  return lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    return headers.reduce<Record<string, string>>((row, header, index) => {
+      row[header] = values[index] ?? '';
+      return row;
+    }, {});
+  });
+}
+
+function statcastUrl(playerType: 'batter' | 'pitcher', startDate: string, endDate: string): string {
+  const params = new URLSearchParams({
+    all: 'true',
+    hfPT: '',
+    hfAB: '',
+    hfBBT: '',
+    hfPR: '',
+    hfZ: '',
+    stadium: '',
+    hfBBL: '',
+    hfNewZones: '',
+    hfGT: 'R|PO|S|',
+    hfC: '',
+    hfSea: `${new Date(startDate).getUTCFullYear()}|`,
+    hfSit: '',
+    hfOuts: '',
+    opponent: '',
+    pitcher_throws: '',
+    batter_stands: '',
+    hfSA: '',
+    player_type: playerType,
+    hfInfield: '',
+    team: '',
+    position: '',
+    hfOutfield: '',
+    hfRO: '',
+    home_road: '',
+    game_date_gt: startDate,
+    game_date_lt: endDate,
+    hfFlag: '',
+    hfPull: '',
+    metric_1: '',
+    hfInn: '',
+    min_pitches: '0',
+    min_results: '0',
+    group_by: 'name',
+    sort_col: 'pitches',
+    player_event_sort: 'h_launch_speed',
+    sort_order: 'desc',
+    min_abs: '0',
+    type: 'details',
+  });
+  return `https://baseballsavant.mlb.com/statcast_search/csv?${params.toString()}`;
+}
+
+function statcastNumber(row: Record<string, string>, key: string): number {
+  const parsed = Number(row[key]);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function aggregateBatterStatcast(rows: Record<string, string>[]): StatcastQuality[] {
+  const grouped = new Map<string, Record<string, string>[]>();
+  for (const row of rows) {
+    const playerId = row.batter;
+    const name = row.player_name;
+    const key = playerId || normalizeName(name);
+    if (!key) continue;
+    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+  }
+
+  return [...grouped.entries()].map(([key, playerRows]) => {
+    const battedBalls = playerRows.filter((row) => statcastNumber(row, 'launch_speed') > 0);
+    const hardHits = battedBalls.filter((row) => statcastNumber(row, 'launch_speed') >= 95).length;
+    const barrels = battedBalls.filter((row) => {
+      const speed = statcastNumber(row, 'launch_speed');
+      const angle = statcastNumber(row, 'launch_angle');
+      return speed >= 98 && angle >= 8 && angle <= 32;
+    }).length;
+    const avgXwoba = battedBalls.reduce((sum, row) => sum + statcastNumber(row, 'estimated_woba_using_speedangle'), 0) / Math.max(battedBalls.length, 1);
+    const hardHitRate = hardHits / Math.max(battedBalls.length, 1);
+    const barrelRate = barrels / Math.max(battedBalls.length, 1);
+    const qualityScore = Math.min(Math.max((hardHitRate - 0.38) * 0.9 + (barrelRate - 0.08) * 1.4 + (avgXwoba - 0.32) * 0.7, -0.12), 0.14);
+    const name = playerRows[0]?.player_name ?? key;
+    return {
+      player_key: key,
+      name_key: normalizeName(name),
+      sample_size: battedBalls.length,
+      quality_score: Number(qualityScore.toFixed(3)),
+      note: `Statcast ${battedBalls.length} BBE: ${(hardHitRate * 100).toFixed(0)}% hard hit, ${(barrelRate * 100).toFixed(0)}% barrel-ish, ${avgXwoba.toFixed(3)} xwOBA (${name})`,
+    };
+  }).filter((quality) => quality.sample_size >= 5);
+}
+
+function aggregatePitcherStatcast(rows: Record<string, string>[]): StatcastQuality[] {
+  const grouped = new Map<string, Record<string, string>[]>();
+  for (const row of rows) {
+    const playerId = row.pitcher;
+    const name = row.player_name;
+    const key = playerId || normalizeName(name);
+    if (!key) continue;
+    grouped.set(key, [...(grouped.get(key) ?? []), row]);
+  }
+
+  return [...grouped.entries()].map(([key, playerRows]) => {
+    const pitches = playerRows.length;
+    const battedBalls = playerRows.filter((row) => statcastNumber(row, 'launch_speed') > 0);
+    const hardAllowed = battedBalls.filter((row) => statcastNumber(row, 'launch_speed') >= 95).length;
+    const avgXwobaAllowed = battedBalls.reduce((sum, row) => sum + statcastNumber(row, 'estimated_woba_using_speedangle'), 0) / Math.max(battedBalls.length, 1);
+    const strikeouts = playerRows.filter((row) => /strikeout/i.test(row.events ?? '')).length;
+    const walks = playerRows.filter((row) => /walk/i.test(row.events ?? '')).length;
+    const hardAllowedRate = hardAllowed / Math.max(battedBalls.length, 1);
+    const strikeoutRate = strikeouts / Math.max(playerRows.filter((row) => row.events).length, 1);
+    const walkRate = walks / Math.max(playerRows.filter((row) => row.events).length, 1);
+    const qualityScore = Math.min(Math.max((0.4 - hardAllowedRate) * 0.7 + (0.31 - avgXwobaAllowed) * 0.65 + (strikeoutRate - 0.22) * 0.45 - Math.max(walkRate - 0.09, 0) * 0.35, -0.1), 0.12);
+    const name = playerRows[0]?.player_name ?? key;
+    return {
+      player_key: key,
+      name_key: normalizeName(name),
+      sample_size: pitches,
+      quality_score: Number(qualityScore.toFixed(3)),
+      note: `Statcast ${pitches} pitches: ${(hardAllowedRate * 100).toFixed(0)}% hard allowed, ${avgXwobaAllowed.toFixed(3)} xwOBA allowed (${name})`,
+    };
+  }).filter((quality) => quality.sample_size >= 30);
+}
+
+async function collectStatcastQuality(): Promise<Map<string, StatcastQuality>> {
+  const endDate = dateDaysAgo(1);
+  const startDate = dateDaysAgo(21);
+  try {
+    const [batterResponse, pitcherResponse] = await Promise.all([
+      limitedFetch(statcastUrl('batter', startDate, endDate), 'savant-batters', {
+        headers: { Accept: 'text/csv' },
+        timeoutMs: 16_000,
+        retries: 1,
+        dedupeMs: 1_000,
+      }),
+      limitedFetch(statcastUrl('pitcher', startDate, endDate), 'savant-pitchers', {
+        headers: { Accept: 'text/csv' },
+        timeoutMs: 16_000,
+        retries: 1,
+        dedupeMs: 1_000,
+      }),
+    ]);
+    const qualityRows = [
+      ...(batterResponse.ok ? aggregateBatterStatcast(parseCsv(await batterResponse.text())) : []),
+      ...(pitcherResponse.ok ? aggregatePitcherStatcast(parseCsv(await pitcherResponse.text())) : []),
+    ];
+    const qualityByKey = new Map<string, StatcastQuality>();
+    for (const quality of qualityRows) {
+      qualityByKey.set(quality.player_key, quality);
+      qualityByKey.set(quality.name_key, quality);
+    }
+    return qualityByKey;
+  } catch (error) {
+    console.error('Baseball Savant Statcast quality error:', error);
+    return new Map();
+  }
+}
+
+function applyStatcastQuality(players: Player[], qualityByKey: Map<string, StatcastQuality>): Player[] {
+  if (!qualityByKey.size) return players;
+  return players.map((player) => {
+    const quality = qualityByKey.get(String(player.id).replace(/^dk:/, '')) ?? qualityByKey.get(normalizeName(player.name));
+    if (!quality || !player.projected_points) return player;
+    const multiplier = Math.min(Math.max(1 + quality.quality_score, 0.88), 1.14);
+    const projectedPoints = Number((player.projected_points * multiplier).toFixed(2));
+    return {
+      ...player,
+      context_score: Number(((player.context_score ?? 0) + quality.quality_score).toFixed(3)),
+      projected_points: projectedPoints,
+      news_score: Number(((player.news_score ?? 0) + quality.quality_score * 4).toFixed(2)),
+      news_note: [player.news_note, quality.note].filter(Boolean).join(' | '),
+      last_5_stats: player.last_5_stats ? {
+        ...player.last_5_stats,
+        avg_fantasy_pts: projectedPoints,
+        confidence: Math.min(Math.max((player.last_5_stats.confidence ?? 0.6) + Math.min(Math.abs(quality.quality_score), 0.04), 0.2), 0.95),
+      } : player.last_5_stats,
+    };
+  });
 }
 
 function buildBaselineGames(projectedPoints: number): Last5Game[] {
@@ -1559,6 +2162,26 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
   const avg = stats?.aggregated_stats?.avg_fantasy_pts ?? stats?.aggregated_stats?.fantasy_points;
   if (!Array.isArray(games) || games.length === 0 || typeof avg !== 'number') return player;
 
+  if (sport === 'mlb' && player.projection_source === 'draftkings' && typeof player.projected_points === 'number' && player.projected_points > 0) {
+    const blendedProjection = Number((player.projected_points * 0.72 + avg * 0.28).toFixed(2));
+    const boundedProjection = Math.min(
+      Math.max(blendedProjection, player.projected_points * 0.82),
+      player.projected_points * 1.18,
+    );
+    return {
+      ...player,
+      projection_source: 'draftkings_last5_blend',
+      projected_points: Number(boundedProjection.toFixed(2)),
+      last_5_stats: {
+        avg_points: avg,
+        avg_fantasy_pts: avg,
+        trend: 'stable',
+        confidence: Math.max(stats.confidence_score ?? 0.7, player.last_5_stats?.confidence ?? 0.62),
+        games,
+      },
+    };
+  }
+
   return {
     ...player,
     projection_source: 'last_5',
@@ -1571,6 +2194,60 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
       confidence: stats.confidence_score ?? 0.7,
       games,
     },
+  };
+}
+
+function prioritizedEnrichmentRoster(players: Player[], sport: string): Player[] {
+  const limit = sport === 'mlb' ? 50 : 30;
+  return [...players]
+    .sort((a, b) => {
+      const bProjection = b.projected_points ?? b.last_5_stats?.avg_fantasy_pts ?? 0;
+      const aProjection = a.projected_points ?? a.last_5_stats?.avg_fantasy_pts ?? 0;
+      return (bProjection * 100 + b.salary / 100) - (aProjection * 100 + a.salary / 100);
+    })
+    .slice(0, limit);
+}
+
+async function getProjectionCalibration(sport: string): Promise<ProjectionCalibrationRow | null> {
+  const rows = await callSupabaseRpc<ProjectionCalibrationRow[]>('fantasy_ai_projection_calibration', {
+    p_sport: sport,
+    p_days: 45,
+  }, { allowMissingServiceRole: true }).catch(() => null);
+  return rows?.[0] ?? null;
+}
+
+function applyProjectionCalibration(players: Player[], calibration: ProjectionCalibrationRow | null): {
+  players: Player[];
+  applied: boolean;
+  multiplier: number;
+} {
+  const sampleSize = Number(calibration?.sample_size ?? 0);
+  const rawMultiplier = Number(calibration?.projection_bias_multiplier ?? 1);
+  if (sampleSize < 50 || !Number.isFinite(rawMultiplier)) {
+    return { players, applied: false, multiplier: 1 };
+  }
+
+  const multiplier = Math.min(Math.max(rawMultiplier, 0.85), 1.2);
+  if (Math.abs(multiplier - 1) < 0.015) {
+    return { players, applied: false, multiplier: 1 };
+  }
+
+  return {
+    applied: true,
+    multiplier,
+    players: players.map((player) => {
+      if (!player.projected_points || player.projection_source === 'position_baseline') return player;
+      const projectedPoints = Number((player.projected_points * multiplier).toFixed(2));
+      return {
+        ...player,
+        projection_source: 'calibrated',
+        projected_points: projectedPoints,
+        last_5_stats: player.last_5_stats ? {
+          ...player.last_5_stats,
+          avg_fantasy_pts: projectedPoints,
+        } : player.last_5_stats,
+      };
+    }),
   };
 }
 
@@ -1656,12 +2333,22 @@ async function orchestrateMiosFantasyScan(
   if (!effectiveSalaryRows.length) {
     throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
   }
-  const fallbackOddsContext = hasFreeOddsContext(slate) ? [] : await collectOddsApiContext(sport, slate);
+  const [fallbackOddsContext, mlbFreeContexts, statcastQuality] = await Promise.all([
+    hasFreeOddsContext(slate) ? Promise.resolve([]) : collectOddsApiContext(sport, slate),
+    sport === 'mlb' ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
+    sport === 'mlb' ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
+  ]);
   sourceStatus.espn_news = injuries.length ? 'partial' : 'partial';
   sourceStatus.draftkings_salaries = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.draftkings_salary_source = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = hasFreeOddsContext(slate, fallbackOddsContext) ? 'ok' : 'unavailable';
+  sourceStatus.mlb_statsapi_context = mlbFreeContexts.length ? 'ok' : sport === 'mlb' ? 'unavailable' : 'unavailable';
+  sourceStatus.nws_weather = mlbFreeContexts.some((context) => context.weather_note && context.weather_note !== 'roof/indoor park') ? 'partial' : sport === 'mlb' ? 'unavailable' : 'unavailable';
+  sourceStatus.mlb_confirmed_lineups = mlbFreeContexts.some((context) => Object.keys(context.batting_orders ?? {}).some((team) => Object.keys(context.batting_orders?.[team] ?? {}).length >= 8))
+    ? 'partial'
+    : sport === 'mlb' ? 'unavailable' : 'unavailable';
+  sourceStatus.baseball_savant_statcast = statcastQuality.size ? 'partial' : sport === 'mlb' ? 'unavailable' : 'unavailable';
 
   let playerRoster = filterRosterBySlateTeams(applyDraftKingsSalaries(dedupePlayers(roster), effectiveSalaryRows, sport), slate);
   if (slateTeamAbbreviations(slate).length && playerRoster.length === roster.length) {
@@ -1678,8 +2365,9 @@ async function orchestrateMiosFantasyScan(
     warnings.push('Roster may not contain enough position depth for a complete classic lineup.');
   }
 
+  const enrichmentRoster = prioritizedEnrichmentRoster(playerRoster, sport);
   const statAndSentiment = await Promise.all(
-    playerRoster.slice(0, 30).map(async (player) => {
+    enrichmentRoster.map(async (player) => {
       const [stats, sentiment] = await Promise.all([
         collectLast5Stats(player, sport),
         collectRedditSentiment(player.name, sport),
@@ -1692,11 +2380,30 @@ async function orchestrateMiosFantasyScan(
   const sentimentByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.sentiment]));
   playerRoster = playerRoster.map((player) => applyLast5Stats(player, statsByPlayer.get(player.id), sport));
   playerRoster = playerRoster.map((player) => applyPlayerNewsSignals(player, injuries, sentimentByPlayer.get(player.id)));
+  if (sport === 'mlb') {
+    playerRoster = applyMlbFreeContext(playerRoster, mlbFreeContexts);
+    playerRoster = applyStatcastQuality(playerRoster, statcastQuality);
+  }
+  const projectedRows = effectiveSalaryRows.filter((row) => typeof row.projected_points === 'number' && row.projected_points > 0).length;
+  const calibration = await getProjectionCalibration(sport);
+  const calibrated = applyProjectionCalibration(playerRoster, calibration);
+  playerRoster = calibrated.players;
   sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
-  sourceStatus.projections = sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
+  sourceStatus.projections = projectedRows > 0 ? 'ok' : sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
+  sourceStatus.projection_calibration = calibrated.applied ? 'ok' : 'unavailable';
   sourceStatus.reddit_sentiment = statAndSentiment.some((item) => item.sentiment?.source_status === 'ok') ? 'partial' : 'unavailable';
   sourceStatus.player_news = playerRoster.some((player) => player.news_note) ? 'partial' : 'unavailable';
 
+  if (projectedRows === 0) {
+    warnings.push('DraftKings salary rows did not include projected points; projections were built from last-5 stats and position baselines.');
+  } else if (projectedRows < effectiveSalaryRows.length * 0.6) {
+    warnings.push(`Only ${projectedRows} of ${effectiveSalaryRows.length} DraftKings salary rows included projected points; remaining players used last-5 or baseline projections.`);
+  }
+  if (calibrated.applied) {
+    warnings.push(`Projection calibration applied from ${calibration?.sample_size ?? 0} historical player results (${calibrated.multiplier.toFixed(2)}x multiplier).`);
+  } else {
+    warnings.push('Projection calibration is not active yet; add actual results after slates to measure and correct projection bias.');
+  }
   if (sourceStatus.espn_last5 === 'unavailable') {
     warnings.push('Verified last-5 game stats are unavailable; using position baseline projections.');
   }
@@ -1705,6 +2412,22 @@ async function orchestrateMiosFantasyScan(
   }
   if (sourceStatus.player_news === 'unavailable') {
     warnings.push('Player-specific news signals were unavailable or did not match players in this slate.');
+  }
+  if (sport === 'mlb' && !mlbFreeContexts.length) {
+    warnings.push('Free MLB schedule/probable-pitcher context was unavailable; park and weather adjustments were skipped.');
+  } else if (sport === 'mlb') {
+    warnings.push(`Applied free MLB context for ${mlbFreeContexts.length} game${mlbFreeContexts.length === 1 ? '' : 's'} using Stats API schedule, probable pitchers, park factors, and free weather where available.`);
+    if (sourceStatus.mlb_confirmed_lineups === 'partial') {
+      warnings.push('Confirmed MLB batting-order context was available for at least one team and was used in hitter projections.');
+    } else {
+      warnings.push('Confirmed MLB batting orders were not available yet; hitter projections did not receive lineup-slot boosts.');
+    }
+    if (statcastQuality.size) {
+      const matchedStatcastPlayers = playerRoster.filter((player) => player.news_note?.includes('Statcast')).length;
+      warnings.push(`Applied free Baseball Savant Statcast quality signals to ${matchedStatcastPlayers} slate player${matchedStatcastPlayers === 1 ? '' : 's'}.`);
+    } else {
+      warnings.push('Baseball Savant Statcast quality signals were unavailable; recent contact-quality adjustments were skipped.');
+    }
   }
 
   const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({

@@ -127,6 +127,7 @@ CREATE TABLE tenant_fantasy_ai.draftkings_player_salaries (
   team TEXT,
   position TEXT NOT NULL,
   salary INT NOT NULL CHECK (salary > 0),
+  projected_points FLOAT,
   imported_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(sport, contest_date, contest_type, player_name, position)
 );
@@ -135,7 +136,29 @@ CREATE INDEX ON tenant_fantasy_ai.draftkings_player_salaries (contest_id);
 CREATE INDEX ON tenant_fantasy_ai.draftkings_player_salaries (game_id);
 CREATE INDEX ON tenant_fantasy_ai.draftkings_player_salaries (player_id);
 
+-- Create projection_results table (shared calibration/backtest data)
+CREATE TABLE tenant_fantasy_ai.projection_results (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  sport VARCHAR(10) NOT NULL,
+  contest_date DATE NOT NULL,
+  contest_type VARCHAR(20) NOT NULL,
+  contest_id UUID REFERENCES tenant_fantasy_ai.draftkings_contests(id) ON DELETE SET NULL,
+  player_id TEXT,
+  player_name TEXT NOT NULL,
+  team TEXT,
+  position TEXT,
+  projected_points FLOAT,
+  actual_points FLOAT,
+  source TEXT DEFAULT 'manual',
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(sport, contest_date, contest_type, contest_id, player_name)
+);
+CREATE INDEX ON tenant_fantasy_ai.projection_results (sport, contest_date, contest_type);
+CREATE INDEX ON tenant_fantasy_ai.projection_results (player_id);
+
 GRANT SELECT ON ALL TABLES IN SCHEMA tenant_fantasy_ai TO anon, authenticated;
+GRANT INSERT, UPDATE ON tenant_fantasy_ai.projection_results TO service_role;
 GRANT INSERT ON tenant_fantasy_ai.mios_manifest TO authenticated;
 GRANT INSERT ON tenant_fantasy_ai.ranked_lineups TO authenticated;
 GRANT INSERT, UPDATE ON tenant_fantasy_ai.saved_lineups TO authenticated;
@@ -149,6 +172,7 @@ ALTER TABLE tenant_fantasy_ai.player_last_5_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_fantasy_ai.social_sentiment ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_fantasy_ai.draftkings_contests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_fantasy_ai.draftkings_player_salaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_fantasy_ai.projection_results ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies
 -- users: only user can read own row
@@ -174,6 +198,9 @@ CREATE POLICY contests_select ON tenant_fantasy_ai.draftkings_contests FOR SELEC
 
 -- draftkings_player_salaries: public read (shared imported slate)
 CREATE POLICY salaries_select ON tenant_fantasy_ai.draftkings_player_salaries FOR SELECT USING (true);
+
+-- projection_results: public read for calibration dashboards
+CREATE POLICY projection_results_select ON tenant_fantasy_ai.projection_results FOR SELECT USING (true);
 
 -- Users can create and update their own scan artifacts.
 CREATE POLICY mios_insert ON tenant_fantasy_ai.mios_manifest FOR INSERT WITH CHECK (auth.uid() = user_id);

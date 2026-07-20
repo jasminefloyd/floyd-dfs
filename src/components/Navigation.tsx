@@ -26,32 +26,32 @@ export default function Navigation() {
   }, []);
 
   return (
-    <nav className="border-b border-gray-200 bg-white px-4 py-3 text-gray-900 shadow-[var(--shadow-subtle)] sm:px-6">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-4 sm:gap-8">
+    <nav className="bg-[#0b1f3a] px-3 py-3 text-white sm:px-6">
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-6">
           <Link
             to="/"
-            className="text-lg font-black tracking-wide text-gray-950 transition-colors duration-[var(--transition-fast)] hover:text-green-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
+            className="min-w-0 text-base font-black tracking-wide text-white transition-colors duration-[var(--transition-fast)] hover:text-cyan-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 sm:text-lg"
           >
             FLOYD DFS
           </Link>
           <Link
             to="/"
-            className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-sm font-semibold text-green-700 transition-colors duration-[var(--transition-fast)] hover:border-green-500 hover:bg-green-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
+            className="rounded-md border border-cyan-300/40 bg-cyan-300/10 px-3 py-1.5 text-xs font-black uppercase tracking-wide text-cyan-100 transition-colors duration-[var(--transition-fast)] hover:border-cyan-200 hover:bg-cyan-300/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
           >
             Scan
           </Link>
           {isAdmin ? (
             <Link
               to="/admin/design-system"
-              className="rounded-full border border-gray-200 px-3 py-1 text-sm text-gray-600 transition-colors duration-[var(--transition-fast)] hover:border-green-500 hover:text-gray-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success"
+              className="rounded-md border border-white/15 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-blue-100 transition-colors duration-[var(--transition-fast)] hover:border-cyan-200 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
             >
               Admin
             </Link>
           ) : null}
         </div>
-        <div>
-          <span className="text-xs font-medium uppercase tracking-wide text-gray-500">{email ?? 'Guest Mode'}</span>
+        <div className="min-w-0">
+          <span className="block max-w-[116px] truncate text-right text-[10px] font-bold uppercase tracking-wide text-blue-200 sm:max-w-none sm:text-xs">{email ?? 'Guest Mode'}</span>
         </div>
       </div>
     </nav>

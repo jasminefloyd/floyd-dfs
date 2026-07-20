@@ -53,8 +53,11 @@ export interface Player {
   salary_source?: 'draftkings_import' | 'estimated';
   injury_status: 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
   injury_note?: string;
-  projection_source?: 'last_5' | 'position_baseline';
+  projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated';
   projected_points?: number;
+  context_score?: number;
+  news_score?: number;
+  news_note?: string;
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
