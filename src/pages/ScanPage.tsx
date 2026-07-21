@@ -191,6 +191,14 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       roster_slot: p.roster_slot,
       salary_source: p.salary_source,
       context_score: p.context_score,
+      contextual_projection: p.contextual_projection,
+      floor_projection: p.floor_projection,
+      ceiling_projection: p.ceiling_projection,
+      volatility_score: p.volatility_score,
+      boom_probability: p.boom_probability,
+      bust_probability: p.bust_probability,
+      batting_order: p.batting_order,
+      game_context_tags: p.game_context_tags,
       news_note: p.news_note,
       last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts, trend: 'stable' }
     })),
@@ -205,6 +213,11 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     leverage_score: lu.leverage_score,
     ownership_sum: lu.ownership_sum,
     lineup_type: lu.lineup_type,
+    lineup_intelligence_score: lu.lineup_intelligence_score,
+    stack_quality_score: lu.stack_quality_score,
+    context_edge_score: lu.context_edge_score,
+    volatility_score: lu.volatility_score,
+    win_condition: lu.win_condition,
     primary_stack_team: lu.primary_stack_team,
     primary_stack_size: lu.primary_stack_size,
     anti_correlation_flags: lu.anti_correlation_flags,
@@ -218,5 +231,6 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
 function lineupNarrative(lineup: DraftLineup, idx: number): string {
   const expectedFpts = lineup.simulation_ev !== undefined ? lineup.simulation_ev : lineup.projected_points;
   const leverage = lineup.leverage_score !== undefined ? ` Secondary leverage score: ${lineup.leverage_score.toFixed(1)}.` : '';
-  return `Lineup #${idx + 1} ranked by ${expectedFpts.toFixed(1)} expected total FPTS, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.${leverage}`;
+  const intelligence = lineup.lineup_intelligence_score !== undefined ? ` PIOS intelligence score: ${lineup.lineup_intelligence_score.toFixed(1)}.` : '';
+  return `Lineup #${idx + 1} ranked by ${expectedFpts.toFixed(1)} expected total FPTS, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.${leverage}${intelligence}`;
 }

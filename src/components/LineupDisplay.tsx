@@ -20,6 +20,14 @@ export interface LineupPlayer {
   salary_source?: string;
   news_note?: string;
   context_score?: number;
+  contextual_projection?: number;
+  floor_projection?: number;
+  ceiling_projection?: number;
+  volatility_score?: number;
+  boom_probability?: number;
+  bust_probability?: number;
+  batting_order?: number;
+  game_context_tags?: string[];
   last_5_stats?: {
     avg_fantasy_pts?: number;
     trend?: 'up' | 'down' | 'stable';
@@ -40,6 +48,11 @@ export interface Lineup {
   leverage_score?: number;
   ownership_sum?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
+  lineup_intelligence_score?: number;
+  stack_quality_score?: number;
+  context_edge_score?: number;
+  volatility_score?: number;
+  win_condition?: string;
   primary_stack_team?: string;
   primary_stack_size?: number;
   anti_correlation_flags?: string[];
@@ -152,13 +165,16 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                   <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
                   <Metric label="Top 10" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
-                  <Metric label="Leverage" value={lineup.leverage_score?.toFixed(1) ?? '—'} />
+                  <Metric label="PIOS Edge" value={lineup.lineup_intelligence_score?.toFixed(1) ?? lineup.leverage_score?.toFixed(1) ?? '—'} />
                 </div>
               ) : null}
 
               {/* Narrative */}
               <p className={`px-3 py-3 text-[13px] font-medium text-slate-600 sm:px-4 ${isExpanded ? 'border-b border-slate-200' : ''}`}>
                 {lineup.narrative}
+                {lineup.win_condition ? (
+                  <span className="mt-2 block font-bold text-[#0b1f3a]">{lineup.win_condition}</span>
+                ) : null}
               </p>
               {lineup.strategy_notes?.length ? (
                 <div className="flex flex-wrap gap-2 border-t border-slate-200 px-3 py-3 sm:px-4">

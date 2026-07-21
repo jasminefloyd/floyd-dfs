@@ -47,6 +47,14 @@ interface LineupPlayerDraft {
   context_score?: number;
   news_score?: number;
   news_note?: string;
+  contextual_projection?: number;
+  floor_projection?: number;
+  ceiling_projection?: number;
+  volatility_score?: number;
+  boom_probability?: number;
+  bust_probability?: number;
+  batting_order?: number;
+  game_context_tags?: string[];
 }
 
 interface LineupConstructionRules {
@@ -73,6 +81,11 @@ interface DraftLineup {
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   optimizer_rank?: number;
   rank_score?: number;
+  lineup_intelligence_score?: number;
+  stack_quality_score?: number;
+  context_edge_score?: number;
+  volatility_score?: number;
+  win_condition?: string;
   primary_stack_team?: string;
   primary_stack_size?: number;
   anti_correlation_flags?: string[];
@@ -143,7 +156,7 @@ const VALID_CONTEST_STRATEGIES = new Set(['cash', 'single_entry', 'small_field',
 const MONTE_CARLO_ITERATIONS = 1_600;
 const AGGRESSIVE_MONTE_CARLO_ITERATIONS = 2_400;
 const CONSERVATIVE_MONTE_CARLO_ITERATIONS = 1_000;
-const MAX_CANDIDATE_LINEUPS = 120;
+const MAX_CANDIDATE_LINEUPS = 240;
 const SIMULATION_LINEUP_CAP = 80;
 
 const ROSTER_SLOTS: Record<string, RosterSlot[]> = {
@@ -312,21 +325,22 @@ function generateLineups(
       ...player,
       ownership_projection: player.ownership_projection ?? estimateOwnership(player, eligiblePlayers),
     }))
-    .sort((a, b) => (b.last_5_avg_pts || 0) - (a.last_5_avg_pts || 0));
+    .map((player) => applyContextualProjectionEngine(player, sport, rules))
+    .sort((a, b) => playerValueScore(b, sport, rules) - playerValueScore(a, sport, rules));
   const candidates = contestType === 'showdown'
     ? generateExactShowdownLineups(sortedPlayers, showdownRosterSize(sport, slate))
-    : generateClassicLineups(sortedPlayers, sport);
+    : generateClassicLineups(sortedPlayers, sport, rules);
 
   const baseCandidates = candidates
     .filter((lineup) => validateLineup(lineup, contestType))
-    .map((lineup) => enrichLineupConstruction(lineup, rules));
+    .map((lineup) => enrichLineupConstruction(lineup, rules, sport));
   const strategyCandidates = baseCandidates.filter((lineup) => validateLineup(lineup, contestType, sport, rules));
   const antiCorrelationFiltered = strategyCandidates.filter((lineup) => rules.contestStrategy === 'cash' || (lineup.anti_correlation_flags?.length ?? 0) === 0);
   const simulationCandidates = (antiCorrelationFiltered.length ? antiCorrelationFiltered : strategyCandidates.length ? strategyCandidates : withRelaxedRuleNote(baseCandidates))
     .sort((a, b) => preSimulationLineupScore(b, rules) - preSimulationLineupScore(a, rules))
     .slice(0, SIMULATION_LINEUP_CAP);
 
-  const rankedLineups = runMonteCarloSimulations(simulationCandidates, sortedPlayers, riskTolerance)
+  const rankedLineups = runMonteCarloSimulations(simulationCandidates, sortedPlayers, riskTolerance, sport)
     .filter((lineup) => validateLineup(lineup, contestType))
     .map((lineup) => ({
       ...lineup,
@@ -465,34 +479,34 @@ function showdownRosterSize(sport: string, slate?: DraftKingsSlate): number {
   return 6;
 }
 
-function generateClassicLineups(players: LineupPlayerDraft[], sport: string): DraftLineup[] {
+function generateClassicLineups(players: LineupPlayerDraft[], sport: string, rules: LineupConstructionRules): DraftLineup[] {
   const slots = ROSTER_SLOTS[sport];
   if (!slots) return [];
 
   const lineups: DraftLineup[] = [];
   const signatures = new Set<string>();
   let iterations = 0;
-  const maxIterations = 200_000;
+  const maxIterations = sport === 'mlb' ? 450_000 : 240_000;
   const candidateLists = slots.map((slotDef) => players
     .filter((player) => playerEligibleForSlot(player, slotDef))
-    .sort((a, b) => playerValueScore(b) - playerValueScore(a))
-    .slice(0, 30));
+    .sort((a, b) => playerValueScore(b, sport, rules) - playerValueScore(a, sport, rules))
+    .slice(0, sport === 'mlb' ? 38 : 30));
 
   function search(slotIndex: number, selected: LineupPlayerDraft[], usedIds: Set<string>, salaryUsed: number) {
     iterations += 1;
-    if (iterations > maxIterations || lineups.length >= MAX_CANDIDATE_LINEUPS) return;
+    if (iterations > maxIterations) return;
 
     if (slotIndex === slots.length) {
       const signature = selected.map((player) => player.player_id).sort().join('|');
       if (signatures.has(signature)) return;
       signatures.add(signature);
-      lineups.push({
+      insertTopLineup(lineups, {
         players: [...selected],
         projected_points: calculateProjectedPoints(selected),
         salary_used: salaryUsed,
         confidence_score: 0,
         constraint_violations: [],
-      });
+      }, MAX_CANDIDATE_LINEUPS);
       return;
     }
 
@@ -506,7 +520,7 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
       usedIds.delete(candidate.player_id);
       selected.pop();
 
-      if (iterations > maxIterations || lineups.length >= MAX_CANDIDATE_LINEUPS) return;
+      if (iterations > maxIterations) return;
     }
   }
 
@@ -514,17 +528,151 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string): Dr
   return lineups;
 }
 
-function playerValueScore(player: LineupPlayerDraft): number {
+function parseRunFactor(note = ''): number | undefined {
+  const match = note.match(/run factor\s+([0-9.]+)/i);
+  const parsed = match ? Number(match[1]) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseBattingOrder(note = ''): number | undefined {
+  const match = note.match(/\bbatting\s+([1-9])\b/i);
+  const parsed = match ? Number(match[1]) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function gameContextTags(player: LineupPlayerDraft, sport: string, battingOrder?: number): string[] {
+  if (sport !== 'mlb') return [];
+  const note = player.news_note ?? '';
+  return [
+    parseRunFactor(note) && parseRunFactor(note)! >= 1.06 ? 'run-positive park/weather' : '',
+    parseRunFactor(note) && parseRunFactor(note)! <= 0.94 ? 'run-suppressing park/weather' : '',
+    battingOrder && battingOrder <= 2 ? 'top-of-order' : '',
+    battingOrder && battingOrder >= 7 ? 'bottom-of-order' : '',
+    note.includes('not in confirmed lineup') ? 'lineup-risk' : '',
+    note.includes('vs probable') ? 'probable-pitcher context' : '',
+  ].filter(Boolean);
+}
+
+function applyContextualProjectionEngine(
+  player: LineupPlayerDraft,
+  sport: string,
+  _rules: LineupConstructionRules,
+): LineupPlayerDraft {
+  const baseProjection = player.projected_points || player.last_5_avg_pts || 0;
+  if (!baseProjection) return player;
+
+  const note = player.news_note ?? '';
+  const battingOrder = parseBattingOrder(note);
+  const runFactor = parseRunFactor(note);
+  const pitcher = isPitcher(player);
+  const confidence = Math.min(Math.max(player.confidence_score || 0.5, 0.2), 0.95);
+  const contextScore = player.context_score ?? 0;
+  const newsScore = player.news_score ?? 0;
+  let multiplier = 1;
+
+  if (sport === 'mlb') {
+    if (typeof runFactor === 'number') {
+      multiplier *= pitcher
+        ? clampNumber(2 - runFactor, 0.9, 1.13, 1)
+        : clampNumber(runFactor, 0.88, 1.2, 1);
+    } else {
+      multiplier *= 1 + contextScore * (pitcher ? 0.35 : 0.55);
+    }
+
+    if (!pitcher && battingOrder) {
+      if (battingOrder === 1) multiplier *= 1.07;
+      else if (battingOrder === 2) multiplier *= 1.055;
+      else if (battingOrder <= 5) multiplier *= 1.025;
+      else if (battingOrder >= 8) multiplier *= 0.94;
+      else if (battingOrder === 7) multiplier *= 0.97;
+    }
+
+    if (!pitcher && note.includes('not in confirmed lineup')) multiplier *= 0.62;
+    if (pitcher && note.includes('probable starter')) multiplier *= 1.035;
+  } else {
+    multiplier *= 1 + contextScore * 0.45;
+  }
+
+  multiplier *= 1 + clampNumber(newsScore, -2, 2, 0) * 0.025;
+  multiplier = clampNumber(multiplier, 0.68, sport === 'mlb' ? 1.28 : 1.2, 1);
+
+  const contextualProjection = Number((baseProjection * multiplier).toFixed(2));
+  const volatility = playerVolatilityScore(player, sport, battingOrder, runFactor);
+  const floor = Number(Math.max(0, contextualProjection * (1 - volatility * 0.55)).toFixed(2));
+  const ceiling = Number((contextualProjection * (1 + volatility * 0.85)).toFixed(2));
+  const boomProbability = clampNumber(
+    0.12 + volatility * 0.18 + Math.max(0, multiplier - 1) * 0.9 + (1 - (player.ownership_projection ?? 0.12)) * 0.06,
+    0.03,
+    0.42,
+    0.12,
+  );
+  const bustProbability = clampNumber(
+    0.1 + (1 - confidence) * 0.28 + Math.max(0, 1 - multiplier) * 0.75 + (note.includes('not in confirmed lineup') ? 0.28 : 0),
+    0.04,
+    0.72,
+    0.18,
+  );
+
+  return {
+    ...player,
+    projected_points: contextualProjection,
+    contextual_projection: contextualProjection,
+    floor_projection: floor,
+    ceiling_projection: ceiling,
+    volatility_score: Number(volatility.toFixed(3)),
+    boom_probability: Number(boomProbability.toFixed(3)),
+    bust_probability: Number(bustProbability.toFixed(3)),
+    batting_order: battingOrder,
+    game_context_tags: gameContextTags(player, sport, battingOrder),
+  };
+}
+
+function playerVolatilityScore(
+  player: LineupPlayerDraft,
+  sport: string,
+  battingOrder?: number,
+  runFactor?: number,
+): number {
+  const confidence = Math.min(Math.max(player.confidence_score || 0.5, 0.2), 0.95);
+  let volatility = sport === 'mlb' ? 0.34 : 0.24;
+  volatility += (1 - confidence) * 0.22;
+  volatility += Math.max(0, (runFactor ?? 1) - 1) * (isPitcher(player) ? 0.1 : 0.35);
+  volatility += (player.ownership_projection ?? 0.12) < 0.1 ? 0.04 : 0;
+  if (sport === 'mlb' && !isPitcher(player) && battingOrder && battingOrder >= 7) volatility += 0.045;
+  if (['questionable', 'day_to_day'].includes(player.injury_status)) volatility += 0.08;
+  return clampNumber(volatility, 0.16, 0.68, 0.3);
+}
+
+function playerValueScore(player: LineupPlayerDraft, sport = '', rules?: LineupConstructionRules): number {
   const projected = adjustedProjection(player);
   const salary = Math.max(player.salary, 1);
   const ownership = player.ownership_projection ?? 0.12;
   const newsBoost = (player.news_score ?? 0) * 0.8;
   const contextBoost = (player.context_score ?? 0) * 2.5;
-  return projected * 0.7 + (projected / salary) * 10_000 * 0.3 - ownership * 4 + newsBoost + contextBoost;
+  const ceiling = player.ceiling_projection ?? projected;
+  const floor = player.floor_projection ?? projected;
+  const battingOrderBoost = sport === 'mlb' && !isPitcher(player) && player.batting_order
+    ? (player.batting_order <= 2 ? 1.4 : player.batting_order <= 5 ? 0.7 : player.batting_order >= 8 ? -0.8 : -0.2)
+    : 0;
+  const tournamentBoost = rules?.contestStrategy === 'large_field_gpp'
+    ? (ceiling - projected) * 0.35 + (player.boom_probability ?? 0) * 2.2 - ownership * 6
+    : 0;
+  const cashBoost = rules?.contestStrategy === 'cash'
+    ? floor * 0.15 - (player.bust_probability ?? 0) * 2.5
+    : 0;
+  return projected * 0.62
+    + (projected / salary) * 10_000 * 0.28
+    + ceiling * 0.08
+    - ownership * 3
+    + newsBoost
+    + contextBoost
+    + battingOrderBoost
+    + tournamentBoost
+    + cashBoost;
 }
 
 function adjustedProjection(player: LineupPlayerDraft): number {
-  return player.projected_points || player.last_5_avg_pts || 0;
+  return player.contextual_projection || player.projected_points || player.last_5_avg_pts || 0;
 }
 
 function playerEligibleForSlot(player: LineupPlayerDraft, slotDef: RosterSlot): boolean {
@@ -554,6 +702,16 @@ function validateLineup(lineup: DraftLineup, contestType: string, sport?: string
   }
   if (sport === 'mlb' && contestType === 'classic' && rules?.contestStrategy !== 'cash' && rules?.minPrimaryStack && largestTeamStack(lineup).size < rules.minPrimaryStack) {
     violations.push(`primary MLB stack below ${rules.minPrimaryStack}`);
+  }
+  if (sport === 'mlb' && contestType === 'classic') {
+    const riskyNonStarters = hitters(lineup).filter((player) => player.news_note?.includes('not in confirmed lineup'));
+    const bottomOrderHitters = hitters(lineup).filter((player) => (player.batting_order ?? 0) >= 8);
+    if (riskyNonStarters.length > (rules?.lateSwapMode ? 1 : 0)) {
+      violations.push(`${riskyNonStarters.length} hitters not in confirmed lineups`);
+    }
+    if (rules?.contestStrategy === 'cash' && bottomOrderHitters.length >= 3) {
+      violations.push('too many bottom-order hitters for cash construction');
+    }
   }
 
   lineup.constraint_violations = violations;
@@ -613,23 +771,128 @@ function detectLateSwapFlags(lineup: DraftLineup, rules: LineupConstructionRules
   }).slice(0, 8);
 }
 
-function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstructionRules): DraftLineup {
+function stackQualityScore(lineup: DraftLineup, rules: LineupConstructionRules): number {
+  const stack = largestTeamStack(lineup);
+  if (!stack.size) return 0;
+  const stackHitters = hitters(lineup).filter((player) => String(player.team ?? '').toUpperCase() === stack.team);
+  const avgContext = stackHitters.reduce((sum, player) => sum + (player.context_score ?? 0), 0) / Math.max(stackHitters.length, 1);
+  const topOrderCount = stackHitters.filter((player) => (player.batting_order ?? 10) <= 5).length;
+  const adjacencyBonus = battingOrderAdjacencyScore(stackHitters);
+  const lowOrderPenalty = stackHitters.filter((player) => (player.batting_order ?? 0) >= 8).length * 0.45;
+  const sizeWeight = rules.contestStrategy === 'large_field_gpp' ? 2.1 : rules.contestStrategy === 'cash' ? 0.4 : 1.2;
+  return Number((
+    stack.size * sizeWeight
+    + topOrderCount * 0.75
+    + adjacencyBonus
+    + avgContext * 14
+    - lowOrderPenalty
+  ).toFixed(2));
+}
+
+function battingOrderAdjacencyScore(players: LineupPlayerDraft[]): number {
+  const orders = players
+    .map((player) => player.batting_order)
+    .filter((order): order is number => Number.isFinite(order))
+    .sort((a, b) => a - b);
+  if (orders.length < 2) return 0;
+  let score = 0;
+  for (let index = 1; index < orders.length; index += 1) {
+    const gap = orders[index] - orders[index - 1];
+    if (gap === 1) score += 0.9;
+    else if (gap === 2) score += 0.35;
+  }
+  return score;
+}
+
+function contextEdgeScore(lineup: DraftLineup): number {
+  return Number(lineup.players.reduce((sum, player) => {
+    const context = player.context_score ?? 0;
+    const news = player.news_score ?? 0;
+    const confirmedPenalty = player.news_note?.includes('not in confirmed lineup') ? -2.5 : 0;
+    const battingBonus = !isPitcher(player) && player.batting_order
+      ? player.batting_order <= 2 ? 1.1 : player.batting_order <= 5 ? 0.55 : player.batting_order >= 8 ? -0.75 : 0
+      : 0;
+    return sum + context * 8 + news * 0.45 + confirmedPenalty + battingBonus;
+  }, 0).toFixed(2));
+}
+
+function lineupVolatilityScore(lineup: DraftLineup): number {
+  return Number((lineup.players.reduce((sum, player) => sum + (player.volatility_score ?? 0.3), 0) / Math.max(lineup.players.length, 1)).toFixed(3));
+}
+
+function lineupIntelligenceScore(lineup: DraftLineup, rules: LineupConstructionRules): number {
+  const stack = stackQualityScore(lineup, rules);
+  const context = contextEdgeScore(lineup);
+  const volatility = lineupVolatilityScore(lineup);
+  const ownership = lineup.ownership_sum ?? lineup.players.reduce((sum, player) => sum + (player.ownership_projection ?? 0.12), 0);
+  const boom = lineup.players.reduce((sum, player) => sum + (player.boom_probability ?? 0.12), 0);
+  const bust = lineup.players.reduce((sum, player) => sum + (player.bust_probability ?? 0.18), 0);
+  const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * 8;
+  const latePenalty = (lineup.late_swap_flags?.length ?? 0) * 0.75;
+  const ownershipAdjustment = rules.contestStrategy === 'large_field_gpp'
+    ? (1.15 - ownership) * 6
+    : -Math.max(0, ownership - 1.8) * 1.5;
+  return Number((
+    stack
+    + context
+    + boom * (rules.contestStrategy === 'large_field_gpp' ? 2.3 : 1)
+    + volatility * (rules.contestStrategy === 'cash' ? -2.5 : 2.2)
+    + ownershipAdjustment
+    - bust * (rules.contestStrategy === 'cash' ? 2 : 0.8)
+    - antiPenalty
+    - latePenalty
+  ).toFixed(2));
+}
+
+function lineupWinCondition(lineup: DraftLineup, rules: LineupConstructionRules): string {
+  const stack = largestTeamStack(lineup);
+  const stackHitters = hitters(lineup).filter((player) => String(player.team ?? '').toUpperCase() === stack.team);
+  const topContext = [...lineup.players]
+    .sort((a, b) => ((b.context_score ?? 0) + (b.news_score ?? 0) * 0.2) - ((a.context_score ?? 0) + (a.news_score ?? 0) * 0.2))
+    .slice(0, 2)
+    .map((player) => player.name);
+  if (rules.contestStrategy === 'cash') {
+    return `Wins by holding floor: confirmed roles, minimized bust risk, and ${stack.team || 'the primary stack'} avoiding dead lineup spots.`;
+  }
+  if (stack.team && stack.size >= 3) {
+    const orderText = stackHitters.some((player) => player.batting_order)
+      ? ` with ${stackHitters.filter((player) => (player.batting_order ?? 10) <= 5).length} top-five bats`
+      : '';
+    return `Wins if ${stack.team} creates a crooked-number game${orderText}, while ${topContext.join(' and ') || 'the value pieces'} beat salary expectations.`;
+  }
+  return `Wins through ceiling outcomes from ${topContext.join(' and ') || 'the highest-context players'} plus enough salary efficiency to separate from chalk builds.`;
+}
+
+function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstructionRules, sport: string): DraftLineup {
   const stack = largestTeamStack(lineup);
   const antiCorrelationFlags = detectAntiCorrelation(lineup);
   const lateSwapFlags = detectLateSwapFlags(lineup, rules);
+  const stackQuality = sport === 'mlb' ? stackQualityScore(lineup, rules) : 0;
+  const contextEdge = contextEdgeScore(lineup);
+  const volatility = lineupVolatilityScore(lineup);
   const strategyNotes = [
     stack.size ? `${stack.team} ${stack.size}-player primary stack` : '',
+    sport === 'mlb' && stackQuality ? `Stack quality ${stackQuality.toFixed(1)} from batting order, context, and correlation` : '',
+    contextEdge ? `Context edge ${contextEdge.toFixed(1)} from park/weather/news/role signals` : '',
     antiCorrelationFlags.length ? `Anti-correlation: ${antiCorrelationFlags.join(', ')}` : '',
     lateSwapFlags.length ? `${lateSwapFlags.length} late-swap watch item${lateSwapFlags.length === 1 ? '' : 's'}` : '',
     `Strategy: ${rules.contestStrategy.replace(/_/g, ' ')}`,
   ].filter(Boolean);
-  return {
+  const enriched = {
     ...lineup,
     primary_stack_team: stack.team || undefined,
     primary_stack_size: stack.size || undefined,
     anti_correlation_flags: antiCorrelationFlags,
     late_swap_flags: lateSwapFlags,
+    stack_quality_score: stackQuality,
+    context_edge_score: contextEdge,
+    volatility_score: volatility,
     strategy_notes: strategyNotes,
+  };
+  return {
+    ...enriched,
+    lineup_intelligence_score: lineupIntelligenceScore(enriched, rules),
+    win_condition: lineupWinCondition(enriched, rules),
   };
 }
 
@@ -677,7 +940,7 @@ function estimateOwnership(player: LineupPlayerDraft, roster: LineupPlayerDraft[
 function playerStdDev(player: LineupPlayerDraft): number {
   const projection = player.projected_points || player.last_5_avg_pts || 0;
   const confidence = Math.min(Math.max(player.confidence_score || 0.5, 0.2), 0.95);
-  const volatility = 0.18 + (1 - confidence) * 0.35;
+  const volatility = player.volatility_score ?? 0.18 + (1 - confidence) * 0.35;
   const injuryBoost = ['questionable', 'doubtful', 'day_to_day'].includes(player.injury_status) ? 0.12 : 0;
   return Math.max(projection * (volatility + injuryBoost), 1.5);
 }
@@ -700,6 +963,7 @@ function runMonteCarloSimulations(
   lineups: DraftLineup[],
   roster: LineupPlayerDraft[],
   riskTolerance: string,
+  sport: string,
 ): DraftLineup[] {
   if (!lineups.length) return [];
 
@@ -726,8 +990,18 @@ function runMonteCarloSimulations(
       : MONTE_CARLO_ITERATIONS;
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     const playerOutcomes = new Map<string, number>();
+    const teamPulse = new Map<string, number>();
     for (const [playerId, profile] of playerProfiles.entries()) {
-      playerOutcomes.set(playerId, randomNormal(profile.mean, profile.stdDev));
+      const player = roster.find((item) => item.player_id === playerId);
+      const team = String(player?.team ?? '').toUpperCase();
+      if (sport === 'mlb' && team && !teamPulse.has(team)) {
+        teamPulse.set(team, randomNormal(0, 0.075));
+      }
+      const rawOutcome = randomNormal(profile.mean, profile.stdDev);
+      const teamAdjustment = sport === 'mlb' && player && !isPitcher(player)
+        ? clampNumber(1 + (teamPulse.get(team) ?? 0), 0.72, 1.36, 1)
+        : 1;
+      playerOutcomes.set(playerId, rawOutcome * teamAdjustment);
     }
 
     const scored = lineups.map((lineup) => {
@@ -836,15 +1110,26 @@ function lineupRankScore(lineup: DraftLineup, riskTolerance: string, lineupMode:
   const floor = lineup.floor_score ?? 0;
   const leverage = lineup.leverage_score ?? 0;
   const projected = lineup.projected_points;
+  const intelligence = lineup.lineup_intelligence_score ?? 0;
+  const stackQuality = lineup.stack_quality_score ?? 0;
+  const contextEdge = lineup.context_edge_score ?? 0;
+  const volatility = lineup.volatility_score ?? 0.3;
   const stackBonus = (lineup.primary_stack_size ?? 0) * (rules.contestStrategy === 'large_field_gpp' ? 4 : rules.contestStrategy === 'cash' ? 0.4 : 1.8);
   const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * 16;
   const latePenalty = (lineup.late_swap_flags?.length ?? 0) * (rules.lateSwapMode ? 0.8 : 0.1);
   const ownershipPenalty = rules.contestStrategy === 'large_field_gpp' ? (lineup.ownership_sum ?? 0) * 9 : 0;
-  const strategyAdjustment = stackBonus - antiPenalty - latePenalty - ownershipPenalty;
+  const strategyAdjustment = stackBonus
+    + intelligence * (rules.contestStrategy === 'cash' ? 1.8 : 3.6)
+    + stackQuality * (rules.contestStrategy === 'large_field_gpp' ? 2.4 : 1)
+    + contextEdge * 1.5
+    + volatility * (rules.contestStrategy === 'cash' ? -5 : 8)
+    - antiPenalty
+    - latePenalty
+    - ownershipPenalty;
 
-  if (lineupMode === 'max_fpts') return projected * 1000 + ev * 10 + confidence + strategyAdjustment;
+  if (lineupMode === 'max_fpts') return projected * 850 + ev * 20 + confidence + strategyAdjustment;
   if (lineupMode === 'safe') return floor * 100 + confidence * 10 + projected + strategyAdjustment;
-  if (lineupMode === 'tournament') return ceiling * 100 + leverage * 8 + winRate * 20 + ev + strategyAdjustment;
+  if (lineupMode === 'tournament') return ceiling * 100 + leverage * 10 + winRate * 30 + ev + strategyAdjustment;
 
   if (riskTolerance === 'conservative') return ev * 100 + floor * 0.8 + confidence * 4 + strategyAdjustment;
   if (riskTolerance === 'aggressive') return ev * 100 + ceiling * 0.8 + winRate * 8 + strategyAdjustment;

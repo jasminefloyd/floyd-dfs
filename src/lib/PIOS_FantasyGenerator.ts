@@ -23,6 +23,14 @@ export interface LineupPlayerDraft {
   context_score?: number;
   news_score?: number;
   news_note?: string;
+  contextual_projection?: number;
+  floor_projection?: number;
+  ceiling_projection?: number;
+  volatility_score?: number;
+  boom_probability?: number;
+  bust_probability?: number;
+  batting_order?: number;
+  game_context_tags?: string[];
 }
 
 export interface DraftLineup {
@@ -38,6 +46,11 @@ export interface DraftLineup {
   leverage_score?: number;
   ownership_sum?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
+  lineup_intelligence_score?: number;
+  stack_quality_score?: number;
+  context_edge_score?: number;
+  volatility_score?: number;
+  win_condition?: string;
   primary_stack_team?: string;
   primary_stack_size?: number;
   anti_correlation_flags?: string[];
