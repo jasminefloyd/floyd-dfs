@@ -1,3 +1,14 @@
+import { readFile } from 'node:fs/promises';
+import { transform } from 'esbuild';
+
+async function loadDkScoring() {
+  const source = await readFile(new URL('../src/lib/dkScoring.ts', import.meta.url), 'utf8');
+  const { code } = await transform(source, { loader: 'ts', format: 'esm' });
+  return await import(`data:text/javascript;charset=utf-8,${encodeURIComponent(code)}`);
+}
+
+const { dkFantasyPoints } = await loadDkScoring();
+
 const contestDate = process.argv[2];
 const contestType = (process.argv[3] ?? 'classic').toLowerCase();
 
@@ -60,36 +71,6 @@ function parseInnings(value) {
   return Number(whole || 0) + Number(outs || 0) / 3;
 }
 
-function battingDraftKingsPoints(stats) {
-  const singles = Math.max(
-    0,
-    Number(stats.hits ?? 0) - Number(stats.doubles ?? 0) - Number(stats.triples ?? 0) - Number(stats.homeRuns ?? 0),
-  );
-  return (
-    singles * 3 +
-    Number(stats.doubles ?? 0) * 5 +
-    Number(stats.triples ?? 0) * 8 +
-    Number(stats.homeRuns ?? 0) * 10 +
-    Number(stats.rbi ?? 0) * 2 +
-    Number(stats.runs ?? 0) * 2 +
-    (Number(stats.baseOnBalls ?? 0) + Number(stats.hitByPitch ?? 0)) * 2 +
-    Number(stats.stolenBases ?? 0) * 5
-  );
-}
-
-function pitchingDraftKingsPoints(stats) {
-  return (
-    parseInnings(stats.inningsPitched) * 2.25 +
-    Number(stats.strikeOuts ?? 0) * 2 +
-    Number(stats.wins ?? 0) * 4 -
-    Number(stats.earnedRuns ?? 0) * 2 -
-    (Number(stats.hits ?? 0) + Number(stats.baseOnBalls ?? 0) + Number(stats.hitBatsmen ?? 0)) * 0.6 +
-    Number(stats.completeGames ?? 0) * 2.5 +
-    Number(stats.shutouts ?? 0) * 2.5 +
-    Number(stats.noHitters ?? 0) * 5
-  );
-}
-
 async function fetchMlbScheduleGameIds(date) {
   const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${encodeURIComponent(date)}`;
   const response = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -114,8 +95,11 @@ async function fetchBoxscoreActuals(gameId) {
       if (!name) continue;
       const batting = player?.stats?.batting ?? {};
       const pitching = player?.stats?.pitching ?? {};
-      const battingPoints = battingDraftKingsPoints(batting);
-      const pitchingPoints = pitchingDraftKingsPoints(pitching);
+      const battingPoints = dkFantasyPoints(batting, 'mlb', 'hitter');
+      const pitchingPoints = dkFantasyPoints({
+        ...pitching,
+        inningsPitched: parseInnings(pitching.inningsPitched),
+      }, 'mlb', 'pitcher');
       const actualPoints = Number((battingPoints + pitchingPoints).toFixed(2));
       const appeared = Number(batting.atBats ?? 0) > 0
         || Number(batting.plateAppearances ?? 0) > 0
@@ -186,13 +170,16 @@ for (const slate of dateSlates) {
   });
   const rows = matchActualRowsToSlate(salaryRows ?? [], actualRows);
   if (!rows.length) continue;
+  const rowsWithContext = rows.map((row) => ({
+    ...row,
+    sport: 'mlb',
+    contest_date: contestDate,
+    contest_type: contestType,
+    contest_id: slate.contest_id,
+    source: 'mlb_statsapi_boxscore',
+  }));
   const count = await callRpc('fantasy_ai_upsert_projection_results', {
-    p_sport: 'mlb',
-    p_contest_date: contestDate,
-    p_contest_type: contestType,
-    p_contest_id: slate.contest_id,
-    p_source: 'mlb_statsapi_boxscore',
-    p_rows: rows,
+    p_rows: rowsWithContext,
   });
   imported.push({
     contest_id: slate.contest_id,

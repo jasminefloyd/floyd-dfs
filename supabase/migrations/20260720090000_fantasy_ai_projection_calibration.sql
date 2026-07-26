@@ -33,6 +33,8 @@ CREATE POLICY projection_results_select ON tenant_fantasy_ai.projection_results 
 GRANT SELECT ON tenant_fantasy_ai.projection_results TO anon, authenticated;
 GRANT INSERT, UPDATE ON tenant_fantasy_ai.projection_results TO service_role;
 
+DROP FUNCTION IF EXISTS public.fantasy_ai_get_draftkings_salaries(TEXT, DATE, TEXT, UUID);
+
 CREATE OR REPLACE FUNCTION public.fantasy_ai_get_draftkings_salaries(
   p_sport TEXT,
   p_contest_date DATE,

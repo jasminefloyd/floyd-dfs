@@ -12,7 +12,8 @@ import type { DraftLineup } from '../lib/PIOS_FantasyGenerator';
 import { useInjuryAlerts } from '../hooks/useInjuryAlerts';
 import { invokeMiosFantasyScan } from '../lib/miosFunctionClient';
 import { invokePiosLineupGeneration } from '../lib/piosFunctionClient';
-import { getProjectionCalibration, type ProjectionCalibration } from '../lib/calibrationClient';
+import { getProjectionCalibration, getProjectionCalibrationV2, type ProjectionCalibration, type ProjectionCalibrationV2 } from '../lib/calibrationClient';
+import { getLineupScoreboard, type LineupScoreboardRow } from '../lib/scoreboardClient';
 
 type ScanPhase = 'idle' | 'fetching' | 'generating';
 
@@ -21,6 +22,9 @@ export default function ScanPage() {
   const [manifest, setManifest] = useState<MIOS_FantasyManifest | null>(null);
   const [lineups, setLineups] = useState<Lineup[]>([]);
   const [calibration, setCalibration] = useState<ProjectionCalibration | null>(null);
+  const [calibrationV2, setCalibrationV2] = useState<ProjectionCalibrationV2[]>([]);
+  const [scoreboard, setScoreboard] = useState<LineupScoreboardRow[]>([]);
+  const [dataWarnings, setDataWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const { showToast } = useToast();
 
@@ -34,6 +38,9 @@ export default function ScanPage() {
     setManifest(null);
     setLineups([]);
     setCalibration(null);
+    setCalibrationV2([]);
+    setScoreboard([]);
+    setDataWarnings([]);
 
     try {
       const miosController = new AbortController();
@@ -74,17 +81,28 @@ export default function ScanPage() {
       }
       const displayLineups = toDisplayLineups(piosResult.lineups);
       setLineups(displayLineups);
-      getProjectionCalibration(params.sport)
-        .then(setCalibration)
+      Promise.all([
+        getProjectionCalibration(params.sport),
+        getProjectionCalibrationV2(params.sport),
+        getLineupScoreboard(params.sport),
+      ])
+        .then(([sportWide, cells, scoreboardRows]) => {
+          setCalibration(sportWide);
+          setCalibrationV2(cells);
+          setScoreboard(scoreboardRows);
+        })
         .catch((calibrationError) => {
           console.warn('Calibration unavailable:', calibrationError);
           setCalibration(null);
+          setCalibrationV2([]);
+          setScoreboard([]);
         });
       const warnings = [
         ...(data.data_warnings ?? []),
         ...(piosResult.data_warnings ?? [])
       ];
-      if (warnings.length) {
+      setDataWarnings(warnings);
+      if (actionableDataWarnings(warnings).length) {
         showToast('Scan completed with data warnings', 'warning');
       }
     } catch (err) {
@@ -122,38 +140,51 @@ export default function ScanPage() {
           ) : phase === 'generating' ? (
             <LineupSkeleton />
           ) : lineups.length > 0 ? (
-            <div>
-              <div className="mb-3 rounded-lg border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-                  <div>
-                    <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Optimizer Board</p>
-                    <h2 className="mt-1 text-xl font-black text-[#0b1f3a] sm:text-2xl">Recommended Lineups</h2>
-                    {manifest?.slate ? (
-                      <p className="mt-1 text-xs font-medium text-slate-500 sm:text-sm">
-                        {manifest.slate.slate_name} · {manifest.contest_date}
-                        {manifest.game_id ? ` · Game ${manifest.game_id}` : ''}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <SummaryPill label="Lineups" value={String(lineups.length)} />
-                    <SummaryPill label="Top FPTS" value={(lineups[0]?.simulation_ev ?? lineups[0]?.projected_points ?? 0).toFixed(1)} />
-                    <SummaryPill label="Salary" value={`$${Math.round((lineups[0]?.salary_used ?? 0) / 1000)}k`} />
-                  </div>
+            <div className="space-y-3">
+              <div className="sticky top-0 z-10 rounded-lg border border-slate-200 bg-white/95 p-3 shadow-[var(--shadow-subtle)] backdrop-blur sm:p-4 lg:static lg:bg-white">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <ResultTitle manifest={manifest} />
+                  <ResultSummary lineups={lineups} manifest={manifest} warnings={dataWarnings} />
                 </div>
               </div>
-              <InjuryReport manifest={manifest} />
-              <CalibrationDashboard manifest={manifest} lineups={lineups} calibration={calibration} />
-              {manifest?.data_warnings?.length ? (
-                <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-800">
-                  {manifest.data_warnings.map((warning) => (
-                    <p key={warning}>{warning}</p>
-                  ))}
+
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px] xl:items-start">
+                <div className="min-w-0">
+                  <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
                 </div>
-              ) : null}
-              <LineupComparison lineups={lineups} />
-              <PivotSuggestions lineups={lineups} manifest={manifest} />
-              <LineupDisplay lineups={lineups} manifest={manifest} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
+
+                <aside className="hidden space-y-3 xl:sticky xl:top-5 xl:block xl:max-h-[calc(100vh-2.5rem)] xl:overflow-y-auto">
+                  <ScanDiagnostics
+                    manifest={manifest}
+                    lineups={lineups}
+                    calibration={calibration}
+                    calibrationV2={calibrationV2}
+                    scoreboard={scoreboard}
+                    warnings={dataWarnings}
+                  />
+                </aside>
+              </div>
+
+              <details className="rounded-lg border border-slate-200 bg-white shadow-[var(--shadow-subtle)] xl:hidden">
+                <summary className="cursor-pointer list-none px-3 py-3 text-sm font-black text-[#0b1f3a] marker:hidden">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Scan Details</span>
+                    <span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-600">
+                      {dataWarnings.length} warning{dataWarnings.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                </summary>
+                <div className="border-t border-slate-200 p-3">
+                  <ScanDiagnostics
+                    manifest={manifest}
+                    lineups={lineups}
+                    calibration={calibration}
+                    calibrationV2={calibrationV2}
+                    scoreboard={scoreboard}
+                    warnings={dataWarnings}
+                  />
+                </div>
+              </details>
             </div>
           ) : (
             <div className="rounded-lg border border-slate-200 bg-white p-6 text-center text-slate-500 shadow-[var(--shadow-subtle)]">
@@ -166,10 +197,142 @@ export default function ScanPage() {
   );
 }
 
-function SummaryPill({ label, value }: { label: string; value: string }) {
+function ResultTitle({ manifest }: { manifest: MIOS_FantasyManifest | null }) {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
+    <div className="min-w-0">
+      <p className="text-[10px] font-black uppercase tracking-wide text-cyan-700">Recommended Lineups</p>
+      <h2 className="mt-0.5 truncate text-lg font-black text-[#0b1f3a] sm:text-xl">
+        {manifest?.slate?.slate_name ?? 'Optimizer Board'}
+      </h2>
+      <p className="mt-0.5 truncate text-xs font-medium text-slate-500">
+        {manifest?.contest_date ?? 'Current scan'}
+        {manifest?.game_id ? ` · Game ${manifest.game_id}` : ''}
+      </p>
+    </div>
+  );
+}
+
+function ResultSummary({ lineups, manifest, warnings }: { lineups: Lineup[]; manifest: MIOS_FantasyManifest | null; warnings: string[] }) {
+  const topLineup = lineups[0];
+  const injuries = manifest?.player_roster.filter((player) => player.injury_status !== 'active').length ?? 0;
+  const sourceEntries = Object.entries(manifest?.source_status ?? {});
+  const sourceProblems = sourceEntries.filter(([, status]) => status !== 'ok').length;
+  const warningCount = actionableDataWarnings(warnings).length;
+  const noteCount = routineDataNotes(warnings).length;
+
+  return (
+    <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-6 xl:min-w-[620px]">
+      <SummaryPill label="Lineups" value={String(lineups.length)} />
+      <SummaryPill label="Top EV" value={(topLineup?.simulation_ev ?? topLineup?.projected_points ?? 0).toFixed(1)} />
+      <SummaryPill label="Salary" value={`$${Math.round((topLineup?.salary_used ?? 0) / 1000)}k`} />
+      <SummaryPill label="Top 10" value={topLineup?.top_10_rate !== undefined ? `${(topLineup.top_10_rate * 100).toFixed(0)}%` : '—'} />
+      <SummaryPill label="Flags" value={String(injuries)} tone={injuries ? 'warn' : 'neutral'} />
+      <SummaryPill
+        label="Data"
+        value={warningCount ? `${warningCount} warn` : noteCount ? `${noteCount} notes` : sourceProblems ? `${sourceProblems} gaps` : 'ok'}
+        tone={warningCount ? 'warn' : 'neutral'}
+      />
+    </div>
+  );
+}
+
+function ScanDiagnostics({
+  manifest,
+  lineups,
+  calibration,
+  calibrationV2,
+  scoreboard,
+  warnings,
+}: {
+  manifest: MIOS_FantasyManifest | null;
+  lineups: Lineup[];
+  calibration: ProjectionCalibration | null;
+  calibrationV2: ProjectionCalibrationV2[];
+  scoreboard: LineupScoreboardRow[];
+  warnings: string[];
+}) {
+  return (
+    <div className="space-y-3">
+      {warnings.length ? <WarningsPanel warnings={warnings} /> : null}
+      <InjuryReport manifest={manifest} />
+      <LineupComparison lineups={lineups} />
+      <PivotSuggestions lineups={lineups} manifest={manifest} />
+      <CalibrationDashboard manifest={manifest} lineups={lineups} calibration={calibration} calibrationV2={calibrationV2} scoreboard={scoreboard} />
+    </div>
+  );
+}
+
+function WarningsPanel({ warnings }: { warnings: string[] }) {
+  const actionable = actionableDataWarnings(warnings);
+  const notes = routineDataNotes(warnings);
+
+  return (
+    <section className={`rounded-lg border p-3 text-sm font-medium shadow-[var(--shadow-subtle)] ${
+      actionable.length ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-slate-200 bg-slate-50 text-slate-700'
+    }`}>
+      {actionable.length ? (
+        <>
+          <p className="mb-2 text-[11px] font-black uppercase tracking-wide text-amber-700">Data Warnings</p>
+          <div className="space-y-2">
+            {actionable.map((warning) => (
+              <p key={warning}>{warning}</p>
+            ))}
+          </div>
+        </>
+      ) : (
+        <p className="text-[11px] font-black uppercase tracking-wide text-slate-500">Source Notes</p>
+      )}
+
+      {notes.length ? (
+        <details className={actionable.length ? 'mt-3' : 'mt-2'} open={!actionable.length && notes.length <= 4}>
+          <summary className="cursor-pointer text-xs font-black text-slate-600">
+            {notes.length} source note{notes.length === 1 ? '' : 's'}
+          </summary>
+          <div className="mt-2 space-y-2 text-xs leading-5 text-slate-600">
+            {notes.map((note) => (
+              <p key={note}>{note}</p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </section>
+  );
+}
+
+function actionableDataWarnings(messages: string[]): string[] {
+  return messages.filter((message) => !isRoutineDataNote(message));
+}
+
+function routineDataNotes(messages: string[]): string[] {
+  return messages.filter(isRoutineDataNote);
+}
+
+function isRoutineDataNote(message: string): boolean {
+  return [
+    /^Public ownership projections were unavailable/i,
+    /^The Odds API requests remaining/i,
+    /^Sportsbook player props were unavailable/i,
+    /^Verified free odds context is unavailable/i,
+    /^Enriched \d+ of \d+ slate players/i,
+    /^Opportunity model applied/i,
+    /^Vegas implied-total context was unavailable/i,
+    /^DraftKings salary rows did not include projected points/i,
+    /^Projection calibration is not active yet/i,
+    /^Projection calibration applied/i,
+    /^Reddit public RSS signals were unavailable/i,
+    /^Player-specific news signals were unavailable/i,
+    /^Manifest persistence skipped/i,
+    /^Applied /i,
+    /^Confirmed MLB batting/i,
+    /^Baseball Savant Statcast quality signals were unavailable/i,
+    /^Free MLB schedule/i,
+  ].some((pattern) => pattern.test(message));
+}
+
+function SummaryPill({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'neutral' | 'warn' }) {
+  return (
+    <div className={`rounded-md border px-2 py-2 ${tone === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-slate-50'}`}>
+      <p className={`text-[10px] font-bold uppercase tracking-wide ${tone === 'warn' ? 'text-amber-700' : 'text-slate-500'}`}>{label}</p>
       <p className="text-sm font-black text-[#0b1f3a]">{value}</p>
     </div>
   );
@@ -198,6 +361,12 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       boom_probability: p.boom_probability,
       bust_probability: p.bust_probability,
       batting_order: p.batting_order,
+      run_factor: p.run_factor,
+      opponent_team: p.opponent_team,
+      opposing_probable_pitcher_id: p.opposing_probable_pitcher_id,
+      opposing_probable_pitcher_name: p.opposing_probable_pitcher_name,
+      own_probable_starter: p.own_probable_starter,
+      game_id: p.game_id,
       game_context_tags: p.game_context_tags,
       news_note: p.news_note,
       last_5_stats: { avg_fantasy_pts: p.last_5_avg_pts, trend: 'stable' }
@@ -208,6 +377,7 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     simulation_ev: lu.simulation_ev,
     ceiling_score: lu.ceiling_score,
     floor_score: lu.floor_score,
+    p99_score: lu.p99_score,
     win_rate: lu.win_rate,
     top_10_rate: lu.top_10_rate,
     leverage_score: lu.leverage_score,

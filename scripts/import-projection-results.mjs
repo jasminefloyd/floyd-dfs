@@ -19,14 +19,16 @@ const raw = await readFile(filePath, 'utf8');
 const payload = JSON.parse(raw);
 const endpoint = `${supabaseUrl.replace(/\/$/, '')}/rest/v1/rpc/fantasy_ai_upsert_projection_results`;
 
-const body = {
-  p_sport: payload.sport,
-  p_contest_date: payload.contestDate,
-  p_contest_type: payload.contestType,
-  p_contest_id: payload.contestId ?? null,
-  p_source: payload.source ?? 'manual_results_import',
-  p_rows: payload.results ?? payload.rows ?? [],
-};
+const rows = (payload.results ?? payload.rows ?? []).map((row) => ({
+  ...row,
+  sport: payload.sport,
+  contest_date: payload.contestDate,
+  contest_type: payload.contestType,
+  contest_id: payload.contestId ?? row.contest_id ?? null,
+  source: payload.source ?? row.source ?? 'manual_results_import',
+}));
+
+const body = { p_rows: rows };
 
 const response = await fetch(endpoint, {
   method: 'POST',

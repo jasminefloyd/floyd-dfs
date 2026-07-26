@@ -1,5 +1,5 @@
 import type { Last5Game, Player } from './MIOS_FantasyAgents';
-import { DK_SCORING } from './productConstants';
+import { dkFantasyPoints, type DkSport } from './dkScoring';
 
 export interface CorrelationPair {
   player1_id: string;
@@ -14,68 +14,23 @@ export interface CorrelationPair {
 // meaningful. Below this, Pearson correlation on so few points is noise.
 const MIN_CO_APPEARANCES = 3;
 
-// Converts a single game's raw stat line into DraftKings fantasy points, per sport.
-// NOTE: Last5Game has no `turnovers` or `three_pointers` fields, so those NBA/WNBA
-// DK_SCORING categories can't be applied here — this is a data gap upstream, not a
-// bug in this calculation.
-function calculateFantasyPoints(game: Last5Game, sport: string): number {
-  switch (sport) {
-    case 'nba':
-    case 'wnba': {
-      const scoring = DK_SCORING[sport];
-      return (
-        (game.points || 0) * scoring.points +
-        (game.rebounds || 0) * scoring.rebounds +
-        (game.assists || 0) * scoring.assists +
-        (game.steals || 0) * scoring.steals +
-        (game.blocks || 0) * scoring.blocks
-      );
-    }
-    case 'nfl': {
-      const scoring = DK_SCORING.nfl;
-      return (
-        (game.passing_yards || 0) * scoring.passing_yards +
-        (game.passing_tds || 0) * scoring.passing_td +
-        (game.interceptions || 0) * scoring.interception +
-        (game.rushing_yards || 0) * scoring.rushing_yards +
-        (game.rushing_tds || 0) * scoring.rushing_td +
-        (game.receiving_yards || 0) * scoring.receiving_yards +
-        (game.receiving_tds || 0) * scoring.receiving_td +
-        (game.receptions || 0) * scoring.reception
-      );
-    }
-    case 'mlb': {
-      const scoring = DK_SCORING.mlb;
-      const singles = Math.max(
-        (game.hits || 0) - (game.doubles || 0) - (game.triples || 0) - (game.home_runs || 0),
-        0
-      );
-      return (
-        singles * scoring.single +
-        (game.doubles || 0) * scoring.double +
-        (game.triples || 0) * scoring.triple +
-        (game.home_runs || 0) * scoring.home_run +
-        (game.rbis || 0) * scoring.rbi +
-        (game.runs || 0) * scoring.run +
-        (game.stolen_bases || 0) * scoring.stolen_base +
-        (game.strikeouts || 0) * scoring.strikeout +
-        (game.walks || 0) * scoring.walk
-      );
-    }
-    case 'f1': {
-      // NOTE: DraftKings' real F1 finishing-position formula wasn't verified this
-      // session. This is a simplified, unverified placeholder (higher finish = more
-      // points on a 20-point ordinal scale) consistent with the earlier caveat that
-      // F1 roster/scoring rules haven't been confirmed against DK's actual rules.
-      const scoring = DK_SCORING.f1;
-      const positionPts = game.position ? Math.max(21 - game.position, 0) * scoring.position_finish : 0;
-      const poleBonus = game.qualifying_pos === 1 ? scoring.pole_position : 0;
-      const fastestLapBonus = game.fastest_lap ? scoring.fastest_lap : 0;
-      return positionPts + poleBonus + fastestLapBonus;
-    }
-    default:
-      return 0;
+function f1PlaceholderPoints(game: Last5Game): number {
+  // NOTE: DraftKings' real F1 finishing-position formula wasn't verified this
+  // session. This is a simplified, unverified placeholder (higher finish = more
+  // points on a 20-point ordinal scale) consistent with the earlier caveat that
+  // F1 roster/scoring rules haven't been confirmed against DK's actual rules.
+  const positionPts = game.position ? Math.max(21 - game.position, 0) : 0;
+  const poleBonus = game.qualifying_pos === 1 ? 1.5 : 0;
+  const fastestLapBonus = game.fastest_lap ? 1.5 : 0;
+  return positionPts + poleBonus + fastestLapBonus;
+}
+
+function gamePoints(game: Last5Game, sport: string): number {
+  if (sport === 'nba' || sport === 'wnba' || sport === 'nfl' || sport === 'mlb') {
+    return dkFantasyPoints(game as unknown as Record<string, number>, sport as DkSport);
   }
+  if (sport === 'f1') return f1PlaceholderPoints(game);
+  return 0;
 }
 
 function matchGamesByDate(gamesA: Last5Game[], gamesB: Last5Game[]): Array<[Last5Game, Last5Game]> {
@@ -116,7 +71,7 @@ function pearsonCorrelation(xs: number[], ys: number[]): number | null {
 }
 
 export function generateCorrelationPairs(roster: Player[], sport: string): CorrelationPair[] {
-  const withGames = roster.filter((p) => (p.last_5_stats?.games?.length ?? 0) > 0);
+  const withGames = roster.filter((p) => !p.last_5_stats?.is_synthetic && (p.last_5_stats?.games?.length ?? 0) > 0);
   const pairs: CorrelationPair[] = [];
 
   for (let i = 0; i < withGames.length; i++) {
@@ -127,8 +82,8 @@ export function generateCorrelationPairs(roster: Player[], sport: string): Corre
       const matched = matchGamesByDate(playerA.last_5_stats!.games, playerB.last_5_stats!.games);
       if (matched.length < MIN_CO_APPEARANCES) continue;
 
-      const aPoints = matched.map(([gA]) => calculateFantasyPoints(gA, sport));
-      const bPoints = matched.map(([, gB]) => calculateFantasyPoints(gB, sport));
+      const aPoints = matched.map(([gA]) => gamePoints(gA, sport));
+      const bPoints = matched.map(([, gB]) => gamePoints(gB, sport));
 
       const correlation = pearsonCorrelation(aPoints, bPoints);
       if (correlation === null) continue;

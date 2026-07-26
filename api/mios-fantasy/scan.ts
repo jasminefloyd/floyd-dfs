@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import type { Last5Game, MIOS_FantasyManifest, Player } from '../../src/lib/MIOS_FantasyAgents.js';
+import type { MIOS_FantasyManifest, Player } from '../../src/lib/MIOS_FantasyAgents.js';
 import { collectNewsAndInjuries } from './news-injuries.js';
 import { collectLast5Stats } from './last5-stats.js';
 import { collectRedditSentiment } from './reddit-sentiment.js';
@@ -39,6 +39,11 @@ const CLASSIC_TARGETS: Record<string, Record<string, number>> = {
   f1: { DRIVER: 20 }
 };
 
+const INJURY_CONTEXT_PATTERN = /\b(injur\w*|ankle|knee|hamstring|illness|soreness|surgery|concussion|il|ir)\b/i;
+const EXPLICIT_OUT_PATTERN = /\b(ruled\s+out|out\s+indefinitely|will\s+not\s+play|inactive|injured\s+reserve|placed\s+on\s+(?:the\s+)?(?:il|ir))\b/i;
+const BARE_OUT_PATTERN = /\bout\b/i;
+const SHORT_OUT_STATUS_PATTERN = /^\s*(?:o|out)(?:\s*\([^)]*\))?\s*$/i;
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timeout: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -61,12 +66,20 @@ function validateContestDate(contestDate: string) {
 }
 
 function normalizeInjuryStatus(raw: unknown): Player['injury_status'] {
-  const text = String(raw ?? '').toLowerCase();
-  if (text.includes('out') || text.includes('injured reserve') || text === 'ir') return 'out';
-  if (text.includes('doubt')) return 'doubtful';
-  if (text.includes('question')) return 'questionable';
-  if (text.includes('prob')) return 'probable';
-  if (text.includes('day') || text === 'dtd') return 'day_to_day';
+  const text = String(raw ?? '').trim();
+  if (!text) return 'active';
+  if (
+    EXPLICIT_OUT_PATTERN.test(text)
+    || SHORT_OUT_STATUS_PATTERN.test(text)
+    || /^\s*(?:ir|il)\s*$/i.test(text)
+    || (BARE_OUT_PATTERN.test(text) && INJURY_CONTEXT_PATTERN.test(text))
+  ) {
+    return 'out';
+  }
+  if (/\b(doubtful|unlikely\s+to\s+play)\b/i.test(text)) return 'doubtful';
+  if (/\b(questionable|game[-\s]?time\s+decision|uncertain)\b/i.test(text)) return 'questionable';
+  if (/\b(probable|expected\s+to\s+play|available)\b/i.test(text)) return 'probable';
+  if (/\b(day[-\s]?to[-\s]?day|dtd|limited)\b/i.test(text)) return 'day_to_day';
   return 'active';
 }
 
@@ -88,14 +101,6 @@ function estimatedSalary(projectedPoints: number, position: string, sport: strin
   const sportPremium = sport === 'f1' ? 3500 : sport === 'nfl' ? 2500 : 3000;
   const salary = sportPremium + positionPremium + Math.round(projectedPoints * 145);
   return Math.max(3000, Math.min(12000, Math.round(salary / 100) * 100));
-}
-
-function buildBaselineGames(projectedPoints: number): Last5Game[] {
-  return Array.from({ length: 5 }, (_, idx) => ({
-    date: `baseline-${idx + 1}`,
-    opponent: 'N/A',
-    points: Math.max(0, Math.round(projectedPoints * (0.72 + idx * 0.06))),
-  }));
 }
 
 function toPlayer(raw: any, sport: string): Player | null {
@@ -124,7 +129,8 @@ function toPlayer(raw: any, sport: string): Player | null {
       avg_fantasy_pts: projected,
       trend: 'stable',
       confidence: 0.45,
-      games: buildBaselineGames(projected)
+      is_synthetic: true,
+      games: []
     }
   };
 }

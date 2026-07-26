@@ -9,6 +9,10 @@ export interface Last5Game {
   assists?: number;
   steals?: number;
   blocks?: number;
+  turnovers?: number;
+  threePointFieldGoalsMade?: number;
+  three_pointers?: number;
+  fg3m?: number;
   fg_pct?: number;
   usage_rate?: number;
   // NFL specific
@@ -53,8 +57,24 @@ export interface Player {
   salary_source?: 'draftkings_import' | 'estimated';
   injury_status: 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
   injury_note?: string;
-  projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated';
+  projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
+  ownership_projection?: number;
+  prop_projection?: number;
+  implied_total?: number;
+  spread?: number;
+  confirmed_starter?: boolean;
+  batting_order?: number;
+  run_factor?: number;
+  opponent_team?: string;
+  opposing_probable_pitcher_id?: string;
+  opposing_probable_pitcher_name?: string;
+  own_probable_starter?: boolean;
+  game_id?: string;
+  minutes_projection?: number;
+  usage_rate?: number;
+  pace_metric?: number;
+  depth_chart_order?: number;
   context_score?: number;
   news_score?: number;
   news_note?: string;
@@ -63,6 +83,8 @@ export interface Player {
     avg_fantasy_pts: number;
     trend: 'up' | 'down' | 'stable';
     confidence: number;
+    minutes_avg?: number;
+    is_synthetic?: boolean;
     games: Last5Game[];
   };
 }
@@ -77,7 +99,16 @@ export interface MIOS_FantasyManifest {
   slate?: DraftKingsSlate;
   player_roster: Player[];
   injury_updates: { player_id: string; status: string; confidence: number }[];
-  vegas_context: { game_id: string; spread: number; over_under: number; implied_total: number }[];
+  vegas_context: {
+    game_id: string;
+    spread: number;
+    over_under: number;
+    implied_total: number;
+    home_team?: string;
+    away_team?: string;
+    home_implied?: number;
+    away_implied?: number;
+  }[];
   social_sentiment: { player_id: string; mentions: number; sentiment_score: number; themes: string[] }[];
   catalysts: { type: string; player_id?: string; description: string }[];
   narrative_seeds: string[];
@@ -93,6 +124,7 @@ export function scorePlayerConfidence(
   vegasExpectation: number,
   sentiment: number
 ): number {
+  void sentiment;
   let score = 0.5; // Start at 0.5
 
   // Injury weight (40%)
@@ -113,8 +145,7 @@ export function scorePlayerConfidence(
   // Vegas alignment (20%)
   score += (vegasExpectation * 0.1) * 0.2; // Normalize Vegas to 0-1
 
-  // Sentiment (10%)
-  score += ((sentiment + 1) / 2) * 0.1; // Convert -1 to 1 scale to 0-1
+  // Reddit sentiment is display-only and does not affect confidence.
 
   return Math.min(Math.max(score, 0), 1); // Clamp 0-1
 }

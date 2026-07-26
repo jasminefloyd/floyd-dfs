@@ -16,6 +16,17 @@ export interface LineupPlayerDraft {
   last_5_avg_pts: number;
   injury_status: string;
   projected_points?: number;
+  prop_projection?: number;
+  implied_total?: number;
+  spread?: number;
+  confirmed_starter?: boolean;
+  run_factor?: number;
+  opponent_team?: string;
+  opposing_probable_pitcher_id?: string;
+  opposing_probable_pitcher_name?: string;
+  own_probable_starter?: boolean;
+  game_id?: string;
+  depth_chart_order?: number;
   ownership_projection?: number;
   minutes_projection?: number;
   usage_rate?: number;
@@ -41,6 +52,7 @@ export interface DraftLineup {
   simulation_ev?: number;
   ceiling_score?: number;
   floor_score?: number;
+  p99_score?: number;
   win_rate?: number;
   top_10_rate?: number;
   leverage_score?: number;
@@ -64,6 +76,8 @@ interface RosterSlot {
   slot: string;
   eligible: string[];
 }
+
+const LINEUP_ELIGIBLE_INJURY_STATUSES = new Set(['active', 'probable', 'day_to_day', 'questionable']);
 
 // Verified against DraftKings' documented Classic roster construction (2026-07-14):
 // - NBA/WNBA: 8 spots (PG, SG, SF, PF, C, G, F, UTIL)
@@ -132,9 +146,9 @@ export function generateLineups(
 ): DraftLineup[] {
   const excludedLower = excludedPlayers.map(normalizePlayerName);
 
-  // Filter roster: remove injury-flagged players and manual exclusions.
+  // Filter roster: remove unavailable players and manual exclusions.
   const eligiblePlayers = roster.filter(
-    (p) => p.injury_status === 'active' && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
+    (p) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(p.injury_status) && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
   );
 
   // Sort by recent production (used as a proxy for confidence when picking within a slot)

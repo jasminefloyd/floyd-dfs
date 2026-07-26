@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { Info } from 'lucide-react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
 import { parseExcludedPlayers, validateScanInput } from '../lib/validation';
@@ -28,6 +27,16 @@ interface MIOS_FantasyScannerProps {
   onValidationError?: (errors: string[]) => void;
 }
 
+const HIGHEST_PROJECTION_OPTIONS = {
+  riskTolerance: 'balanced',
+  lineupMode: 'max_fpts',
+  maxPlayerExposure: 1,
+  maxTeamExposure: 1,
+  minPrimaryStack: 0,
+  diversifyLineups: false,
+  lateSwapMode: true,
+};
+
 export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
   const [contestType, setContestType] = useState('showdown');
@@ -36,14 +45,6 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const [slateLoading, setSlateLoading] = useState(false);
   const [slateError, setSlateError] = useState<string | null>(null);
   const [excludedPlayers, setExcludedPlayers] = useState('');
-  const [riskTolerance, setRiskTolerance] = useState('balanced');
-  const [lineupMode, setLineupMode] = useState('max_fpts');
-  const [contestStrategy, setContestStrategy] = useState('single_entry');
-  const [maxPlayerExposure, setMaxPlayerExposure] = useState(70);
-  const [maxTeamExposure, setMaxTeamExposure] = useState(75);
-  const [minPrimaryStack, setMinPrimaryStack] = useState(3);
-  const [diversifyLineups, setDiversifyLineups] = useState(true);
-  const [lateSwapMode, setLateSwapMode] = useState(true);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -76,7 +77,14 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       return;
     }
 
-    const errors = validateScanInput({ sport, contestType, contestDate: selectedSlate.contest_date, riskTolerance, lineupMode });
+    const contestStrategy = contestType === 'showdown' ? 'showdown' : 'single_entry';
+    const errors = validateScanInput({
+      sport,
+      contestType,
+      contestDate: selectedSlate.contest_date,
+      riskTolerance: HIGHEST_PROJECTION_OPTIONS.riskTolerance,
+      lineupMode: HIGHEST_PROJECTION_OPTIONS.lineupMode,
+    });
     if (errors.length) {
       onValidationError?.(errors);
       return;
@@ -90,14 +98,14 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       gameId: selectedSlate.game_ids[0],
       slate: selectedSlate,
       excludedPlayers: parseExcludedPlayers(excludedPlayers),
-      riskTolerance,
-      lineupMode,
+      riskTolerance: HIGHEST_PROJECTION_OPTIONS.riskTolerance,
+      lineupMode: HIGHEST_PROJECTION_OPTIONS.lineupMode,
       contestStrategy,
-      maxPlayerExposure: maxPlayerExposure / 100,
-      maxTeamExposure: maxTeamExposure / 100,
-      minPrimaryStack,
-      diversifyLineups,
-      lateSwapMode
+      maxPlayerExposure: HIGHEST_PROJECTION_OPTIONS.maxPlayerExposure,
+      maxTeamExposure: HIGHEST_PROJECTION_OPTIONS.maxTeamExposure,
+      minPrimaryStack: HIGHEST_PROJECTION_OPTIONS.minPrimaryStack,
+      diversifyLineups: HIGHEST_PROJECTION_OPTIONS.diversifyLineups,
+      lateSwapMode: HIGHEST_PROJECTION_OPTIONS.lateSwapMode
     });
   };
 
@@ -113,8 +121,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
     <div className="space-y-4 text-slate-900">
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Build A Slate</p>
-        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Scan Settings</h2>
-        <p className="mt-1 text-sm text-slate-500">Pick a sport, slate, and risk profile to generate DFS plays.</p>
+        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Find The Highest Projected Lineup</h2>
+        <p className="mt-1 text-sm text-slate-500">Pick a sport and DraftKings slate. The optimizer will rank lineups by projected fantasy points.</p>
       </div>
 
       <div>
@@ -237,147 +245,6 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         />
       </div>
 
-      <div>
-        <label className={`mb-2 ${labelClass}`}>Lineup Mode</label>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            ['max_fpts', 'Max FPTS'],
-            ['balanced_ev', 'Balanced EV'],
-            ['tournament', 'Tournament'],
-            ['safe', 'Safe'],
-          ].map(([mode, label]) => (
-            <label
-              key={mode}
-              className={optionClass(lineupMode === mode)}
-            >
-              <input
-                type="radio"
-                name="lineupMode"
-                value={mode}
-                checked={lineupMode === mode}
-                onChange={(e) => setLineupMode(e.target.value)}
-                disabled={loading}
-                className="sr-only"
-              />
-              <span>{label}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <LabelWithTooltip label="Contest Strategy" description="Sets ranking style: safer builds favor floor and confidence, while GPP builds favor stacks, ceiling, and leverage." />
-        <select
-          value={contestStrategy}
-          onChange={(event) => setContestStrategy(event.target.value)}
-          disabled={loading}
-          className={fieldClass}
-        >
-          <option value="cash">Cash / Safe</option>
-          <option value="single_entry">Single Entry</option>
-          <option value="small_field">Small Field</option>
-          <option value="large_field_gpp">Large Field GPP</option>
-          <option value="showdown">Showdown</option>
-        </select>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <LabelWithTooltip label="Player Exposure" description="Caps how often the same player can appear across generated lineups when diversification is enabled." />
-          <input
-            type="number"
-            min="20"
-            max="100"
-            step="5"
-            value={maxPlayerExposure}
-            onChange={(event) => setMaxPlayerExposure(Number(event.target.value))}
-            disabled={loading}
-            className={fieldClass}
-          />
-        </div>
-        <div>
-          <LabelWithTooltip label="Stack Exposure" description="Caps repeated use of the same primary team stack across generated MLB lineups." side="right" />
-          <input
-            type="number"
-            min="20"
-            max="100"
-            step="5"
-            value={maxTeamExposure}
-            onChange={(event) => setMaxTeamExposure(Number(event.target.value))}
-            disabled={loading}
-            className={fieldClass}
-          />
-        </div>
-      </div>
-
-      {sport === 'mlb' ? (
-        <div>
-          <label className={`mb-2 ${labelClass}`}>Primary Stack</label>
-          <input
-            type="range"
-            min="0"
-            max="5"
-            step="1"
-            value={minPrimaryStack}
-            onChange={(event) => setMinPrimaryStack(Number(event.target.value))}
-            disabled={loading}
-            className="w-full accent-[#0b1f3a]"
-          />
-          <div className="mt-2 flex justify-between text-xs text-slate-500">
-            <span>None</span>
-            <span>{minPrimaryStack} hitters</span>
-            <span>5 hitters</span>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="grid grid-cols-2 gap-2">
-        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">
-          <input
-            type="checkbox"
-            checked={diversifyLineups}
-            onChange={(event) => setDiversifyLineups(event.target.checked)}
-            disabled={loading}
-            className="h-4 w-4 accent-[#0b1f3a]"
-          />
-          Diversify
-          <Tooltip description="Builds a lineup set with less repeated player and stack exposure instead of five near-identical lineups." />
-        </label>
-        <label className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">
-          <input
-            type="checkbox"
-            checked={lateSwapMode}
-            onChange={(event) => setLateSwapMode(event.target.checked)}
-            disabled={loading}
-            className="h-4 w-4 accent-[#0b1f3a]"
-          />
-          Late Swap
-          <Tooltip description="Flags lineup risks like unconfirmed batting orders, non-starters, and injury statuses before lock." side="right" />
-        </label>
-      </div>
-
-      <div>
-        <LabelWithTooltip label="Risk Tolerance" description="Controls how much the optimizer favors floor and confidence versus ceiling, variance, and leverage." />
-        <input
-          type="range"
-          min="0"
-          max="2"
-          step="1"
-          value={riskTolerance === 'conservative' ? 0 : riskTolerance === 'balanced' ? 1 : 2}
-          onChange={(e) => {
-            const mapping = ['conservative', 'balanced', 'aggressive'];
-            setRiskTolerance(mapping[parseInt(e.target.value, 10)]);
-          }}
-          disabled={loading}
-          className="w-full accent-[#0b1f3a]"
-        />
-        <div className="mt-2 flex justify-between text-xs text-slate-500">
-          <span>Conservative</span>
-          <span>Balanced</span>
-          <span>Aggressive</span>
-        </div>
-      </div>
-
       <button
         onClick={handleScan}
         disabled={scanDisabled}
@@ -402,38 +269,6 @@ function isWithinScanWindow(slate: DraftKingsSlate): boolean {
 function availabilityMessage(sport: string, contestType: string): string {
   const label = `${sport.toUpperCase()} ${contestType}`;
   return `No DraftKings ${label} slates with verified salary data were found for the next 48 hours.`;
-}
-
-function LabelWithTooltip({ label, description, side = 'center' }: { label: string; description: string; side?: TooltipSide }) {
-  return (
-    <div className="mb-2 flex items-center gap-1.5">
-      <label className="block text-[11px] font-black uppercase tracking-wide text-slate-500">{label}</label>
-      <Tooltip description={description} side={side} />
-    </div>
-  );
-}
-
-type TooltipSide = 'center' | 'right';
-
-function Tooltip({ description, side = 'center' }: { description: string; side?: TooltipSide }) {
-  const bubblePosition = side === 'right'
-    ? 'right-0 top-6'
-    : 'left-1/2 top-6 -translate-x-1/2';
-
-  return (
-    <span className="group relative inline-flex">
-      <button
-        type="button"
-        aria-label={description}
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-[#0b1f3a] focus-visible:bg-slate-100 focus-visible:text-[#0b1f3a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
-      >
-        <Info className="h-3.5 w-3.5" aria-hidden="true" />
-      </button>
-      <span className={`pointer-events-none absolute ${bubblePosition} z-20 hidden w-[min(14rem,calc(100vw-2rem))] rounded-md border border-slate-700 bg-[#0b1f3a] px-3 py-2 text-[11px] font-medium leading-snug text-white shadow-[var(--shadow-medium)] group-hover:block group-focus-within:block`}>
-        {description}
-      </span>
-    </span>
-  );
 }
 
 function formatSlateDateTime(value: string): string {

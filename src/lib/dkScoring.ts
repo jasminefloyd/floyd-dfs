@@ -1,0 +1,221 @@
+// KEEP IN SYNC — canonical copy in supabase/functions/_shared/dkScoring.ts
+// DraftKings Classic scoring implemented from the repo requirement and DK scoring references
+// checked 2026-07-23. DK Help notes DFS scoring is finalized from official stats:
+// https://help.draftkings.com/hc/en-us/articles/4405224006931
+// DK basketball rules define double/triple categories as points, rebounds, assists,
+// steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
+
+export type DkSport = 'nba' | 'wnba' | 'nfl' | 'mlb';
+export type DkRole = 'hitter' | 'pitcher' | 'dst';
+export type StatLine = Record<string, number>;
+
+export const DK_SCORING = {
+  nba: {
+    points: 1,
+    threePointersMade: 0.5,
+    rebounds: 1.25,
+    assists: 1.5,
+    steals: 2,
+    blocks: 2,
+    turnovers: -0.5,
+    doubleDouble: 1.5,
+    tripleDouble: 3,
+  },
+  wnba: {
+    points: 1,
+    threePointersMade: 0.5,
+    rebounds: 1.25,
+    assists: 1.5,
+    steals: 2,
+    blocks: 2,
+    turnovers: -0.5,
+    doubleDouble: 1.5,
+    tripleDouble: 3,
+  },
+  nfl: {
+    passingYards: 0.04,
+    passingTouchdown: 4,
+    passingYardBonus: 3,
+    interception: -1,
+    rushingYards: 0.1,
+    rushingTouchdown: 6,
+    rushingYardBonus: 3,
+    receivingYards: 0.1,
+    reception: 1,
+    receivingTouchdown: 6,
+    receivingYardBonus: 3,
+    fumbleLost: -1,
+    twoPointConversion: 2,
+    dstSack: 1,
+    dstInterception: 2,
+    dstFumbleRecovery: 2,
+    dstTouchdown: 6,
+    dstSafety: 2,
+    dstBlockedKick: 2,
+  },
+  mlb: {
+    single: 3,
+    double: 5,
+    triple: 8,
+    homeRun: 10,
+    rbi: 2,
+    run: 2,
+    walk: 2,
+    hitByPitch: 2,
+    stolenBase: 5,
+    inningPitched: 2.25,
+    strikeout: 2,
+    win: 4,
+    earnedRun: -2,
+    hitAgainst: -0.6,
+    walkAgainst: -0.6,
+    hitBatsman: -0.6,
+    completeGame: 2.5,
+    completeGameShutout: 2.5,
+    noHitter: 5,
+  },
+} as const;
+
+function stat(line: StatLine, keys: string[]): number {
+  for (const key of keys) {
+    const value = Number(line[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function atLeast(value: number, threshold: number): number {
+  return value >= threshold ? 1 : 0;
+}
+
+export function dkBasketballFantasyPoints(statLine: StatLine): number {
+  const points = stat(statLine, ['points', 'pts']);
+  const threes = stat(statLine, [
+    'threePointFieldGoalsMade',
+    'threePointersMade',
+    'threePointers',
+    'three_pointers',
+    'three_pointers_made',
+    'three_point_field_goals_made',
+    'threePointMade',
+    'threesMade',
+    'fg3m',
+    '3pm',
+  ]);
+  const rebounds = stat(statLine, ['totalRebounds', 'rebounds', 'reb', 'total_rebounds']);
+  const assists = stat(statLine, ['assists', 'ast']);
+  const steals = stat(statLine, ['steals', 'stl']);
+  const blocks = stat(statLine, ['blocks', 'blk']);
+  const turnovers = stat(statLine, ['turnovers', 'turnover', 'tov']);
+  const categoriesAtTen = [
+    points,
+    rebounds,
+    assists,
+    steals,
+    blocks,
+  ].reduce((count, value) => count + atLeast(value, 10), 0);
+  // DK awards both bonuses on a triple-double: +1.5 for double-double and +3.0 for triple-double.
+  const doubleDoubleBonus = categoriesAtTen >= 2 ? DK_SCORING.nba.doubleDouble : 0;
+  const tripleDoubleBonus = categoriesAtTen >= 3 ? DK_SCORING.nba.tripleDouble : 0;
+
+  return points
+    + threes * DK_SCORING.nba.threePointersMade
+    + rebounds * DK_SCORING.nba.rebounds
+    + assists * DK_SCORING.nba.assists
+    + steals * DK_SCORING.nba.steals
+    + blocks * DK_SCORING.nba.blocks
+    + turnovers * DK_SCORING.nba.turnovers
+    + doubleDoubleBonus
+    + tripleDoubleBonus;
+}
+
+export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {
+  if (role === 'dst') return dkNflDstFantasyPoints(statLine);
+
+  const passingYards = stat(statLine, ['passingYards', 'passing_yards', 'passYards', 'pass_yds']);
+  const rushingYards = stat(statLine, ['rushingYards', 'rushing_yards', 'rushYards', 'rush_yds']);
+  const receivingYards = stat(statLine, ['receivingYards', 'receiving_yards', 'recYards', 'rec_yds']);
+
+  return passingYards * DK_SCORING.nfl.passingYards
+    + stat(statLine, ['passingTouchdowns', 'passing_tds', 'passingTds', 'passingTD', 'pass_td']) * DK_SCORING.nfl.passingTouchdown
+    + (passingYards >= 300 ? DK_SCORING.nfl.passingYardBonus : 0)
+    + stat(statLine, ['interceptions', 'interceptionsThrown', 'ints', 'int']) * DK_SCORING.nfl.interception
+    + rushingYards * DK_SCORING.nfl.rushingYards
+    + stat(statLine, ['rushingTouchdowns', 'rushing_tds', 'rushingTds', 'rushingTD', 'rush_td']) * DK_SCORING.nfl.rushingTouchdown
+    + (rushingYards >= 100 ? DK_SCORING.nfl.rushingYardBonus : 0)
+    + receivingYards * DK_SCORING.nfl.receivingYards
+    + stat(statLine, ['receptions', 'receivingReceptions', 'rec']) * DK_SCORING.nfl.reception
+    + stat(statLine, ['receivingTouchdowns', 'receiving_tds', 'receivingTds', 'receivingTD', 'rec_td']) * DK_SCORING.nfl.receivingTouchdown
+    + (receivingYards >= 100 ? DK_SCORING.nfl.receivingYardBonus : 0)
+    + stat(statLine, ['fumblesLost', 'fumble_lost', 'lostFumbles']) * DK_SCORING.nfl.fumbleLost
+    + stat(statLine, ['twoPointConversions', 'two_point_conversions', 'twoPtConversions', 'two_pt']) * DK_SCORING.nfl.twoPointConversion;
+}
+
+export function dkNflDstFantasyPoints(statLine: StatLine): number {
+  return stat(statLine, ['sacks', 'sack']) * DK_SCORING.nfl.dstSack
+    + stat(statLine, ['interceptions', 'interceptionsForced', 'dstInterceptions', 'int']) * DK_SCORING.nfl.dstInterception
+    + stat(statLine, ['fumblesRecovered', 'fumbleRecoveries', 'fumble_recoveries']) * DK_SCORING.nfl.dstFumbleRecovery
+    + stat(statLine, ['defensiveTouchdowns', 'specialTeamsTouchdowns', 'dstTouchdowns', 'touchdowns', 'td']) * DK_SCORING.nfl.dstTouchdown
+    + stat(statLine, ['safeties', 'safety']) * DK_SCORING.nfl.dstSafety
+    + stat(statLine, ['blockedKicks', 'blocked_kicks', 'blocks']) * DK_SCORING.nfl.dstBlockedKick
+    + dstPointsAllowedBonus(stat(statLine, ['pointsAllowed', 'points_allowed', 'pa']));
+}
+
+export function dstPointsAllowedBonus(pointsAllowed: number): number {
+  if (pointsAllowed === 0) return 10;
+  if (pointsAllowed <= 6) return 7;
+  if (pointsAllowed <= 13) return 4;
+  if (pointsAllowed <= 20) return 1;
+  if (pointsAllowed <= 27) return 0;
+  if (pointsAllowed <= 34) return -1;
+  return -4;
+}
+
+export function dkMlbFantasyPoints(statLine: StatLine, role?: DkRole): number {
+  if (role === 'pitcher' || hasPitchingStats(statLine)) return dkMlbPitcherFantasyPoints(statLine);
+  return dkMlbHitterFantasyPoints(statLine);
+}
+
+export function dkMlbHitterFantasyPoints(statLine: StatLine): number {
+  const hits = stat(statLine, ['hits', 'h']);
+  const doubles = stat(statLine, ['doubles', 'double', '2b']);
+  const triples = stat(statLine, ['triples', 'triple', '3b']);
+  const homeRuns = stat(statLine, ['homeRuns', 'home_runs', 'home_run', 'hr']);
+  const singles = Math.max(0, stat(statLine, ['singles', 'single', '1b']) || hits - doubles - triples - homeRuns);
+
+  return singles * DK_SCORING.mlb.single
+    + doubles * DK_SCORING.mlb.double
+    + triples * DK_SCORING.mlb.triple
+    + homeRuns * DK_SCORING.mlb.homeRun
+    + stat(statLine, ['rbi', 'rbis', 'runsBattedIn']) * DK_SCORING.mlb.rbi
+    + stat(statLine, ['runs', 'run', 'r']) * DK_SCORING.mlb.run
+    + stat(statLine, ['baseOnBalls', 'walks', 'walk', 'bb']) * DK_SCORING.mlb.walk
+    + stat(statLine, ['hitByPitch', 'hit_by_pitch', 'hbp']) * DK_SCORING.mlb.hitByPitch
+    + stat(statLine, ['stolenBases', 'stolen_bases', 'stolenBase', 'sb']) * DK_SCORING.mlb.stolenBase;
+}
+
+export function dkMlbPitcherFantasyPoints(statLine: StatLine): number {
+  return stat(statLine, ['inningsPitched', 'innings_pitched', 'ip']) * DK_SCORING.mlb.inningPitched
+    + stat(statLine, ['strikeOuts', 'strikeouts', 'strike_outs', 'k']) * DK_SCORING.mlb.strikeout
+    + stat(statLine, ['wins', 'win', 'w']) * DK_SCORING.mlb.win
+    + stat(statLine, ['earnedRuns', 'earned_runs', 'er']) * DK_SCORING.mlb.earnedRun
+    + stat(statLine, ['hitsAllowed', 'hits_against', 'hits', 'ha']) * DK_SCORING.mlb.hitAgainst
+    + stat(statLine, ['walksAllowed', 'baseOnBalls', 'base_on_balls', 'walks', 'bb']) * DK_SCORING.mlb.walkAgainst
+    + stat(statLine, ['hitBatsmen', 'hitBatsman', 'hitByPitch', 'hbp']) * DK_SCORING.mlb.hitBatsman
+    + stat(statLine, ['completeGames', 'complete_games', 'cg']) * DK_SCORING.mlb.completeGame
+    + stat(statLine, ['completeGameShutouts', 'shutouts', 'complete_game_shutouts', 'sho']) * DK_SCORING.mlb.completeGameShutout
+    + stat(statLine, ['noHitters', 'no_hitters', 'noHitter']) * DK_SCORING.mlb.noHitter;
+}
+
+function hasPitchingStats(statLine: StatLine): boolean {
+  return stat(statLine, ['inningsPitched', 'innings_pitched', 'ip']) > 0
+    || stat(statLine, ['strikeOuts', 'strikeouts', 'strike_outs', 'k']) > 0
+    || stat(statLine, ['earnedRuns', 'earned_runs', 'er']) > 0;
+}
+
+export function dkFantasyPoints(statLine: StatLine, sport: DkSport, role?: DkRole): number {
+  if (sport === 'nba' || sport === 'wnba') return dkBasketballFantasyPoints(statLine);
+  if (sport === 'nfl') return dkNflFantasyPoints(statLine, role);
+  if (sport === 'mlb') return dkMlbFantasyPoints(statLine, role);
+  return 0;
+}

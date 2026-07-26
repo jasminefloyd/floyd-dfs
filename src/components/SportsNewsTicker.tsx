@@ -10,6 +10,14 @@ const SPORT_LABELS: Record<string, string> = {
   nfl: 'NFL',
 };
 
+const SPORT_LOGOS: Record<string, string> = {
+  wnba: 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png',
+  nba: 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png',
+  mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
+  f1: 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png',
+  nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
+};
+
 export function SportsNewsTicker() {
   const [items, setItems] = useState<SportsNewsItem[]>([]);
   const [failed, setFailed] = useState(false);
@@ -75,21 +83,35 @@ export function SportsNewsTicker() {
                 className="ticker-group flex shrink-0 items-center gap-5"
                 aria-hidden={groupIndex === 1}
               >
-                {tickerItems.map((item, index) => (
-                  <a
-                    key={`${groupIndex}-${item.id}-${index}`}
-                    href={item.link ?? undefined}
-                    target={item.link ? '_blank' : undefined}
-                    rel={item.link ? 'noreferrer' : undefined}
-                    className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-white ${
-                      item.category === 'injury' ? 'text-amber-300' : 'text-blue-100'
-                    }`}
-                  >
-                    <span className="font-black text-white">{SPORT_LABELS[item.sport] ?? item.sport.toUpperCase()}</span>
-                    {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
-                    <span>{item.title}</span>
-                  </a>
-                ))}
+                {tickerItems.map((item, index) => {
+                  const sportLabel = SPORT_LABELS[item.sport] ?? item.sport.toUpperCase();
+                  const sportLogo = SPORT_LOGOS[item.sport];
+                  return (
+                    <a
+                      key={`${groupIndex}-${item.id}-${index}`}
+                      href={item.link ?? undefined}
+                      target={item.link ? '_blank' : undefined}
+                      rel={item.link ? 'noreferrer' : undefined}
+                      className={`flex items-center gap-2 whitespace-nowrap text-[12px] leading-none transition-colors hover:text-white ${
+                        item.category === 'injury' ? 'text-amber-300' : 'text-blue-100'
+                      }`}
+                    >
+                      {sportLogo ? (
+                        <img
+                          src={sportLogo}
+                          alt={sportLabel}
+                          title={sportLabel}
+                          className="h-5 w-5 shrink-0 object-contain"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <span className="font-black text-white">{sportLabel}</span>
+                      )}
+                      {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                      <span>{item.title}</span>
+                    </a>
+                  );
+                })}
               </div>
             ))}
           </div>

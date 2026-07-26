@@ -19,6 +19,17 @@ export interface LineupPlayer {
   roster_slot?: string;
   salary_source?: string;
   news_note?: string;
+  prop_projection?: number;
+  implied_total?: number;
+  spread?: number;
+  confirmed_starter?: boolean;
+  run_factor?: number;
+  opponent_team?: string;
+  opposing_probable_pitcher_id?: string;
+  opposing_probable_pitcher_name?: string;
+  own_probable_starter?: boolean;
+  game_id?: string;
+  minutes_projection?: number;
   context_score?: number;
   contextual_projection?: number;
   floor_projection?: number;
@@ -31,6 +42,8 @@ export interface LineupPlayer {
   last_5_stats?: {
     avg_fantasy_pts?: number;
     trend?: 'up' | 'down' | 'stable';
+    minutes_avg?: number;
+    is_synthetic?: boolean;
   };
 }
 
@@ -43,6 +56,7 @@ export interface Lineup {
   simulation_ev?: number;
   ceiling_score?: number;
   floor_score?: number;
+  p99_score?: number;
   win_rate?: number;
   top_10_rate?: number;
   leverage_score?: number;
@@ -78,7 +92,7 @@ function lineupContainsPair(lineup: Lineup, pair: CorrelationPair): boolean {
 }
 
 export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
-  const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set());
+  const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
   const topStacks: CorrelationPair[] = manifest
     ? generateCorrelationPairs(manifest.player_roster, manifest.sport)
         .filter((p) => p.correlation_score > 0.6)
@@ -98,20 +112,6 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
 
   return (
     <div className="space-y-3">
-      {topStacks.length > 0 && (
-        <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
-          <h3 className="mb-2 text-[12px] font-black uppercase tracking-wide text-cyan-800">Recommended Stack</h3>
-          <ul className="space-y-1">
-            {topStacks.map((pair) => (
-              <li key={`${pair.player1_id}-${pair.player2_id}`} className="text-[13px] font-medium text-slate-700">
-                Stack {playerName(pair.player1_id, manifest)} + {playerName(pair.player2_id, manifest)} (
-                {pair.correlation_score.toFixed(2)} correlation)
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
       {lineups.map((lineup) => {
         const matchedStacks = topStacks.filter((pair) => lineupContainsPair(lineup, pair));
         const highlightedIds = new Set(
@@ -164,7 +164,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 <div className="grid grid-cols-2 gap-2 border-b border-slate-200 p-3 sm:grid-cols-4 sm:p-4">
                   <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
-                  <Metric label="Top 10" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
+                  <Metric label="Top 10 vs Field" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
                   <Metric label="PIOS Edge" value={lineup.lineup_intelligence_score?.toFixed(1) ?? lineup.leverage_score?.toFixed(1) ?? '—'} />
                 </div>
               ) : null}
@@ -176,6 +176,17 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                   <span className="mt-2 block font-bold text-[#0b1f3a]">{lineup.win_condition}</span>
                 ) : null}
               </p>
+              {!isExpanded ? (
+                <div className="border-t border-slate-200 px-3 py-3 sm:px-4">
+                  <div className="flex flex-wrap gap-1.5">
+                    {lineup.players.slice(0, 10).map((player, index) => (
+                      <span key={`${lineup.rank}-${player.id ?? player.name ?? index}`} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600">
+                        {player.roster_slot ? `${player.roster_slot} ` : ''}{player.name || player.full_name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {lineup.strategy_notes?.length ? (
                 <div className="flex flex-wrap gap-2 border-t border-slate-200 px-3 py-3 sm:px-4">
                   {lineup.strategy_notes.slice(0, 4).map((note) => (
@@ -264,6 +275,20 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
           </div>
         );
       })}
+
+      {topStacks.length > 0 && (
+        <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+          <h3 className="mb-2 text-[12px] font-black uppercase tracking-wide text-cyan-800">Recommended Stack</h3>
+          <ul className="space-y-1">
+            {topStacks.map((pair) => (
+              <li key={`${pair.player1_id}-${pair.player2_id}`} className="text-[13px] font-medium text-slate-700">
+                Stack {playerName(pair.player1_id, manifest)} + {playerName(pair.player2_id, manifest)} (
+                {pair.correlation_score.toFixed(2)} correlation)
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

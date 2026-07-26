@@ -1,6 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { limitedFetch } from './rate-limiter.js';
 
+const NEWS_INJURY_PREFILTER_PATTERN = /\b(out|injured|injury|questionable|doubtful|probable|day-to-day|inactive|ruled)\b/i;
+
 // Agent 1: ESPN RSS News & Injuries
 export async function collectNewsAndInjuries(sport: string, _contestDate: string): Promise<any[]> {
   const sportMap: Record<string, string> = {
@@ -21,7 +23,7 @@ export async function collectNewsAndInjuries(sport: string, _contestDate: string
     const lines = xml.split('\n');
 
     for (const line of lines) {
-      if (line.includes('out') || line.includes('injured') || line.includes('questionable')) {
+      if (NEWS_INJURY_PREFILTER_PATTERN.test(line)) {
         injuries.push({
           raw: line,
           timestamp: new Date().toISOString()
