@@ -214,8 +214,10 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
     const opportunityProjection = projectedMinutes * ppmRegressed;
     const opportunityWeight = player.projection_source === 'props_blend' ? 0.3 : 0.5;
     const rawBlended = opportunityProjection * opportunityWeight + baseProjection * (1 - opportunityWeight);
-    const minProjection = baseProjection * 0.65;
-    const maxProjection = baseProjection * 1.35;
+    const confirmedCascade = /\bout\)/i.test(player.news_note ?? '') || /\bprojected \(.+ out\)/i.test(player.news_note ?? '');
+    const clampWidth = confirmedCascade ? 0.55 : player.injury_status === 'questionable' ? 0.22 : 0.35;
+    const minProjection = baseProjection * (1 - clampWidth);
+    const maxProjection = baseProjection * (1 + clampWidth);
     const clampedProjection = clamp(rawBlended, minProjection, maxProjection);
     const wasClamped = Math.abs(clampedProjection - rawBlended) > 0.01;
     if (wasClamped) clampedCount += 1;
@@ -226,7 +228,7 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
       projection_source: 'opportunity_blend',
       projected_points: Number(clampedProjection.toFixed(2)),
       news_note: wasClamped
-        ? appendNote(player.news_note, 'opportunity projection clamped to 35% move')
+        ? appendNote(player.news_note, `opportunity projection clamped to ${Math.round(clampWidth * 100)}% move`)
         : player.news_note,
       last_5_stats: player.last_5_stats ? {
         ...player.last_5_stats,

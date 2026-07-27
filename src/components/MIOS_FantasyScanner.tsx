@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
-import { parseExcludedPlayers, validateScanInput } from '../lib/validation';
+import { validateScanInput } from '../lib/validation';
 
 export interface ScanParams {
   sport: string;
@@ -11,6 +11,7 @@ export interface ScanParams {
   gameId?: string;
   slate: DraftKingsSlate;
   excludedPlayers: string[];
+  lockedPlayers: string[];
   riskTolerance: string;
   lineupMode: string;
   contestStrategy: string;
@@ -19,6 +20,21 @@ export interface ScanParams {
   minPrimaryStack: number;
   diversifyLineups: boolean;
   lateSwapMode: boolean;
+  entryCount: number;
+  fieldSize: number;
+  maxEntriesPerUser: number;
+  payoutShape: string;
+  ownershipWeight: number;
+  correlationWeight: number;
+  maxCaptainExposure: number;
+  captainPool: string[];
+  minPerTeam: number;
+  forceUniqueCaptains: boolean;
+  minSalaryUsed: number;
+  maxDuplication: number;
+  simulationIterations: number;
+  fieldSimulationSize: number;
+  showDiagnostics: boolean;
 }
 
 interface MIOS_FantasyScannerProps {
@@ -27,15 +43,36 @@ interface MIOS_FantasyScannerProps {
   onValidationError?: (errors: string[]) => void;
 }
 
-const HIGHEST_PROJECTION_OPTIONS = {
+const DEFAULT_SCAN_OPTIONS = {
   riskTolerance: 'balanced',
-  lineupMode: 'max_fpts',
-  maxPlayerExposure: 1,
+  lineupMode: 'tournament',
+  maxPlayerExposure: 0.8,
   maxTeamExposure: 1,
   minPrimaryStack: 0,
-  diversifyLineups: false,
+  diversifyLineups: true,
   lateSwapMode: true,
+  entryCount: 1,
+  fieldSize: 500,
+  maxEntriesPerUser: 3,
+  payoutShape: 'top_heavy',
+  ownershipWeight: 0.9,
+  correlationWeight: 1,
+  maxCaptainExposure: 0.4,
+  minPerTeam: 1,
+  forceUniqueCaptains: true,
+  minSalaryUsed: 49_000,
+  maxDuplication: 25,
+  simulationIterations: 1_000,
+  fieldSimulationSize: 240,
+  showDiagnostics: false,
 };
+
+const PAYOUT_SHAPES = [
+  { value: 'top_heavy', label: 'Top Heavy' },
+  { value: 'flat', label: 'Flat' },
+  { value: 'winner_take_all', label: 'Winner Take All' },
+  { value: 'double_up', label: 'Double Up' },
+];
 
 export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
@@ -44,7 +81,40 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const [selectedContestId, setSelectedContestId] = useState('');
   const [slateLoading, setSlateLoading] = useState(false);
   const [slateError, setSlateError] = useState<string | null>(null);
-  const [excludedPlayers, setExcludedPlayers] = useState('');
+  const [entryCount, setEntryCount] = useState(DEFAULT_SCAN_OPTIONS.entryCount);
+  const [fieldSize, setFieldSize] = useState(DEFAULT_SCAN_OPTIONS.fieldSize);
+  const [payoutShape, setPayoutShape] = useState(DEFAULT_SCAN_OPTIONS.payoutShape);
+  const [configLoaded, setConfigLoaded] = useState(false);
+
+  useEffect(() => {
+    setConfigLoaded(false);
+    const saved = readSavedConfig(configStorageKey(sport, contestType));
+    if (saved) applySavedConfig(saved);
+    else applySavedConfig(DEFAULT_SCAN_OPTIONS);
+    setConfigLoaded(true);
+  }, [sport, contestType]);
+
+  useEffect(() => {
+    if (!configLoaded) return;
+    writeSavedConfig(configStorageKey(sport, contestType), {
+      entryCount,
+      fieldSize,
+      payoutShape,
+    });
+  }, [
+    sport,
+    contestType,
+    configLoaded,
+    entryCount,
+    fieldSize,
+    payoutShape,
+  ]);
+
+  function applySavedConfig(config: Partial<typeof DEFAULT_SCAN_OPTIONS> & Record<string, unknown>) {
+    setEntryCount(numberOrDefault(config.entryCount, DEFAULT_SCAN_OPTIONS.entryCount));
+    setFieldSize(numberOrDefault(config.fieldSize, DEFAULT_SCAN_OPTIONS.fieldSize));
+    setPayoutShape(typeof config.payoutShape === 'string' ? config.payoutShape : DEFAULT_SCAN_OPTIONS.payoutShape);
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -77,13 +147,31 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       return;
     }
 
-    const contestStrategy = contestType === 'showdown' ? 'showdown' : 'single_entry';
+    const derived = deriveScanOptions({
+      contestType,
+      entryCount,
+      fieldSize,
+      payoutShape,
+      sport,
+    });
     const errors = validateScanInput({
       sport,
       contestType,
       contestDate: selectedSlate.contest_date,
-      riskTolerance: HIGHEST_PROJECTION_OPTIONS.riskTolerance,
-      lineupMode: HIGHEST_PROJECTION_OPTIONS.lineupMode,
+      contestStartTime: selectedSlate.start_time,
+      riskTolerance: derived.riskTolerance,
+      lineupMode: derived.lineupMode,
+      entryCount,
+      fieldSize,
+      maxEntriesPerUser: derived.maxEntriesPerUser,
+      payoutShape,
+      maxCaptainExposure: derived.maxCaptainExposure,
+      lockedPlayers: [],
+      excludedPlayers: [],
+      captainPool: [],
+      minPerTeam: derived.minPerTeam,
+      rosterSize: contestType === 'showdown' ? 6 : classicRosterSize(sport),
+      minSalaryUsed: derived.minSalaryUsed,
     });
     if (errors.length) {
       onValidationError?.(errors);
@@ -97,15 +185,31 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       contestId: selectedSlate.status === 'estimated' ? undefined : selectedSlate.contest_id,
       gameId: selectedSlate.game_ids[0],
       slate: selectedSlate,
-      excludedPlayers: parseExcludedPlayers(excludedPlayers),
-      riskTolerance: HIGHEST_PROJECTION_OPTIONS.riskTolerance,
-      lineupMode: HIGHEST_PROJECTION_OPTIONS.lineupMode,
-      contestStrategy,
-      maxPlayerExposure: HIGHEST_PROJECTION_OPTIONS.maxPlayerExposure,
-      maxTeamExposure: HIGHEST_PROJECTION_OPTIONS.maxTeamExposure,
-      minPrimaryStack: HIGHEST_PROJECTION_OPTIONS.minPrimaryStack,
-      diversifyLineups: HIGHEST_PROJECTION_OPTIONS.diversifyLineups,
-      lateSwapMode: HIGHEST_PROJECTION_OPTIONS.lateSwapMode
+      excludedPlayers: [],
+      lockedPlayers: [],
+      riskTolerance: derived.riskTolerance,
+      lineupMode: derived.lineupMode,
+      contestStrategy: derived.contestStrategy,
+      maxPlayerExposure: derived.maxPlayerExposure,
+      maxTeamExposure: derived.maxTeamExposure,
+      minPrimaryStack: derived.minPrimaryStack,
+      diversifyLineups: true,
+      lateSwapMode: DEFAULT_SCAN_OPTIONS.lateSwapMode,
+      entryCount,
+      fieldSize,
+      maxEntriesPerUser: derived.maxEntriesPerUser,
+      payoutShape,
+      ownershipWeight: derived.ownershipWeight,
+      correlationWeight: derived.correlationWeight,
+      maxCaptainExposure: derived.maxCaptainExposure,
+      captainPool: [],
+      minPerTeam: derived.minPerTeam,
+      forceUniqueCaptains: derived.forceUniqueCaptains,
+      minSalaryUsed: derived.minSalaryUsed,
+      maxDuplication: derived.maxDuplication,
+      simulationIterations: derived.simulationIterations,
+      fieldSimulationSize: derived.fieldSimulationSize,
+      showDiagnostics: false,
     });
   };
 
@@ -121,8 +225,49 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
     <div className="space-y-4 text-slate-900">
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Build A Slate</p>
-        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Find The Highest Projected Lineup</h2>
-        <p className="mt-1 text-sm text-slate-500">Pick a sport and DraftKings slate. The optimizer will rank lineups by projected fantasy points.</p>
+        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Build Tournament Lineups</h2>
+        <p className="mt-1 text-sm text-slate-500">Pick a sport, contest type, slate, and payout goal.</p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <label>
+          <span className={labelClass}>Entries</span>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={entryCount}
+            onChange={(event) => setEntryCount(Number(event.target.value))}
+            disabled={loading}
+            className={fieldClass}
+          />
+        </label>
+        <label className="col-span-2">
+          <span className={labelClass}>Field Size</span>
+          <input
+            type="number"
+            min={2}
+            max={500000}
+            value={fieldSize}
+            onChange={(event) => setFieldSize(Number(event.target.value))}
+            disabled={loading}
+            className={fieldClass}
+          />
+        </label>
+      </div>
+
+      <div>
+        <label className={`mb-2 ${labelClass}`}>Payout Shape</label>
+        <select
+          value={payoutShape}
+          onChange={(event) => setPayoutShape(event.target.value)}
+          disabled={loading}
+          className={fieldClass}
+        >
+          {PAYOUT_SHAPES.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
       </div>
 
       <div>
@@ -233,18 +378,6 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         </div>
       </div>
 
-      <div>
-        <label className={`mb-2 ${labelClass}`}>Exclude Players</label>
-        <textarea
-          placeholder="LeBron, Luka, Giannis (comma-separated)"
-          value={excludedPlayers}
-          onChange={(e) => setExcludedPlayers(e.target.value)}
-          disabled={loading}
-          className={`${fieldClass} font-mono`}
-          rows={3}
-        />
-      </div>
-
       <button
         onClick={handleScan}
         disabled={scanDisabled}
@@ -337,7 +470,6 @@ function sportLogoFallback(sport: string): string | undefined {
     wnba: 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png',
     mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
     nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
-    f1: 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png',
   };
   return logos[sport];
 }
@@ -387,4 +519,100 @@ function salaryStatusLabel(slate: DraftKingsSlate): 'Live' | 'Projected' {
   return slate.status === 'draftkings_live' && slate.salary_count > 0 && data?.source === 'draftkings_unofficial_json'
     ? 'Live'
     : 'Projected';
+}
+
+function configStorageKey(sport: string, contestType: string): string {
+  return `fantasy-ai.scan-config.${sport}.${contestType}`;
+}
+
+function readSavedConfig(key: string): Record<string, unknown> | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedConfig(key: string, config: Record<string, unknown>): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(key, JSON.stringify(config));
+}
+
+function numberOrDefault(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function classicRosterSize(sport: string): number {
+  if (sport === 'wnba') return 6;
+  if (sport === 'nfl') return 9;
+  if (sport === 'mlb') return 10;
+  return 8;
+}
+
+function defaultLineupMode(shape: string): string {
+  if (shape === 'double_up') return 'safe';
+  if (shape === 'flat') return 'balanced_ev';
+  return 'tournament';
+}
+
+interface DerivedScanInput {
+  contestType: string;
+  entryCount: number;
+  fieldSize: number;
+  payoutShape: string;
+  sport: string;
+}
+
+function deriveScanOptions(input: DerivedScanInput) {
+  const lineupMode = defaultLineupMode(input.payoutShape);
+  const maxEntriesPerUser = Math.min(150, Math.max(1, input.entryCount));
+  const maxPlayerExposure = input.entryCount <= 1
+    ? 1
+    : input.payoutShape === 'double_up'
+      ? 1
+      : input.payoutShape === 'flat'
+        ? 0.8
+        : input.entryCount <= 5
+          ? 0.6
+          : 0.5;
+  const contestStrategy = deriveContestStrategy(input.fieldSize, input.payoutShape, maxEntriesPerUser, lineupMode);
+  const simulationIterations = input.fieldSize >= 10_000 ? 2_000 : DEFAULT_SCAN_OPTIONS.simulationIterations;
+
+  return {
+    riskTolerance: DEFAULT_SCAN_OPTIONS.riskTolerance,
+    lineupMode,
+    contestStrategy,
+    maxPlayerExposure,
+    maxTeamExposure: input.contestType === 'showdown' ? DEFAULT_SCAN_OPTIONS.maxTeamExposure : maxPlayerExposure,
+    minPrimaryStack: input.sport === 'mlb' && input.contestType === 'classic' && input.payoutShape !== 'double_up' ? 3 : DEFAULT_SCAN_OPTIONS.minPrimaryStack,
+    maxEntriesPerUser,
+    ownershipWeight: ownershipWeightForContest(input.fieldSize, input.payoutShape, maxEntriesPerUser),
+    correlationWeight: DEFAULT_SCAN_OPTIONS.correlationWeight,
+    maxCaptainExposure: input.contestType === 'showdown' && input.entryCount > 1 ? Math.max(1 / input.entryCount, maxPlayerExposure / 2) : 1,
+    minPerTeam: DEFAULT_SCAN_OPTIONS.minPerTeam,
+    forceUniqueCaptains: input.contestType === 'showdown' && input.entryCount > 1 && input.entryCount <= 5 && input.payoutShape !== 'double_up',
+    minSalaryUsed: input.contestType === 'showdown' ? DEFAULT_SCAN_OPTIONS.minSalaryUsed : 0,
+    maxDuplication: input.payoutShape === 'winner_take_all' ? 5 : input.payoutShape === 'double_up' ? 500 : DEFAULT_SCAN_OPTIONS.maxDuplication,
+    simulationIterations,
+    fieldSimulationSize: Math.min(750, Math.max(120, input.fieldSize)),
+  };
+}
+
+function ownershipWeightForContest(fieldSize: number, payoutShape: string, maxEntriesPerUser: number): number {
+  const fieldComponent = fieldSize >= 10_000 ? 1.2 : fieldSize >= 1_000 ? 0.8 : fieldSize >= 100 ? 0.45 : 0.15;
+  const payoutComponent = payoutShape === 'winner_take_all' ? 0.6 : payoutShape === 'top_heavy' ? 0.35 : payoutShape === 'double_up' ? -0.2 : 0;
+  const entryComponent = maxEntriesPerUser >= 20 ? 0.2 : maxEntriesPerUser >= 3 ? 0.1 : 0;
+  return Math.min(Math.max(Number((fieldComponent + payoutComponent + entryComponent).toFixed(2)), 0), 2);
+}
+
+function deriveContestStrategy(fieldSize: number, payoutShape: string, maxEntriesPerUser: number, lineupMode: string): string {
+  if (lineupMode === 'safe' || payoutShape === 'double_up') return 'cash';
+  if (fieldSize >= 5_000 || maxEntriesPerUser >= 20 || payoutShape === 'winner_take_all') return 'large_field_gpp';
+  if (fieldSize >= 500 || maxEntriesPerUser > 1 || payoutShape === 'top_heavy') return 'small_field';
+  return 'single_entry';
 }

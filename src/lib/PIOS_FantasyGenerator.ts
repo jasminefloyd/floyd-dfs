@@ -28,9 +28,14 @@ export interface LineupPlayerDraft {
   game_id?: string;
   depth_chart_order?: number;
   ownership_projection?: number;
+  cpt_ownership_projection?: number;
+  flex_ownership_projection?: number;
   minutes_projection?: number;
   usage_rate?: number;
   pace_metric?: number;
+  stdev_fantasy_pts?: number;
+  games_sample_size?: number;
+  minutes_stdev?: number;
   context_score?: number;
   news_score?: number;
   news_note?: string;
@@ -55,8 +60,12 @@ export interface DraftLineup {
   p99_score?: number;
   win_rate?: number;
   top_10_rate?: number;
+  top_decile_rate?: number;
+  top_n_rate?: number;
+  expected_payout?: number;
   leverage_score?: number;
   ownership_sum?: number;
+  expected_duplicates?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   lineup_intelligence_score?: number;
   stack_quality_score?: number;
@@ -67,6 +76,7 @@ export interface DraftLineup {
   primary_stack_size?: number;
   anti_correlation_flags?: string[];
   exposure_flags?: string[];
+  portfolio_correlation_flags?: string[];
   late_swap_flags?: string[];
   strategy_notes?: string[];
   constraint_violations: string[];
@@ -83,8 +93,6 @@ const LINEUP_ELIGIBLE_INJURY_STATUSES = new Set(['active', 'probable', 'day_to_d
 // - NBA/WNBA: 8 spots (PG, SG, SF, PF, C, G, F, UTIL)
 // - NFL: 9 spots (QB, 2xRB, 3xWR, TE, FLEX, DST)
 // - MLB: 10 spots (2xP, C, 1B, 2B, 3B, SS, 3xOF)
-// F1's roster rules were not verified this session; kept as a simplified 6-driver
-// placeholder consistent with the original stub's intent.
 const ROSTER_SLOTS: Record<string, RosterSlot[]> = {
   nba: [
     { slot: 'PG', eligible: ['PG'] },
@@ -126,14 +134,6 @@ const ROSTER_SLOTS: Record<string, RosterSlot[]> = {
     { slot: 'OF1', eligible: ['OF'] },
     { slot: 'OF2', eligible: ['OF'] },
     { slot: 'OF3', eligible: ['OF'] }
-  ],
-  f1: [
-    { slot: 'D1', eligible: ['DRIVER'] },
-    { slot: 'D2', eligible: ['DRIVER'] },
-    { slot: 'D3', eligible: ['DRIVER'] },
-    { slot: 'D4', eligible: ['DRIVER'] },
-    { slot: 'D5', eligible: ['DRIVER'] },
-    { slot: 'D6', eligible: ['DRIVER'] }
   ]
 };
 

@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
 import type { ProjectionCalibration, ProjectionCalibrationV2 } from '../lib/calibrationClient';
+import { recordContestResult } from '../lib/scoreboardClient';
 import type { LineupScoreboardRow } from '../lib/scoreboardClient';
 import type { Lineup } from './LineupDisplay';
 
@@ -12,6 +14,8 @@ interface CalibrationDashboardProps {
 }
 
 export function CalibrationDashboard({ manifest, lineups, calibration, calibrationV2, scoreboard }: CalibrationDashboardProps) {
+  const [resultStatus, setResultStatus] = useState<string | null>(null);
+  const [savingResult, setSavingResult] = useState(false);
   if (!manifest) return null;
 
   const sourceEntries = Object.entries(manifest.source_status ?? {});
@@ -30,9 +34,10 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
     `${a.position_group}:${a.salary_tier}`.localeCompare(`${b.position_group}:${b.salary_tier}`)
   ));
   const scoreboardRows = scoreboard ?? [];
-  const rollingPct = scoreboardRows.length
-    ? scoreboardRows.reduce((sum, row) => sum + (row.best_pct_of_optimal ?? 0), 0) / scoreboardRows.length
+  const rollingRoi = scoreboardRows.some((row) => typeof row.roi === 'number')
+    ? scoreboardRows.reduce((sum, row) => sum + (row.roi ?? 0), 0) / scoreboardRows.filter((row) => typeof row.roi === 'number').length
     : null;
+  const medianFinish = median(scoreboardRows.map((row) => row.median_finish_percentile).filter((value): value is number => typeof value === 'number'));
   const hasBacktestData = sampleSize > 0 || v2Rows.length > 0 || scoreboardRows.length > 0;
   const topLineupRange = topLineup && typeof topLineup.ceiling_score === 'number' && typeof topLineup.floor_score === 'number'
     ? `${(topLineup.ceiling_score - topLineup.floor_score).toFixed(1)} pts`
@@ -47,16 +52,71 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Metric label="Samples" value={String(sampleSize)} />
-          <Metric label="Bias" value={tuningLabel} />
-          <Metric label="Avg Error" value={formatPoint(calibration?.avg_projection_error)} />
-          <Metric label="Abs Error" value={formatPoint(calibration?.avg_absolute_error)} />
+          <Metric label="Spearman" value={formatPoint(calibration?.spearman_rank_correlation)} />
+          <Metric label="ROI" value={formatPercent(rollingRoi)} />
+          <Metric label="Median Finish" value={formatFinishPercentile(medianFinish)} />
         </div>
       </div>
+
+      <form
+        className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const formData = new FormData(form);
+          setSavingResult(true);
+          setResultStatus(null);
+          try {
+            const updated = await recordContestResult({
+              sport: manifest.sport,
+              contestDate: manifest.contest_date,
+              contestType: manifest.contest_type,
+              contestId: manifest.contest_id ?? '',
+              optimizerRank: Number(formData.get('optimizerRank')),
+              fieldSize: Number(formData.get('fieldSize')),
+              entryFee: Number(formData.get('entryFee')),
+              finishRank: Number(formData.get('finishRank')),
+              payout: Number(formData.get('payout')),
+              entryCount: lineups.length || undefined,
+              actualDuplicates: formData.get('actualDuplicates') ? Number(formData.get('actualDuplicates')) : undefined,
+            });
+            setResultStatus(updated ? 'Contest result saved. Refresh results to see the updated ROI.' : 'No matching generated lineup row was found for that optimizer rank.');
+            if (updated) form.reset();
+          } catch (error) {
+            setResultStatus(error instanceof Error ? error.message : String(error));
+          } finally {
+            setSavingResult(false);
+          }
+        }}
+      >
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Manual Contest Result</p>
+            <p className="mt-1 text-xs font-medium text-slate-600">Record finish and payout after DraftKings posts contest history.</p>
+          </div>
+          <button
+            type="submit"
+            disabled={savingResult}
+            className="rounded-md bg-[#0b1f3a] px-3 py-2 text-xs font-black uppercase text-white disabled:bg-slate-300 disabled:text-slate-500"
+          >
+            {savingResult ? 'Saving...' : 'Save Result'}
+          </button>
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-6">
+          <ResultInput name="optimizerRank" label="Rank" min={1} defaultValue={1} />
+          <ResultInput name="fieldSize" label="Field" min={2} />
+          <ResultInput name="entryFee" label="Fee" min={0} step="0.01" />
+          <ResultInput name="finishRank" label="Finish" min={1} />
+          <ResultInput name="payout" label="Payout" min={0} step="0.01" />
+          <ResultInput name="actualDuplicates" label="Dupes" min={0} required={false} />
+        </div>
+        {resultStatus ? <p className="mt-2 text-xs font-bold text-slate-700">{resultStatus}</p> : null}
+      </form>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <Signal label="Source Health" value={`${okSources} ok / ${partialSources} partial / ${unavailableSources} off`} />
         <Signal label="Lineup Range" value={topLineupRange} />
-        <Signal label="Auto Tuning" value={calibration && sampleSize >= 50 ? 'Enabled' : 'Needs scored results'} />
+        <Signal label="Auto Tuning" value={calibration && sampleSize >= 30 ? `${tuningLabel} · variance ${formatMultiplier(calibration.variance_calibration_ratio)}` : 'Needs scored results'} />
       </div>
 
       {!hasBacktestData ? (
@@ -72,7 +132,7 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-3 py-2">
           <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Lineup Scoreboard</p>
           <p className="text-xs font-bold text-slate-700">
-            Rolling optimal capture {rollingPct === null ? '—' : `${(rollingPct * 100).toFixed(1)}%`}
+            Rolling ROI {formatPercent(rollingRoi)}
           </p>
         </div>
         <table className="min-w-full text-left text-xs">
@@ -82,8 +142,9 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
               <th className="px-3 py-2 font-black">Lineups</th>
               <th className="px-3 py-2 font-black">Projected</th>
               <th className="px-3 py-2 font-black">Actual</th>
-              <th className="px-3 py-2 font-black">Optimal</th>
-              <th className="px-3 py-2 font-black">Captured</th>
+              <th className="px-3 py-2 font-black">Payout</th>
+              <th className="px-3 py-2 font-black">ROI</th>
+              <th className="px-3 py-2 font-black">Finish</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
@@ -93,8 +154,9 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
                 <td className="px-3 py-2 text-slate-700">{row.lineup_count}</td>
                 <td className="px-3 py-2 text-slate-700">{formatPoint(row.best_projected)}</td>
                 <td className="px-3 py-2 text-slate-700">{formatPoint(row.best_actual)}</td>
-                <td className="px-3 py-2 text-slate-700">{formatPoint(row.optimal_points)}</td>
-                <td className="px-3 py-2 text-slate-700">{formatPercent(row.best_pct_of_optimal)}</td>
+                <td className="px-3 py-2 text-slate-700">{formatMoney(row.total_payout)}</td>
+                <td className="px-3 py-2 text-slate-700">{formatPercent(row.roi)}</td>
+                <td className="px-3 py-2 text-slate-700">{formatFinishPercentile(row.best_finish_percentile)}</td>
               </tr>
             )) : (
               <tr>
@@ -147,6 +209,38 @@ function formatMultiplier(value?: number | null): string {
 
 function formatPercent(value?: number | null): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '—';
+}
+
+function formatMoney(value?: number | null): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '—';
+}
+
+function formatFinishPercentile(value?: number | null): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `Top ${(value * 100).toFixed(1)}%` : '—';
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function ResultInput({ name, label, min, step = '1', defaultValue, required = true }: { name: string; label: string; min: number; step?: string; defaultValue?: number; required?: boolean }) {
+  return (
+    <label>
+      <span className="block text-[10px] font-black uppercase tracking-wide text-slate-500">{label}</span>
+      <input
+        name={name}
+        type="number"
+        min={min}
+        step={step}
+        defaultValue={defaultValue}
+        required={required}
+        className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-xs font-bold text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
+      />
+    </label>
+  );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

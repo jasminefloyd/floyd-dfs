@@ -6,6 +6,10 @@ export interface ProjectionCalibration {
   avg_projection_error: number | null;
   avg_absolute_error: number | null;
   projection_bias_multiplier: number | null;
+  avg_ratio_multiplier?: number | null;
+  median_ratio_multiplier?: number | null;
+  spearman_rank_correlation?: number | null;
+  variance_calibration_ratio?: number | null;
 }
 
 export interface ProjectionCalibrationV2 {

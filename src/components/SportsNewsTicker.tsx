@@ -6,7 +6,6 @@ const SPORT_LABELS: Record<string, string> = {
   wnba: 'WNBA',
   nba: 'NBA',
   mlb: 'MLB',
-  f1: 'F1',
   nfl: 'NFL',
 };
 
@@ -14,7 +13,6 @@ const SPORT_LOGOS: Record<string, string> = {
   wnba: 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png',
   nba: 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png',
   mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
-  f1: 'https://a.espncdn.com/i/teamlogos/leagues/500/f1.png',
   nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
 };
 

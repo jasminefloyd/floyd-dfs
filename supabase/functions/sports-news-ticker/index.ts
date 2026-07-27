@@ -33,7 +33,6 @@ const FEEDS: Record<string, string> = {
   wnba: 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/news',
   nba: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/news',
   mlb: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/news',
-  f1: 'https://site.api.espn.com/apis/site/v2/sports/racing/f1/news',
   nfl: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/news',
 };
 

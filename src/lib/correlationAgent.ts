@@ -14,22 +14,10 @@ export interface CorrelationPair {
 // meaningful. Below this, Pearson correlation on so few points is noise.
 const MIN_CO_APPEARANCES = 3;
 
-function f1PlaceholderPoints(game: Last5Game): number {
-  // NOTE: DraftKings' real F1 finishing-position formula wasn't verified this
-  // session. This is a simplified, unverified placeholder (higher finish = more
-  // points on a 20-point ordinal scale) consistent with the earlier caveat that
-  // F1 roster/scoring rules haven't been confirmed against DK's actual rules.
-  const positionPts = game.position ? Math.max(21 - game.position, 0) : 0;
-  const poleBonus = game.qualifying_pos === 1 ? 1.5 : 0;
-  const fastestLapBonus = game.fastest_lap ? 1.5 : 0;
-  return positionPts + poleBonus + fastestLapBonus;
-}
-
 function gamePoints(game: Last5Game, sport: string): number {
   if (sport === 'nba' || sport === 'wnba' || sport === 'nfl' || sport === 'mlb') {
     return dkFantasyPoints(game as unknown as Record<string, number>, sport as DkSport);
   }
-  if (sport === 'f1') return f1PlaceholderPoints(game);
   return 0;
 }
 

@@ -1,29 +1,6 @@
-CREATE TABLE IF NOT EXISTS tenant_fantasy_ai.ownership_projections (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sport VARCHAR(10) NOT NULL,
-  contest_date DATE NOT NULL,
-  player_name TEXT NOT NULL,
-  ownership_pct FLOAT NOT NULL CHECK (ownership_pct >= 0 AND ownership_pct <= 100),
-  cpt_ownership_pct FLOAT NULL CHECK (cpt_ownership_pct >= 0 AND cpt_ownership_pct <= 100),
-  flex_ownership_pct FLOAT NULL CHECK (flex_ownership_pct >= 0 AND flex_ownership_pct <= 100),
-  source TEXT NOT NULL DEFAULT 'unknown',
-  scraped_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(sport, contest_date, player_name)
-);
-
-CREATE INDEX IF NOT EXISTS ownership_projections_slate_idx
-  ON tenant_fantasy_ai.ownership_projections (sport, contest_date);
-
-CREATE INDEX IF NOT EXISTS ownership_projections_player_idx
-  ON tenant_fantasy_ai.ownership_projections (sport, player_name);
-
-ALTER TABLE tenant_fantasy_ai.ownership_projections ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS ownership_projections_select ON tenant_fantasy_ai.ownership_projections;
-CREATE POLICY ownership_projections_select ON tenant_fantasy_ai.ownership_projections FOR SELECT USING (true);
-
-GRANT SELECT ON tenant_fantasy_ai.ownership_projections TO anon, authenticated;
-GRANT INSERT, UPDATE ON tenant_fantasy_ai.ownership_projections TO service_role;
+ALTER TABLE tenant_fantasy_ai.ownership_projections
+  ADD COLUMN IF NOT EXISTS cpt_ownership_pct FLOAT NULL CHECK (cpt_ownership_pct >= 0 AND cpt_ownership_pct <= 100),
+  ADD COLUMN IF NOT EXISTS flex_ownership_pct FLOAT NULL CHECK (flex_ownership_pct >= 0 AND flex_ownership_pct <= 100);
 
 CREATE OR REPLACE FUNCTION public.fantasy_ai_get_ownership_projections(
   p_sport TEXT,
@@ -109,9 +86,3 @@ BEGIN
   RETURN row_count;
 END;
 $$;
-
-REVOKE ALL ON FUNCTION public.fantasy_ai_get_ownership_projections(TEXT, DATE) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.fantasy_ai_upsert_ownership_projections(TEXT, DATE, TEXT, JSONB) FROM PUBLIC;
-
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_get_ownership_projections(TEXT, DATE) TO anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_upsert_ownership_projections(TEXT, DATE, TEXT, JSONB) TO service_role;

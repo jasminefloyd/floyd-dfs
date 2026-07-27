@@ -199,8 +199,8 @@ export function dkMlbPitcherFantasyPoints(statLine: StatLine): number {
     + stat(statLine, ['strikeOuts', 'strikeouts', 'strike_outs', 'k']) * DK_SCORING.mlb.strikeout
     + stat(statLine, ['wins', 'win', 'w']) * DK_SCORING.mlb.win
     + stat(statLine, ['earnedRuns', 'earned_runs', 'er']) * DK_SCORING.mlb.earnedRun
-    + stat(statLine, ['hitsAllowed', 'hits_against', 'hits', 'ha']) * DK_SCORING.mlb.hitAgainst
-    + stat(statLine, ['walksAllowed', 'baseOnBalls', 'base_on_balls', 'walks', 'bb']) * DK_SCORING.mlb.walkAgainst
+    + stat(statLine, ['hitsAllowed', 'hits_allowed', 'hitsAgainst', 'hits_against', 'ha']) * DK_SCORING.mlb.hitAgainst
+    + stat(statLine, ['walksAllowed', 'walks_allowed', 'walksAgainst', 'baseOnBallsAllowed', 'base_on_balls_allowed', 'bbAllowed']) * DK_SCORING.mlb.walkAgainst
     + stat(statLine, ['hitBatsmen', 'hitBatsman', 'hitByPitch', 'hbp']) * DK_SCORING.mlb.hitBatsman
     + stat(statLine, ['completeGames', 'complete_games', 'cg']) * DK_SCORING.mlb.completeGame
     + stat(statLine, ['completeGameShutouts', 'shutouts', 'complete_game_shutouts', 'sho']) * DK_SCORING.mlb.completeGameShutout

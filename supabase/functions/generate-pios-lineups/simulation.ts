@@ -8,6 +8,8 @@ export interface SimPlayer {
   contextual_projection?: number;
   last_5_avg_pts?: number;
   ownership_projection?: number;
+  salary_multiplier?: number;
+  roster_slot?: string;
 }
 
 export interface SimRosterSlot {
@@ -16,11 +18,15 @@ export interface SimRosterSlot {
 }
 
 export interface SimFieldLineup {
-  playerIds: string[];
+  players: Array<{ playerId: string; multiplier: number }>;
 }
 
 export interface IndexedFieldLineup {
-  indexes: number[];
+  entries: Array<{ index: number; multiplier: number }>;
+}
+
+export function scoreIndexedEntries(outcomes: Float64Array, entries: Array<{ index: number; multiplier: number }>): number {
+  return entries.reduce((total, entry) => total + (outcomes[entry.index] ?? 0) * entry.multiplier, 0);
 }
 
 export function randomNormal(mean: number, stdDev: number): number {
@@ -81,9 +87,10 @@ export function correlateOutcomes(
   roster: SimPlayer[],
   sport: string,
   gamePairs: Array<[string, string]> = [],
+  contestType = '',
 ): void {
   if (sport === 'nba' || sport === 'wnba') {
-    applyBasketballCorrelation(outcomes, means, roster, gamePairs);
+    applyBasketballCorrelation(outcomes, means, roster, gamePairs, contestType);
   } else if (sport === 'nfl') {
     applyNflCorrelation(outcomes, means, stdDevs, roster, gamePairs);
   } else if (sport === 'mlb') {
@@ -96,6 +103,7 @@ function applyBasketballCorrelation(
   means: Float64Array,
   roster: SimPlayer[],
   gamePairs: Array<[string, string]>,
+  contestType: string,
 ) {
   const teamPulses = new Map<string, number>();
   const gamePulseByTeam = new Map<string, number>();
@@ -104,7 +112,7 @@ function applyBasketballCorrelation(
     if (team && !teamPulses.has(team)) teamPulses.set(team, randomNormal(0, 0.06));
   }
   for (const [home, away] of gamePairs) {
-    const pulse = randomNormal(0, 0.05);
+    const pulse = randomNormal(0, contestType === 'showdown' ? 0.11 : 0.06);
     gamePulseByTeam.set(home, pulse);
     gamePulseByTeam.set(away, pulse);
   }
@@ -126,6 +134,16 @@ function applyBasketballCorrelation(
       const individualDeviation = outcomes[index] - means[index];
       const targetDeviation = means[index] * teamMeanDeviationRate;
       outcomes[index] = Math.max(0, means[index] + individualDeviation * 0.9 + targetDeviation * 0.1);
+    }
+    const highUsageIndexes = indexes
+      .filter((index) => means[index] >= 18)
+      .sort((a, b) => (outcomes[b] - means[b]) - (outcomes[a] - means[a]));
+    const leadIndex = highUsageIndexes[0];
+    if (leadIndex !== undefined && outcomes[leadIndex] > means[leadIndex]) {
+      const leadExcess = outcomes[leadIndex] - means[leadIndex];
+      for (const index of highUsageIndexes.slice(1)) {
+        outcomes[index] = Math.max(0, outcomes[index] - leadExcess * 0.08);
+      }
     }
   }
 }
@@ -215,49 +233,76 @@ export function generateFieldLineups(
   if (!slots.length) return [];
 
   const field: SimFieldLineup[] = [];
-  const retryCap = fieldSize * 80;
+  const chalkTarget = Math.floor(fieldSize * 0.4);
+  const leverageTarget = Math.floor(fieldSize * 0.2);
+  const randomTarget = fieldSize - chalkTarget - leverageTarget;
+  const retryCap = fieldSize * 100;
   let attempts = 0;
+  while (field.length < chalkTarget && attempts < retryCap) {
+    attempts += 1;
+    const lineup = buildFieldLineup(roster, slots, contestType, (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8);
+    if (lineup) field.push(lineup);
+  }
+  while (field.length < chalkTarget + randomTarget && attempts < retryCap) {
+    attempts += 1;
+    const lineup = buildFieldLineup(roster, slots, contestType, (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15);
+    if (lineup) field.push(lineup);
+  }
   while (field.length < fieldSize && attempts < retryCap) {
     attempts += 1;
-    const selected: SimPlayer[] = [];
-    const usedIds = new Set<string>();
-    let salaryUsed = 0;
-    let failed = false;
-    for (const slot of slots) {
-      const remainingSlots = slots.length - selected.length - 1;
-      const salaryRemaining = 50_000 - salaryUsed;
-      const targetRemaining = Math.max(0, 42_500 - salaryUsed);
-      const candidates = roster.filter((player) => {
-        if (usedIds.has(player.player_id)) return false;
-        if (!playerEligibleForSlot(player, slot) && contestType !== 'showdown') return false;
-        if (salaryUsed + player.salary > 50_000) return false;
-        if (remainingSlots === 0) return true;
-        return salaryRemaining - player.salary >= remainingSlots * 2_000;
-      });
-      const pick = weightedPick(candidates, (player) => {
-        const ownership = Math.max(player.ownership_projection ?? 0.08, 0.01);
-        const affordability = remainingSlots > 0 && player.salary > targetRemaining / Math.max(remainingSlots + 1, 1) ? 0.65 : 1;
-        return ownership ** 1.15 * affordability;
-      });
-      if (!pick) {
-        failed = true;
-        break;
-      }
-      selected.push(pick);
-      usedIds.add(pick.player_id);
-      salaryUsed += pick.salary;
-    }
-    if (!failed && salaryUsed <= 50_000 && salaryUsed >= 42_500) {
-      field.push({ playerIds: selected.map((player) => player.player_id) });
-    }
+    const lineup = buildFieldLineup(roster, slots, contestType, (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01));
+    if (lineup) field.push(lineup);
   }
   return field;
 }
 
+function buildFieldLineup(
+  roster: SimPlayer[],
+  slots: SimRosterSlot[],
+  contestType: string,
+  weight: (player: SimPlayer) => number,
+): SimFieldLineup | null {
+  const selected: SimPlayer[] = [];
+  const usedIds = new Set<string>();
+  let salaryUsed = 0;
+  for (const slot of slots) {
+    const remainingSlots = slots.length - selected.length - 1;
+    const salaryRemaining = 50_000 - salaryUsed;
+    const targetRemaining = Math.max(0, 42_500 - salaryUsed);
+    const candidates = roster.filter((player) => {
+      const salaryMultiplier = contestType === 'showdown' && slot.slot === 'CPT' ? 1.5 : 1;
+      const slotSalary = Math.floor(player.salary * salaryMultiplier);
+      if (usedIds.has(player.player_id)) return false;
+      if (!playerEligibleForSlot(player, slot) && contestType !== 'showdown') return false;
+      if (salaryUsed + slotSalary > 50_000) return false;
+      if (remainingSlots === 0) return true;
+      return salaryRemaining - slotSalary >= remainingSlots * 2_000;
+    });
+    const pick = weightedPick(candidates, (player) => {
+      const affordability = remainingSlots > 0 && player.salary > targetRemaining / Math.max(remainingSlots + 1, 1) ? 0.65 : 1;
+      return weight(player) * affordability;
+    });
+    if (!pick) return null;
+    selected.push(pick);
+    usedIds.add(pick.player_id);
+    salaryUsed += Math.floor(pick.salary * (contestType === 'showdown' && slot.slot === 'CPT' ? 1.5 : 1));
+  }
+  if (salaryUsed > 50_000 || salaryUsed < 42_500) return null;
+  return {
+    players: selected.map((player, index) => ({
+      playerId: player.player_id,
+      multiplier: contestType === 'showdown' && index === 0 ? 1.5 : 1,
+    })),
+  };
+}
+
 export function indexFieldLineups(fieldLineups: SimFieldLineup[], playerIndex: Map<string, number>): IndexedFieldLineup[] {
   return fieldLineups.map((lineup) => ({
-    indexes: lineup.playerIds
-      .map((playerId) => playerIndex.get(playerId))
-      .filter((index): index is number => typeof index === 'number'),
+    entries: lineup.players
+      .map((player) => {
+        const index = playerIndex.get(player.playerId);
+        return typeof index === 'number' ? { index, multiplier: player.multiplier } : null;
+      })
+      .filter((entry): entry is { index: number; multiplier: number } => entry !== null),
   }));
 }

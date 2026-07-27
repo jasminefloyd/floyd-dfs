@@ -1,6 +1,8 @@
 export interface OwnershipProjection {
   player_name: string;
   ownership_pct: number;
+  cpt_ownership_pct?: number;
+  flex_ownership_pct?: number;
 }
 
 function stripHtml(value: string): string {
@@ -49,7 +51,12 @@ function mergeRows(rows: OwnershipProjection[]): OwnershipProjection[] {
     if (!name || !Number.isFinite(row.ownership_pct)) continue;
     const key = name.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (!key || byName.has(key)) continue;
-    byName.set(key, { player_name: name, ownership_pct: row.ownership_pct });
+    byName.set(key, {
+      player_name: name,
+      ownership_pct: row.ownership_pct,
+      cpt_ownership_pct: row.cpt_ownership_pct,
+      flex_ownership_pct: row.flex_ownership_pct,
+    });
   }
   return [...byName.values()];
 }
@@ -63,15 +70,19 @@ function parseMarkdownTables(text: string): OwnershipProjection[] {
     const headers = cells.map(normalizeHeader);
     const playerIndex = headers.findIndex((header) => header === 'player' || header === 'playername' || header === 'name');
     const ownershipIndex = headers.findIndex((header) => /^(proj)?(own|ownership)(pct|percent|percentage)?$/.test(header));
-    if (playerIndex < 0 || ownershipIndex < 0) continue;
+    const cptIndex = headers.findIndex((header) => /^(cpt|captain)(own|ownership)?(pct|percent|percentage)?$/.test(header));
+    const flexIndex = headers.findIndex((header) => /^(flex)(own|ownership)?(pct|percent|percentage)?$/.test(header));
+    if (playerIndex < 0 || (ownershipIndex < 0 && cptIndex < 0 && flexIndex < 0)) continue;
 
     for (let rowIndex = index + 1; rowIndex < lines.length; rowIndex += 1) {
       const rowCells = lines[rowIndex].split('|').map((cell) => cell.trim()).filter(Boolean);
       if (rowCells.every((cell) => /^:?-{2,}:?$/.test(cell))) continue;
-      if (rowCells.length <= Math.max(playerIndex, ownershipIndex)) break;
-      const ownership = parseOwnershipToken(rowCells[ownershipIndex]);
+      if (rowCells.length <= Math.max(playerIndex, ownershipIndex, cptIndex, flexIndex)) break;
+      const cptOwnership = cptIndex >= 0 ? parseOwnershipToken(rowCells[cptIndex]) : undefined;
+      const flexOwnership = flexIndex >= 0 ? parseOwnershipToken(rowCells[flexIndex]) : undefined;
+      const ownership = ownershipIndex >= 0 ? parseOwnershipToken(rowCells[ownershipIndex]) : cptOwnership ?? flexOwnership;
       const playerName = cleanPlayerName(rowCells[playerIndex]);
-      if (ownership !== undefined && playerName) rows.push({ player_name: playerName, ownership_pct: ownership });
+      if (ownership !== undefined && playerName) rows.push({ player_name: playerName, ownership_pct: ownership, cpt_ownership_pct: cptOwnership, flex_ownership_pct: flexOwnership });
     }
   }
 
@@ -88,18 +99,22 @@ function parseHtmlTables(text: string): OwnershipProjection[] {
     const headerIndex = rowMatches.findIndex((cells) => {
       const headers = cells.map(normalizeHeader);
       return headers.some((header) => header === 'player' || header === 'playername' || header === 'name')
-        && headers.some((header) => /^(proj)?(own|ownership)(pct|percent|percentage)?$/.test(header));
+        && headers.some((header) => /^(proj)?(own|ownership)(pct|percent|percentage)?$/.test(header) || /^(cpt|captain)(own|ownership)?(pct|percent|percentage)?$/.test(header) || /^(flex)(own|ownership)?(pct|percent|percentage)?$/.test(header));
     });
     if (headerIndex < 0) continue;
 
     const headers = rowMatches[headerIndex].map(normalizeHeader);
     const playerIndex = headers.findIndex((header) => header === 'player' || header === 'playername' || header === 'name');
     const ownershipIndex = headers.findIndex((header) => /^(proj)?(own|ownership)(pct|percent|percentage)?$/.test(header));
+    const cptIndex = headers.findIndex((header) => /^(cpt|captain)(own|ownership)?(pct|percent|percentage)?$/.test(header));
+    const flexIndex = headers.findIndex((header) => /^(flex)(own|ownership)?(pct|percent|percentage)?$/.test(header));
     for (const cells of rowMatches.slice(headerIndex + 1)) {
-      if (cells.length <= Math.max(playerIndex, ownershipIndex)) continue;
-      const ownership = parseOwnershipToken(cells[ownershipIndex]);
+      if (cells.length <= Math.max(playerIndex, ownershipIndex, cptIndex, flexIndex)) continue;
+      const cptOwnership = cptIndex >= 0 ? parseOwnershipToken(cells[cptIndex]) : undefined;
+      const flexOwnership = flexIndex >= 0 ? parseOwnershipToken(cells[flexIndex]) : undefined;
+      const ownership = ownershipIndex >= 0 ? parseOwnershipToken(cells[ownershipIndex]) : cptOwnership ?? flexOwnership;
       const playerName = cleanPlayerName(cells[playerIndex]);
-      if (ownership !== undefined && playerName) rows.push({ player_name: playerName, ownership_pct: ownership });
+      if (ownership !== undefined && playerName) rows.push({ player_name: playerName, ownership_pct: ownership, cpt_ownership_pct: cptOwnership, flex_ownership_pct: flexOwnership });
     }
   }
 

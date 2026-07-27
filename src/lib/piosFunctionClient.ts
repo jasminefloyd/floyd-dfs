@@ -7,6 +7,7 @@ export interface PiosLineupRequest {
   sport: string;
   contestType: string;
   excludedPlayers: string[];
+  lockedPlayers: string[];
   riskTolerance: string;
   lineupMode: string;
   contestStrategy: string;
@@ -15,6 +16,21 @@ export interface PiosLineupRequest {
   minPrimaryStack: number;
   diversifyLineups: boolean;
   lateSwapMode: boolean;
+  entryCount: number;
+  fieldSize: number;
+  maxEntriesPerUser: number;
+  payoutShape: string;
+  ownershipWeight: number;
+  correlationWeight: number;
+  maxCaptainExposure: number;
+  captainPool: string[];
+  minPerTeam: number;
+  forceUniqueCaptains: boolean;
+  minSalaryUsed: number;
+  maxDuplication: number;
+  simulationIterations: number;
+  fieldSimulationSize: number;
+  showDiagnostics: boolean;
 }
 
 interface PiosFunctionResponse {
@@ -81,6 +97,8 @@ export async function invokePiosLineupGeneration(
         game_id: player.game_id,
         depth_chart_order: player.depth_chart_order,
         ownership_projection: player.ownership_projection,
+        cpt_ownership_projection: player.cpt_ownership_projection,
+        flex_ownership_projection: player.flex_ownership_projection,
         minutes_projection: player.minutes_projection,
         usage_rate: player.usage_rate,
         pace_metric: player.pace_metric,
@@ -90,12 +108,16 @@ export async function invokePiosLineupGeneration(
         last_5_stats: player.last_5_stats
           ? {
               avg_fantasy_pts: player.last_5_stats.avg_fantasy_pts,
+              stdev_fantasy_pts: player.last_5_stats.stdev_fantasy_pts,
+              games_sample_size: player.last_5_stats.games_sample_size,
+              minutes_stdev: player.last_5_stats.minutes_stdev,
               confidence: player.last_5_stats.confidence,
               is_synthetic: player.last_5_stats.is_synthetic,
             }
           : undefined,
       })),
       excludedPlayers: params.excludedPlayers,
+      lockedPlayers: params.lockedPlayers,
       riskTolerance: params.riskTolerance,
       lineupMode: params.lineupMode,
       contestStrategy: params.contestStrategy,
@@ -104,6 +126,21 @@ export async function invokePiosLineupGeneration(
       minPrimaryStack: params.minPrimaryStack,
       diversifyLineups: params.diversifyLineups,
       lateSwapMode: params.lateSwapMode,
+      entryCount: params.entryCount,
+      fieldSize: params.fieldSize,
+      maxEntriesPerUser: params.maxEntriesPerUser,
+      payoutShape: params.payoutShape,
+      ownershipWeight: params.ownershipWeight,
+      correlationWeight: params.correlationWeight,
+      maxCaptainExposure: params.maxCaptainExposure,
+      captainPool: params.captainPool,
+      minPerTeam: params.minPerTeam,
+      forceUniqueCaptains: params.forceUniqueCaptains,
+      minSalaryUsed: params.minSalaryUsed,
+      maxDuplication: params.maxDuplication,
+      simulationIterations: params.simulationIterations,
+      fieldSimulationSize: params.fieldSimulationSize,
+      showDiagnostics: params.showDiagnostics,
       userId,
     }),
   });

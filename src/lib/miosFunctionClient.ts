@@ -13,6 +13,8 @@ export interface MiosScanRequest {
 
 interface MiosFunctionError {
   error?: string;
+  message?: string;
+  code?: string | number;
 }
 
 export async function invokeMiosFantasyScan(
@@ -49,12 +51,15 @@ export async function invokeMiosFantasyScan(
 
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    throw new Error('MIOS_Fantasy Edge Function did not return JSON.');
+    const body = await response.text().catch(() => '');
+    throw new Error(`MIOS_Fantasy Edge Function did not return JSON (${response.status})${body ? `: ${body.slice(0, 240)}` : '.'}`);
   }
 
   const data = await response.json() as MIOS_FantasyManifest | MiosFunctionError;
   if (!response.ok) {
-    throw new Error('error' in data && data.error ? data.error : `MIOS_Fantasy scan failed: ${response.status}`);
+    if ('error' in data && data.error) throw new Error(data.error);
+    if ('message' in data && data.message) throw new Error(String(data.message));
+    throw new Error(`MIOS_Fantasy scan failed: ${response.status}${'code' in data && data.code ? ` (${data.code})` : ''}`);
   }
 
   return data as MIOS_FantasyManifest;

@@ -86,7 +86,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'f1']);
+const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const SLATE_LOOKAHEAD_HOURS = 48;
 const DRAFTKINGS_HEADERS = {
@@ -138,7 +138,6 @@ function draftKingsSportCode(sport: string): string | null {
     nba: 'NBA',
     nfl: 'NFL',
     mlb: 'MLB',
-    f1: 'F1',
   };
   return codes[sport] ?? null;
 }

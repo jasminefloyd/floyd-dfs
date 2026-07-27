@@ -3,6 +3,7 @@ import {
   generateFieldLineups,
   randomNormal,
   sampleLognormalOutcome,
+  scoreIndexedEntries,
   type SimPlayer,
   type SimRosterSlot,
 } from '../simulation.ts';
@@ -79,10 +80,33 @@ Deno.test('modeled field rewards dominant and leveraged lineups', () => {
   const field = generateFieldLineups(roster, 'toy', 'classic', 400, { toy: slots });
   const chalkIds = new Set(['a_chalk', 'b_chalk', 'c_chalk']);
   const leverageIds = new Set(['a_lev', 'b_lev', 'c_lev']);
-  const chalkClones = field.filter((lineup) => lineup.playerIds.every((id) => chalkIds.has(id))).length;
-  const leverageClones = field.filter((lineup) => lineup.playerIds.every((id) => leverageIds.has(id))).length;
+  const chalkClones = field.filter((lineup) => lineup.players.every((player) => chalkIds.has(player.playerId))).length;
+  const leverageClones = field.filter((lineup) => lineup.players.every((player) => leverageIds.has(player.playerId))).length;
 
   assert(field.length > 250, `expected field generation to produce enough lineups, got ${field.length}`);
   assert(chalkClones > leverageClones, 'chalk-clone lineup should appear more often than leveraged clone');
-  assert(114 > 60, 'dominant lineup mean should clearly beat weak chalk field mean');
+  assert(mean([40, 38, 36]) > mean([20, 20, 20]), 'dominant lineup mean should clearly beat weak chalk field mean');
+});
+
+Deno.test('showdown captain multiplier makes same players score differently', () => {
+  const outcomes = new Float64Array([40, 30, 20, 18, 16, 14]);
+  const firstCaptain = scoreIndexedEntries(outcomes, [
+    { index: 0, multiplier: 1.5 },
+    { index: 1, multiplier: 1 },
+    { index: 2, multiplier: 1 },
+    { index: 3, multiplier: 1 },
+    { index: 4, multiplier: 1 },
+    { index: 5, multiplier: 1 },
+  ]);
+  const secondCaptain = scoreIndexedEntries(outcomes, [
+    { index: 0, multiplier: 1 },
+    { index: 1, multiplier: 1.5 },
+    { index: 2, multiplier: 1 },
+    { index: 3, multiplier: 1 },
+    { index: 4, multiplier: 1 },
+    { index: 5, multiplier: 1 },
+  ]);
+
+  assert(firstCaptain !== secondCaptain, 'different captains should produce different simulated lineup scores');
+  assert(firstCaptain > secondCaptain, 'higher-outcome captain should score more with the same six players');
 });

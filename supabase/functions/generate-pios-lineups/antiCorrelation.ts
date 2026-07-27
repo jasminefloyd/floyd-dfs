@@ -4,6 +4,9 @@ export interface AntiCorrelationPlayer {
   position: string;
   opponent_team?: string;
   opposing_probable_pitcher_name?: string;
+  spread?: number;
+  implied_total?: number;
+  roster_slot?: string;
 }
 
 export interface AntiCorrelationLineup {
@@ -38,6 +41,10 @@ function hitters(lineup: AntiCorrelationLineup): AntiCorrelationPlayer[] {
   return lineup.players.filter((player) => !isPitcher(player));
 }
 
+function isBasketball(sport: string): boolean {
+  return sport === 'nba' || sport === 'wnba';
+}
+
 export function detectAntiCorrelation(lineup: AntiCorrelationLineup, sport = ''): string[] {
   const flags: string[] = [];
   if (sport === 'mlb') {
@@ -66,6 +73,25 @@ export function detectAntiCorrelation(lineup: AntiCorrelationLineup, sport = '')
       const qbOpponent = normalizeTeam(qb.opponent_team);
       const opposingDst = defenses.find((dst) => normalizeTeam(dst.team) === qbOpponent || normalizeTeam(dst.opponent_team) === normalizeTeam(qb.team));
       if (opposingDst) flags.push(`${qb.name} against opposing DST ${opposingDst.name}`);
+    }
+  }
+
+  if (isBasketball(sport)) {
+    const teamCounts = new Map<string, AntiCorrelationPlayer[]>();
+    for (const player of lineup.players) {
+      const team = normalizeTeam(player.team);
+      if (!team) continue;
+      teamCounts.set(team, [...(teamCounts.get(team) ?? []), player]);
+    }
+
+    for (const [team, players] of teamCounts.entries()) {
+      if (players.length >= 5) {
+        flags.push(`${team} ${players.length}-player one-team build needs a narrow blowout or condensed rotation`);
+      }
+      const maxAbsSpread = Math.max(...players.map((player) => Math.abs(Number(player.spread ?? 0))));
+      if (players.length >= 4 && maxAbsSpread >= 10) {
+        flags.push(`${team} ${players.length}-player stack in a double-digit spread carries blowout-minute risk`);
+      }
     }
   }
 

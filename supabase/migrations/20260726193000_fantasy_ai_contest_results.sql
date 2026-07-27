@@ -1,54 +1,16 @@
-CREATE TABLE IF NOT EXISTS tenant_fantasy_ai.generated_lineups (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NULL REFERENCES tenant_fantasy_ai.users(id) ON DELETE SET NULL,
-  sport VARCHAR(10) NOT NULL,
-  contest_date DATE NOT NULL,
-  contest_type TEXT NOT NULL,
-  contest_id TEXT NULL,
-  lineup_mode TEXT NOT NULL,
-  contest_strategy TEXT NOT NULL,
-  players JSONB NOT NULL,
-  projected_points FLOAT NOT NULL DEFAULT 0,
-  salary_used INT NOT NULL DEFAULT 0,
-  optimizer_rank INT NOT NULL DEFAULT 0,
-  field_size INT NULL,
-  entry_fee NUMERIC(10, 2) NULL,
-  max_entries_per_user INT NULL,
-  finish_rank INT NULL,
-  payout NUMERIC(10, 2) NULL,
-  entry_count INT NULL,
-  expected_duplicates FLOAT NULL,
-  actual_duplicates INT NULL,
-  weights_version TEXT NULL,
-  payout_shape TEXT NULL,
-  ownership_weight FLOAT NULL,
-  config JSONB NULL,
-  actual_points FLOAT NULL,
-  optimal_points FLOAT NULL,
-  pct_of_optimal FLOAT NULL,
-  scored_at TIMESTAMP NULL,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS generated_lineups_slate_idx
-  ON tenant_fantasy_ai.generated_lineups (sport, contest_date, contest_type);
-
-CREATE INDEX IF NOT EXISTS generated_lineups_unscored_idx
-  ON tenant_fantasy_ai.generated_lineups (sport, contest_date)
-  WHERE scored_at IS NULL;
-
-CREATE INDEX IF NOT EXISTS generated_lineups_user_idx
-  ON tenant_fantasy_ai.generated_lineups (user_id, created_at DESC);
-
-ALTER TABLE tenant_fantasy_ai.generated_lineups ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS generated_lineups_select_own ON tenant_fantasy_ai.generated_lineups;
-CREATE POLICY generated_lineups_select_own ON tenant_fantasy_ai.generated_lineups
-  FOR SELECT
-  USING (user_id IS NULL OR user_id = auth.uid());
-
-GRANT SELECT ON tenant_fantasy_ai.generated_lineups TO authenticated;
-GRANT SELECT, INSERT, UPDATE ON tenant_fantasy_ai.generated_lineups TO service_role;
+ALTER TABLE tenant_fantasy_ai.generated_lineups
+  ADD COLUMN IF NOT EXISTS field_size INT NULL,
+  ADD COLUMN IF NOT EXISTS entry_fee NUMERIC(10, 2) NULL,
+  ADD COLUMN IF NOT EXISTS max_entries_per_user INT NULL,
+  ADD COLUMN IF NOT EXISTS finish_rank INT NULL,
+  ADD COLUMN IF NOT EXISTS payout NUMERIC(10, 2) NULL,
+  ADD COLUMN IF NOT EXISTS entry_count INT NULL,
+  ADD COLUMN IF NOT EXISTS expected_duplicates FLOAT NULL,
+  ADD COLUMN IF NOT EXISTS actual_duplicates INT NULL,
+  ADD COLUMN IF NOT EXISTS weights_version TEXT NULL,
+  ADD COLUMN IF NOT EXISTS payout_shape TEXT NULL,
+  ADD COLUMN IF NOT EXISTS ownership_weight FLOAT NULL,
+  ADD COLUMN IF NOT EXISTS config JSONB NULL;
 
 CREATE OR REPLACE FUNCTION public.fantasy_ai_insert_generated_lineups(
   p_rows JSONB
@@ -115,48 +77,6 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_unscored_lineups(
-  p_sport TEXT,
-  p_before_date DATE
-)
-RETURNS TABLE (
-  id UUID,
-  user_id UUID,
-  sport VARCHAR(10),
-  contest_date DATE,
-  contest_type TEXT,
-  contest_id TEXT,
-  lineup_mode TEXT,
-  contest_strategy TEXT,
-  players JSONB,
-  projected_points FLOAT,
-  salary_used INT,
-    optimizer_rank INT
-)
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path = tenant_fantasy_ai, public
-AS $$
-  SELECT
-    lineups.id,
-    lineups.user_id,
-    lineups.sport,
-    lineups.contest_date,
-    lineups.contest_type,
-    lineups.contest_id,
-    lineups.lineup_mode,
-    lineups.contest_strategy,
-    lineups.players,
-    lineups.projected_points,
-    lineups.salary_used,
-    lineups.optimizer_rank
-  FROM tenant_fantasy_ai.generated_lineups lineups
-  WHERE lineups.sport = LOWER(p_sport)
-    AND lineups.contest_date <= p_before_date
-    AND lineups.scored_at IS NULL
-  ORDER BY lineups.contest_date, lineups.created_at;
-$$;
-
 CREATE OR REPLACE FUNCTION public.fantasy_ai_record_contest_result(
   p_sport TEXT,
   p_contest_date DATE,
@@ -198,25 +118,6 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_score_generated_lineup(
-  p_id UUID,
-  p_actual FLOAT,
-  p_optimal FLOAT
-)
-RETURNS VOID
-LANGUAGE sql
-SECURITY DEFINER
-SET search_path = tenant_fantasy_ai, public
-AS $$
-  UPDATE tenant_fantasy_ai.generated_lineups
-  SET
-    actual_points = p_actual,
-    optimal_points = p_optimal,
-    pct_of_optimal = CASE WHEN p_optimal > 0 THEN p_actual / p_optimal ELSE NULL END,
-    scored_at = NOW()
-  WHERE id = p_id;
-$$;
-
 CREATE OR REPLACE FUNCTION public.fantasy_ai_get_lineup_scoreboard(
   p_sport TEXT,
   p_days INT
@@ -245,7 +146,11 @@ AS $$
   WITH recent AS (
     SELECT *
     FROM tenant_fantasy_ai.generated_lineups lineups
-    WHERE lineups.scored_at IS NOT NULL
+    WHERE (
+        lineups.scored_at IS NOT NULL
+        OR lineups.finish_rank IS NOT NULL
+        OR lineups.payout IS NOT NULL
+      )
       AND (p_sport IS NULL OR p_sport = '' OR lineups.sport = LOWER(p_sport))
       AND lineups.contest_date >= CURRENT_DATE - GREATEST(COALESCE(p_days, 30), 1)
   ),
@@ -296,14 +201,5 @@ AS $$
   LIMIT 50;
 $$;
 
-REVOKE ALL ON FUNCTION public.fantasy_ai_insert_generated_lineups(JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.fantasy_ai_get_unscored_lineups(TEXT, DATE) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.fantasy_ai_score_generated_lineup(UUID, FLOAT, FLOAT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.fantasy_ai_get_lineup_scoreboard(TEXT, INT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.fantasy_ai_record_contest_result(TEXT, DATE, TEXT, TEXT, INT, INT, NUMERIC, INT, NUMERIC, INT, INT) FROM PUBLIC;
-
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_insert_generated_lineups(JSONB) TO service_role;
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_get_unscored_lineups(TEXT, DATE) TO service_role;
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_score_generated_lineup(UUID, FLOAT, FLOAT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.fantasy_ai_get_lineup_scoreboard(TEXT, INT) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.fantasy_ai_record_contest_result(TEXT, DATE, TEXT, TEXT, INT, INT, NUMERIC, INT, NUMERIC, INT, INT) TO authenticated, service_role;

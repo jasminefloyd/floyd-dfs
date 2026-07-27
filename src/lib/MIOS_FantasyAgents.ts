@@ -38,12 +38,6 @@ export interface Last5Game {
   strikeouts?: number;
   walks?: number;
   stolen_bases?: number;
-  // F1 specific
-  position?: number;
-  qualifying_pos?: number;
-  dnf_reason?: string;
-  fastest_lap?: boolean;
-  f1_points?: number;
 }
 
 export interface Player {
@@ -60,6 +54,8 @@ export interface Player {
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
   ownership_projection?: number;
+  cpt_ownership_projection?: number;
+  flex_ownership_projection?: number;
   prop_projection?: number;
   implied_total?: number;
   spread?: number;
@@ -81,6 +77,9 @@ export interface Player {
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
+    stdev_fantasy_pts?: number;
+    games_sample_size?: number;
+    minutes_stdev?: number;
     trend: 'up' | 'down' | 'stable';
     confidence: number;
     minutes_avg?: number;

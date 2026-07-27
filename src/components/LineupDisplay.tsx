@@ -1,7 +1,5 @@
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
-import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
-import { generateCorrelationPairs, type CorrelationPair } from '../lib/correlationAgent';
 import { ExportLineup } from './ExportLineup';
 
 export interface LineupPlayer {
@@ -41,6 +39,9 @@ export interface LineupPlayer {
   game_context_tags?: string[];
   last_5_stats?: {
     avg_fantasy_pts?: number;
+    stdev_fantasy_pts?: number;
+    games_sample_size?: number;
+    minutes_stdev?: number;
     trend?: 'up' | 'down' | 'stable';
     minutes_avg?: number;
     is_synthetic?: boolean;
@@ -59,8 +60,12 @@ export interface Lineup {
   p99_score?: number;
   win_rate?: number;
   top_10_rate?: number;
+  top_decile_rate?: number;
+  top_n_rate?: number;
+  expected_payout?: number;
   leverage_score?: number;
   ownership_sum?: number;
+  expected_duplicates?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   lineup_intelligence_score?: number;
   stack_quality_score?: number;
@@ -71,6 +76,7 @@ export interface Lineup {
   primary_stack_size?: number;
   anti_correlation_flags?: string[];
   exposure_flags?: string[];
+  portfolio_correlation_flags?: string[];
   late_swap_flags?: string[];
   strategy_notes?: string[];
   narrative: string;
@@ -78,26 +84,11 @@ export interface Lineup {
 
 interface LineupDisplayProps {
   lineups: Lineup[];
-  manifest: MIOS_FantasyManifest | null;
   onSaveLineup?: (lineup: Lineup) => void;
 }
 
-function playerName(id: string, manifest: MIOS_FantasyManifest | null): string {
-  return manifest?.player_roster.find((p) => p.id === id)?.name ?? id;
-}
-
-function lineupContainsPair(lineup: Lineup, pair: CorrelationPair): boolean {
-  const ids = new Set(lineup.players.map((p) => p.id).filter(Boolean));
-  return ids.has(pair.player1_id) && ids.has(pair.player2_id);
-}
-
-export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
+export function LineupDisplay({ lineups, onSaveLineup }: LineupDisplayProps) {
   const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
-  const topStacks: CorrelationPair[] = manifest
-    ? generateCorrelationPairs(manifest.player_roster, manifest.sport)
-        .filter((p) => p.correlation_score > 0.6)
-        .slice(0, 3)
-    : [];
   const toggleLineup = (rank: number) => {
     setExpandedRanks((current) => {
       const next = new Set(current);
@@ -113,10 +104,6 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
   return (
     <div className="space-y-3">
       {lineups.map((lineup) => {
-        const matchedStacks = topStacks.filter((pair) => lineupContainsPair(lineup, pair));
-        const highlightedIds = new Set(
-          matchedStacks.flatMap((pair) => [pair.player1_id, pair.player2_id])
-        );
         const isExpanded = expandedRanks.has(lineup.rank);
         const summaryId = `lineup-${lineup.rank}-summary`;
         const detailsId = `lineup-${lineup.rank}-details`;
@@ -164,8 +151,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 <div className="grid grid-cols-2 gap-2 border-b border-slate-200 p-3 sm:grid-cols-4 sm:p-4">
                   <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
-                  <Metric label="Top 10 vs Field" value={lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
-                  <Metric label="PIOS Edge" value={lineup.lineup_intelligence_score?.toFixed(1) ?? lineup.leverage_score?.toFixed(1) ?? '—'} />
+                  <Metric label="Top Decile" value={lineup.top_decile_rate !== undefined ? `${(lineup.top_decile_rate * 100).toFixed(1)}%` : lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
+                  <Metric label="Top N" value={lineup.top_n_rate !== undefined ? `${(lineup.top_n_rate * 100).toFixed(1)}%` : '—'} />
+                  <Metric label="Dupes" value={lineup.expected_duplicates !== undefined ? lineup.expected_duplicates.toFixed(1) : '—'} />
                 </div>
               ) : null}
 
@@ -201,27 +189,16 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
             {isExpanded ? (
               <div id={detailsId} aria-labelledby={summaryId}>
                 <LineupAlerts lineup={lineup} />
-                {matchedStacks.length > 0 && (
-                  <p className="border-b border-slate-200 px-3 py-3 text-[13px] font-bold text-cyan-800 sm:px-4">
-                    Contains recommended stack:{' '}
-                    {matchedStacks
-                      .map((pair) => `${playerName(pair.player1_id, manifest)} + ${playerName(pair.player2_id, manifest)}`)
-                      .join(', ')}
-                  </p>
-                )}
 
                 {/* Player List */}
                 <div className="space-y-2 p-3 sm:p-4">
                   {lineup.players.map((player, idx) => {
-                    const isHighlighted = !!player.id && highlightedIds.has(player.id);
                     const trend = player.last_5_stats?.trend ?? 'stable';
                     const trendSymbol = trend === 'up' ? '↗' : trend === 'down' ? '↘' : '→';
                     return (
                       <div
                         key={idx}
-                        className={`flex items-center gap-3 rounded-md border p-3 ${
-                          isHighlighted ? 'border-cyan-300 bg-cyan-50' : 'border-slate-200 bg-slate-50'
-                        }`}
+                        className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3"
                       >
                         <PlayerPortrait player={player} />
                         <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
@@ -247,6 +224,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                           <p className="font-black text-[#0b1f3a]">{formatSalary(player.salary)}</p>
                           <p className="max-w-[118px] text-[12px] font-medium text-slate-500 sm:max-w-[130px]">
                             {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
+                            {player.last_5_stats?.stdev_fantasy_pts ? ` • σ ${player.last_5_stats.stdev_fantasy_pts.toFixed(1)}` : ''}
                             {player.salary_multiplier && player.salary_multiplier > 1
                               ? ` • ${player.salary_multiplier}x from ${formatSalary(player.base_salary)}`
                               : ''}
@@ -275,20 +253,6 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
           </div>
         );
       })}
-
-      {topStacks.length > 0 && (
-        <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
-          <h3 className="mb-2 text-[12px] font-black uppercase tracking-wide text-cyan-800">Recommended Stack</h3>
-          <ul className="space-y-1">
-            {topStacks.map((pair) => (
-              <li key={`${pair.player1_id}-${pair.player2_id}`} className="text-[13px] font-medium text-slate-700">
-                Stack {playerName(pair.player1_id, manifest)} + {playerName(pair.player2_id, manifest)} (
-                {pair.correlation_score.toFixed(2)} correlation)
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }
@@ -297,6 +261,7 @@ function LineupAlerts({ lineup }: { lineup: Lineup }) {
   const alerts = [
     ...(lineup.anti_correlation_flags ?? []).map((text) => ({ text, tone: 'error' as const })),
     ...(lineup.exposure_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
+    ...(lineup.portfolio_correlation_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
     ...(lineup.late_swap_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
   ];
   if (!alerts.length) return null;
