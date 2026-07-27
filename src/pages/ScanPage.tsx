@@ -177,6 +177,18 @@ export default function ScanPage() {
           ) : (
             <div className="rounded-lg border border-slate-200 bg-white p-6 text-center text-slate-500 shadow-[var(--shadow-subtle)]">
               <p>{manifest ? 'No valid lineups could be generated with the collected roster.' : 'Select a sport, contest type, and DraftKings slate to run a DFS Scan.'}</p>
+              {manifest && actionableDataWarnings(dataWarnings).length > 0 && (
+                <div className="mx-auto mt-4 max-w-2xl text-left">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Diagnostics</p>
+                  <ul className="mt-2 space-y-2 text-sm text-slate-600">
+                    {actionableDataWarnings(dataWarnings).map((warning) => (
+                      <li key={warning} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                        {warning}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </main>

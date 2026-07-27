@@ -292,7 +292,7 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
   });
   const starterDraftables = activeDraftables.filter(hasDraftKingsStarterSignal);
   const minimumRows = rosterSize ?? (contestType === 'showdown' ? 6 : 1);
-  const shouldUseStarterOnly = sport === 'mlb' && starterDraftables.length >= minimumRows;
+  const shouldUseStarterOnly = sport === 'mlb' && contestType === 'classic' && starterDraftables.length >= minimumRows;
   const byPlayerPosition = new Map<string, {
     player_id: string | null;
     player_name: string;
@@ -404,7 +404,39 @@ function slateMatchesRequest(slate: DraftKingsSlate, sport: string, contestType:
   if (String(slate.sport).toLowerCase() !== sport) return false;
   if (String(slate.contest_type).toLowerCase() !== contestType) return false;
   if (contestType === 'showdown' && slate.game_ids.length > 1) return false;
+  if (contestType === 'showdown' && !showdownSlateHasFeasibleRoster(slate)) return false;
   return true;
+}
+
+function showdownSlateHasFeasibleRoster(slate: DraftKingsSlate): boolean {
+  const data = slate.data as { salaries?: Array<{ player_id?: string | null; player_name?: string; team?: string | null; salary?: number }>; roster_size?: number } | undefined;
+  const salaries = (data?.salaries ?? [])
+    .map((row, index) => ({
+      id: String(row.player_id ?? row.player_name ?? index),
+      team: String(row.team ?? '').toUpperCase(),
+      salary: Number(row.salary),
+    }))
+    .filter((row) => row.team && Number.isFinite(row.salary) && row.salary > 0);
+  const rosterSize = Number.isFinite(Number(data?.roster_size)) ? Number(data?.roster_size) : 6;
+  if (salaries.length < rosterSize) return false;
+  if (new Set(salaries.map((row) => row.team)).size < 2) return false;
+
+  for (const captain of salaries) {
+    const captainSalary = Math.floor(captain.salary * 1.5);
+    const remaining = salaries.filter((row) => row.id !== captain.id);
+    const otherTeamOptions = remaining.filter((row) => row.team !== captain.team).sort((a, b) => a.salary - b.salary);
+    for (const runback of otherTeamOptions) {
+      const filler = remaining
+        .filter((row) => row.id !== runback.id)
+        .sort((a, b) => a.salary - b.salary)
+        .slice(0, rosterSize - 2);
+      if (filler.length !== rosterSize - 2) continue;
+      const salaryUsed = captainSalary + runback.salary + filler.reduce((sum, row) => sum + row.salary, 0);
+      if (salaryUsed <= 50_000) return true;
+    }
+  }
+
+  return false;
 }
 
 function filterSlatesForRequest(slates: DraftKingsSlate[], sport: string, contestType: string): DraftKingsSlate[] {

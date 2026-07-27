@@ -498,7 +498,6 @@ function validatePayload(payload: PiosRequest) {
   const entryCount = Number(payload.entryCount ?? 1);
   const fieldSize = Number(payload.fieldSize ?? 500);
   const maxEntriesPerUser = Number(payload.maxEntriesPerUser ?? 1);
-  const maxCaptainExposure = Number(payload.maxCaptainExposure ?? 1);
   const minPerTeam = Number(payload.minPerTeam ?? 1);
   const minSalaryUsed = Number(payload.minSalaryUsed ?? 49_000);
   if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 20) throw new Error('Entry count must be between 1 and 20');
@@ -506,7 +505,6 @@ function validatePayload(payload: PiosRequest) {
   if (!Number.isInteger(maxEntriesPerUser) || maxEntriesPerUser < 1 || maxEntriesPerUser > 150) throw new Error('Max entries per user must be between 1 and 150');
   if (entryCount > maxEntriesPerUser) throw new Error('Entry count cannot exceed max entries per user');
   if (maxEntriesPerUser === 1 && entryCount > 1) throw new Error('Single-entry contests can only build one lineup');
-  if (maxCaptainExposure * entryCount < 1) throw new Error('Captain exposure is too low for the requested entry count');
   if (payload.contestType === 'showdown' && (!Number.isInteger(minPerTeam) || minPerTeam < 1 || minPerTeam > 3)) {
     throw new Error('Showdown minimum players per team must be between 1 and 3');
   }
