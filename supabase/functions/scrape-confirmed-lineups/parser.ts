@@ -53,18 +53,18 @@ function playerNameFromBlock(block: string): string {
   const anchor = block.match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
   if (anchor) return stripTags(anchor[1]);
   return stripTags(block)
-    .replace(/^\d+\s*[\).\-\s]\s*/, '')
+    .replace(/^\d+\s*[.)\s-]\s*/, '')
     .replace(/\b(OUT|GTD|QUES|Q|Confirmed|Expected|SP|P)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function battingOrderFromBlock(block: string, index: number, sport: LineupSport): number | null {
+function battingOrderFromBlock(block: string, _index: number, sport: LineupSport): number | null {
   if (sport !== 'mlb') return null;
   const attr = Number(attrValue(block, 'data-batting-order') || attrValue(block, 'data-order'));
   if (Number.isFinite(attr) && attr > 0) return attr;
-  const match = stripTags(block).match(/^\s*(\d+)\s*[\).\-\s]/);
-  return match ? Number(match[1]) : index + 1;
+  const match = stripTags(block).match(/^\s*(\d+)\s*[.)\s-]/);
+  return match ? Number(match[1]) : null;
 }
 
 function isStartingPitcherBlock(block: string, sport: LineupSport): boolean {

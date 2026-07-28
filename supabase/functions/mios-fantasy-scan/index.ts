@@ -1915,50 +1915,7 @@ function mlbContextByTeam(contexts: MlbGameContext[]): Map<string, MlbGameContex
 
 function mergeRotowireMlbLineups(contexts: MlbGameContext[], lineups: ConfirmedLineupRow[]): MlbGameContext[] {
   if (!contexts.length || !lineups.length) return contexts;
-  const byTeam = lineupRowsByTeam(lineups, 'mlb');
-
-  return contexts.map((context) => {
-    const battingOrders = { ...(context.batting_orders ?? {}) };
-    const confirmedStarters = { ...(context.confirmed_starters ?? {}) };
-    const probablePitchers = { ...context.probable_pitchers };
-    const notes: string[] = [];
-
-    for (const team of [context.home_team, context.away_team]) {
-      const rows = byTeam.get(team) ?? [];
-      if (!rows.length) continue;
-      const existingOrderCount = Object.keys(battingOrders[team] ?? {}).length;
-      const rotowireOrders = rows.filter((row) => typeof row.batting_order === 'number' && row.batting_order > 0);
-
-      if (existingOrderCount < 8 && rotowireOrders.length) {
-        const orderMap: Record<string, number> = {};
-        const starterSet = new Set<string>();
-        for (const row of rotowireOrders) {
-          const key = normalizeName(row.player_name);
-          if (!key || typeof row.batting_order !== 'number') continue;
-          orderMap[key] = row.batting_order;
-          starterSet.add(key);
-        }
-        battingOrders[team] = { ...(battingOrders[team] ?? {}), ...orderMap };
-        confirmedStarters[team] = new Set([...(confirmedStarters[team] ?? new Set<string>()), ...starterSet]);
-        notes.push(`${team} Rotowire batting-order fallback`);
-      }
-
-      const rotowirePitcher = rows.find((row) => row.is_starting_pitcher);
-      if (rotowirePitcher && !probablePitchers[team]?.name) {
-        probablePitchers[team] = { name: rotowirePitcher.player_name };
-        notes.push(`${team} Rotowire starting pitcher fallback`);
-      }
-    }
-
-    if (!notes.length) return context;
-    return {
-      ...context,
-      probable_pitchers: probablePitchers,
-      batting_orders: battingOrders,
-      confirmed_starters: confirmedStarters,
-      lineup_note: [context.lineup_note, ...notes].filter(Boolean).join('; '),
-    };
-  });
+  return contexts;
 }
 
 function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Player[] {
@@ -2009,12 +1966,14 @@ function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Pla
       confirmed_starter: isPitcher
         ? (ownProbablePitcher && normalizeName(ownProbablePitcher) === normalizeName(player.name) ? true : player.confirmed_starter)
         : hasConfirmedTeamLineup ? isConfirmedStarter : (isConfirmedStarter || player.confirmed_starter),
-      batting_order: !isPitcher && battingOrder ? battingOrder : player.batting_order,
+      batting_order: !isPitcher && battingOrder ? battingOrder : undefined,
       run_factor: context.run_factor,
       opponent_team: opponent,
       opposing_probable_pitcher_id: opponentProbable?.id ?? player.opposing_probable_pitcher_id,
       opposing_probable_pitcher_name: opponentProbablePitcher ?? player.opposing_probable_pitcher_name,
-      own_probable_starter: isPitcher && ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : player.own_probable_starter,
+      own_probable_starter: isPitcher
+        ? (ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : false)
+        : player.own_probable_starter,
       game_id: context.game_id || player.game_id,
       context_score: Number((multiplier - 1).toFixed(3)),
       projected_points: projectedPoints,

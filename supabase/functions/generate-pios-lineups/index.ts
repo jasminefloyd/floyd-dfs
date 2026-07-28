@@ -1138,8 +1138,8 @@ function isPlayerEligibleForMlbLineupContext(player: LineupPlayerDraft, confirme
 }
 
 function hasBattingOrder(player: LineupPlayerDraft): boolean {
-  if (typeof player.batting_order === 'number' && player.batting_order > 0) return true;
-  return player.news_note?.includes('batting') ?? false;
+  return typeof player.batting_order === 'number' && player.batting_order > 0
+    && player.confirmed_starter === true;
 }
 
 function gameContextTags(player: LineupPlayerDraft, sport: string, battingOrder?: number): string[] {

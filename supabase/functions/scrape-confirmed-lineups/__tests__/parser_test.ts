@@ -16,3 +16,22 @@ Deno.test('parseRotowireLineups parses synthetic NBA lineup cards', async () => 
     throw new Error(`Unexpected Hart row: ${JSON.stringify(hart)}`);
   }
 });
+
+Deno.test('parseRotowireLineups does not synthesize MLB batting order from list position', () => {
+  const rows = parseRotowireLineups(`
+    <section data-team="SF" data-lineup-status="confirmed">
+      <li data-player="Rafael Devers" data-batting-order="4">Rafael Devers</li>
+      <li data-player="Bench Bat">Bench Bat</li>
+    </section>
+  `, 'mlb', '2026-07-27');
+
+  const starter = rows.find((row) => row.player_name === 'Rafael Devers');
+  const bench = rows.find((row) => row.player_name === 'Bench Bat');
+
+  if (!starter || starter.batting_order !== 4) {
+    throw new Error(`Expected explicit MLB batting order to be preserved: ${JSON.stringify(starter)}`);
+  }
+  if (!bench || bench.batting_order !== null) {
+    throw new Error(`Expected missing MLB batting order to stay null: ${JSON.stringify(bench)}`);
+  }
+});
