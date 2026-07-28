@@ -148,7 +148,9 @@ export function generateLineups(
 
   // Filter roster: remove unavailable players and manual exclusions.
   const eligiblePlayers = roster.filter(
-    (p) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(p.injury_status) && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
+    (p) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(p.injury_status)
+      && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
+      && isPlayerEligibleForConfirmedRole(p, sport)
   );
 
   // Sort by recent production (used as a proxy for confidence when picking within a slot)
@@ -336,6 +338,13 @@ function validateLineup(lineup: DraftLineup, contestType: string): boolean {
     return false;
   }
   return true;
+}
+
+function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: string): boolean {
+  if (sport !== 'mlb') return true;
+  if (/^(P|SP|RP)$/.test(String(player.position ?? '').toUpperCase())) return true;
+  if (typeof player.confirmed_starter === 'boolean') return player.confirmed_starter;
+  return !player.news_note?.includes('not in confirmed lineup');
 }
 
 function uniqueTeams(players: LineupPlayerDraft[]): string[] {

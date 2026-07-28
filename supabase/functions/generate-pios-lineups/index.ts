@@ -690,7 +690,9 @@ function generateLineups(
   const excludedLower = excludedPlayers.map(normalizePlayerName);
   const lockedLower = rules.lockedPlayers;
   const eligiblePlayers = roster.filter(
-    (player) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(player.injury_status) && !excludedLower.includes(normalizePlayerName(player.name ?? '')),
+    (player) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(player.injury_status)
+      && !excludedLower.includes(normalizePlayerName(player.name ?? ''))
+      && isPlayerEligibleForConfirmedRole(player, sport),
   );
   const availableLockedPlayers = new Set(
     eligiblePlayers
@@ -1096,6 +1098,12 @@ function parseBattingOrder(note = ''): number | undefined {
 function isConfirmedNonStarter(player: LineupPlayerDraft): boolean {
   if (typeof player.confirmed_starter === 'boolean') return player.confirmed_starter === false;
   return player.news_note?.includes('not in confirmed lineup') ?? false;
+}
+
+function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: string): boolean {
+  if (sport !== 'mlb') return true;
+  if (isPitcher(player)) return true;
+  return !isConfirmedNonStarter(player);
 }
 
 function hasBattingOrder(player: LineupPlayerDraft): boolean {
@@ -2112,10 +2120,16 @@ Deno.serve(async (req) => {
     });
 
     const injuryExcludedCount = draftPlayers.filter((player) => LINEUP_EXCLUDED_INJURY_STATUSES.has(player.injury_status)).length;
+    const mlbConfirmedNonStarterExcludedCount = payload.sport === 'mlb'
+      ? draftPlayers.filter((player) => !isPitcher(player) && isConfirmedNonStarter(player)).length
+      : 0;
     const questionableIncludedCount = draftPlayers.filter((player) => player.injury_status === 'questionable').length;
     const dataWarnings = [
       ...(injuryExcludedCount
         ? [`${injuryExcludedCount} player${injuryExcludedCount === 1 ? '' : 's'} excluded from lineup generation because injury status was out or doubtful.`]
+        : []),
+      ...(mlbConfirmedNonStarterExcludedCount
+        ? [`${mlbConfirmedNonStarterExcludedCount} MLB hitter${mlbConfirmedNonStarterExcludedCount === 1 ? '' : 's'} excluded from lineup generation because confirmed batting orders show they are not starting.`]
         : []),
       ...(questionableIncludedCount
         ? [`${questionableIncludedCount} questionable player${questionableIncludedCount === 1 ? '' : 's'} included with discounted projections.`]
