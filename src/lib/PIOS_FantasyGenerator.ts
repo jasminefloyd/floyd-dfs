@@ -145,12 +145,13 @@ export function generateLineups(
   riskTolerance: string
 ): DraftLineup[] {
   const excludedLower = excludedPlayers.map(normalizePlayerName);
+  const mlbHasHitterStarterContext = sport === 'mlb' ? hasMlbHitterStarterContext(roster) : false;
 
   // Filter roster: remove unavailable players and manual exclusions.
   const eligiblePlayers = roster.filter(
     (p) => LINEUP_ELIGIBLE_INJURY_STATUSES.has(p.injury_status)
       && !excludedLower.includes(normalizePlayerName(p.name ?? ''))
-      && isPlayerEligibleForConfirmedRole(p, sport)
+      && isPlayerEligibleForConfirmedRole(p, sport, mlbHasHitterStarterContext)
   );
 
   // Sort by recent production (used as a proxy for confidence when picking within a slot)
@@ -340,16 +341,21 @@ function validateLineup(lineup: DraftLineup, contestType: string): boolean {
   return true;
 }
 
-function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: string): boolean {
+function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: string, hasHitterStarterContext = true): boolean {
   if (sport !== 'mlb') return true;
   if (/^(P|SP|RP)$/.test(String(player.position ?? '').toUpperCase())) return player.own_probable_starter === true;
   if (typeof player.confirmed_starter === 'boolean' && !player.confirmed_starter) return false;
+  if (!hasHitterStarterContext) return true;
   return hasConfirmedMlbBattingRole(player);
 }
 
 function hasConfirmedMlbBattingRole(player: LineupPlayerDraft): boolean {
   if (player.confirmed_starter !== true) return false;
   return true;
+}
+
+function hasMlbHitterStarterContext(players: LineupPlayerDraft[]): boolean {
+  return players.some((player) => !/^(P|SP|RP)$/.test(String(player.position ?? '').toUpperCase()) && typeof player.confirmed_starter === 'boolean');
 }
 
 function uniqueTeams(players: LineupPlayerDraft[]): string[] {

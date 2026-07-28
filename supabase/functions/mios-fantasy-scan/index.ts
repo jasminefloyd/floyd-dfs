@@ -3435,7 +3435,8 @@ async function orchestrateMiosFantasyScan(
     collectDraftKingsSalaries(sport, contestDate, contestType, contestId),
   ]);
   const liveSlateSalaryRows = slateSalaryRows(slate);
-  const effectiveSalaryRows = salaryRows.length ? salaryRows : liveSlateSalaryRows;
+  const liveSlateHasMlbStarterSignals = sport === 'mlb' && liveSlateSalaryRows.some((row) => row.is_confirmed_starter);
+  const effectiveSalaryRows = liveSlateHasMlbStarterSignals || !salaryRows.length ? liveSlateSalaryRows : salaryRows;
   if (!effectiveSalaryRows.length) {
     throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
   }
