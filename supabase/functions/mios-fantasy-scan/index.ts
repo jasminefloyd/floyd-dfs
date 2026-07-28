@@ -701,6 +701,10 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       .map(([name, rows]) => [name, rows[0]]),
   );
   const usedSalaryRows = new Set<DraftKingsSalaryRow>();
+  const dkConfirmedNote = (player: Player, row: DraftKingsSalaryRow): string | undefined => {
+    if (sport !== 'mlb' || !row.is_confirmed_starter) return player.news_note;
+    return [player.news_note, 'DraftKings confirmed starter'].filter(Boolean).join(' | ');
+  };
 
   const matchedPlayers = players.map((player) => {
     const salaryRow = byPlayerId.get(player.id)
@@ -726,6 +730,11 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       projected_points: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
         ? salaryRow.projected_points
         : player.projected_points,
+      confirmed_starter: sport === 'mlb' && salaryRow.is_confirmed_starter ? true : player.confirmed_starter,
+      own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(normalizePosition(salaryRow.position, sport))
+        ? (salaryRow.is_confirmed_starter ? true : player.own_probable_starter)
+        : player.own_probable_starter,
+      news_note: dkConfirmedNote(player, salaryRow),
     };
   }).filter((player) => player.salary_source === 'draftkings_import');
 
@@ -755,6 +764,9 @@ function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): P
     injury_note: row.status && row.status !== 'None' ? `DraftKings status: ${row.status}` : undefined,
     projection_source: row.projected_points ? 'draftkings' : 'position_baseline',
     projected_points: projected,
+    confirmed_starter: sport === 'mlb' && row.is_confirmed_starter ? true : undefined,
+    own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(position) && row.is_confirmed_starter ? true : undefined,
+    news_note: sport === 'mlb' && row.is_confirmed_starter ? 'DraftKings confirmed starter' : undefined,
     last_5_stats: {
       avg_points: projected,
       avg_fantasy_pts: projected,
@@ -1937,6 +1949,7 @@ function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Pla
       .map((key) => context.batting_orders?.[team]?.[key])
       .find((order) => Number.isFinite(order) && order > 0);
     const isConfirmedStarter = playerKeys.some((key) => context.confirmed_starters?.[team]?.has(key));
+    const isDraftKingsConfirmedStarter = /\bDraftKings confirmed starter\b/i.test(player.news_note ?? '');
     const hasConfirmedTeamLineup = (context.confirmed_starters?.[team]?.size ?? 0) >= 8;
     let multiplier = isPitcher ? 2 - context.run_factor : context.run_factor;
     if (isPitcher && ownProbablePitcher && normalizeName(ownProbablePitcher) === normalizeName(player.name)) {
@@ -1964,15 +1977,15 @@ function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Pla
     return {
       ...player,
       confirmed_starter: isPitcher
-        ? (ownProbablePitcher && normalizeName(ownProbablePitcher) === normalizeName(player.name) ? true : player.confirmed_starter)
-        : hasConfirmedTeamLineup ? isConfirmedStarter : (isConfirmedStarter || player.confirmed_starter),
+        ? (ownProbablePitcher && normalizeName(ownProbablePitcher) === normalizeName(player.name) ? true : isDraftKingsConfirmedStarter || isConfirmedStarter)
+        : hasConfirmedTeamLineup ? isConfirmedStarter : (isConfirmedStarter || isDraftKingsConfirmedStarter),
       batting_order: !isPitcher && battingOrder ? battingOrder : undefined,
       run_factor: context.run_factor,
       opponent_team: opponent,
       opposing_probable_pitcher_id: opponentProbable?.id ?? player.opposing_probable_pitcher_id,
       opposing_probable_pitcher_name: opponentProbablePitcher ?? player.opposing_probable_pitcher_name,
       own_probable_starter: isPitcher
-        ? (ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : false)
+        ? (ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : isDraftKingsConfirmedStarter)
         : player.own_probable_starter,
       game_id: context.game_id || player.game_id,
       context_score: Number((multiplier - 1).toFixed(3)),

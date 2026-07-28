@@ -348,8 +348,8 @@ function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: stri
 }
 
 function hasConfirmedMlbBattingRole(player: LineupPlayerDraft): boolean {
-  return typeof player.batting_order === 'number' && player.batting_order > 0
-    && player.confirmed_starter === true;
+  if (player.confirmed_starter !== true) return false;
+  return true;
 }
 
 function uniqueTeams(players: LineupPlayerDraft[]): string[] {

@@ -1138,8 +1138,7 @@ function isPlayerEligibleForMlbLineupContext(player: LineupPlayerDraft, confirme
 }
 
 function hasBattingOrder(player: LineupPlayerDraft): boolean {
-  return typeof player.batting_order === 'number' && player.batting_order > 0
-    && player.confirmed_starter === true;
+  return player.confirmed_starter === true;
 }
 
 function gameContextTags(player: LineupPlayerDraft, sport: string, battingOrder?: number): string[] {
@@ -2191,7 +2190,7 @@ Deno.serve(async (req) => {
         ? [`${mlbConfirmedNonStarterExcludedCount} MLB hitter${mlbConfirmedNonStarterExcludedCount === 1 ? '' : 's'} excluded from lineup generation because confirmed batting orders show they are not starting.`]
         : []),
       ...(mlbUnconfirmedBatterExcludedCount
-        ? [`${mlbUnconfirmedBatterExcludedCount} MLB hitter${mlbUnconfirmedBatterExcludedCount === 1 ? '' : 's'} excluded from lineup generation because they do not have a confirmed batting-order slot.`]
+        ? [`${mlbUnconfirmedBatterExcludedCount} MLB hitter${mlbUnconfirmedBatterExcludedCount === 1 ? '' : 's'} excluded from lineup generation because starter context did not confirm them in the lineup.`]
         : []),
       ...(questionableIncludedCount
         ? [`${questionableIncludedCount} questionable player${questionableIncludedCount === 1 ? '' : 's'} included with discounted projections.`]
