@@ -264,6 +264,7 @@ const VALID_CONTEST_STRATEGIES = new Set(['cash', 'single_entry', 'small_field',
 const VALID_PAYOUT_SHAPES = new Set(['flat', 'top_heavy', 'winner_take_all', 'double_up']);
 const LINEUP_ELIGIBLE_INJURY_STATUSES = new Set(['active', 'probable', 'day_to_day', 'questionable']);
 const LINEUP_EXCLUDED_INJURY_STATUSES = new Set(['out', 'doubtful']);
+const PIOS_CODE_VERSION = 'mlb-provisional-hitters-20260728T2008';
 const DEFAULT_MONTE_CARLO_ITERATIONS = 650;
 const MIN_MONTE_CARLO_ITERATIONS = 250;
 const MAX_MONTE_CARLO_ITERATIONS = 1_000;
@@ -2232,6 +2233,7 @@ Deno.serve(async (req) => {
       lineup_mode: payload.lineupMode,
       construction_rules: constructionRules,
       generated_at: new Date().toISOString(),
+      code_version: PIOS_CODE_VERSION,
       data_warnings: dataWarnings,
     });
   } catch (error) {
