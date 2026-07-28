@@ -264,13 +264,13 @@ const VALID_CONTEST_STRATEGIES = new Set(['cash', 'single_entry', 'small_field',
 const VALID_PAYOUT_SHAPES = new Set(['flat', 'top_heavy', 'winner_take_all', 'double_up']);
 const LINEUP_ELIGIBLE_INJURY_STATUSES = new Set(['active', 'probable', 'day_to_day', 'questionable']);
 const LINEUP_EXCLUDED_INJURY_STATUSES = new Set(['out', 'doubtful']);
-const DEFAULT_MONTE_CARLO_ITERATIONS = 1_000;
-const MIN_MONTE_CARLO_ITERATIONS = 750;
-const MAX_MONTE_CARLO_ITERATIONS = 2_000;
+const DEFAULT_MONTE_CARLO_ITERATIONS = 650;
+const MIN_MONTE_CARLO_ITERATIONS = 250;
+const MAX_MONTE_CARLO_ITERATIONS = 1_000;
 const MAX_CANDIDATE_LINEUPS = 80;
 const SIMULATION_LINEUP_CAP = 40;
 const DEFAULT_FIELD_LINEUP_CAP = 240;
-const MAX_FIELD_LINEUP_CAP = 750;
+const MAX_FIELD_LINEUP_CAP = 360;
 const EXACT_SOLVER_DEADLINE_MS = 1_200;
 const GENERATION_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const GENERATION_RATE_LIMIT_MAX = 12;
@@ -734,7 +734,7 @@ function generateLineups(
   const simulationCandidates = ensureLineupInSimulationPool(
     simulationSource
     .sort((a, b) => preSimulationLineupScore(b, rules) - preSimulationLineupScore(a, rules))
-      .slice(0, simulationLineupCap(rules)),
+      .slice(0, simulationLineupCap(rules, sport, contestType)),
     simulationSource,
     exactOptimalStatus?.signature,
   );
@@ -855,8 +855,11 @@ function ensureLineupInSimulationPool(
   return [...pool.slice(0, Math.max(0, SIMULATION_LINEUP_CAP - 1)), required];
 }
 
-function simulationLineupCap(rules: LineupConstructionRules): number {
-  return Math.min(SIMULATION_LINEUP_CAP, Math.max(16, rules.entryCount * 8));
+function simulationLineupCap(rules: LineupConstructionRules, sport: string, contestType: string): number {
+  const baseCap = sport === 'mlb' && contestType === 'classic'
+    ? Math.max(10, rules.entryCount * 5)
+    : Math.max(12, rules.entryCount * 6);
+  return Math.min(SIMULATION_LINEUP_CAP, baseCap);
 }
 
 function enforceExactOptimalTop(
@@ -1742,6 +1745,22 @@ function normalizedFieldSimulationSize(value: unknown, fieldSize: number): numbe
   return Math.round(clampNumber(value, 120, MAX_FIELD_LINEUP_CAP, Math.min(Math.max(fieldSize, 120), DEFAULT_FIELD_LINEUP_CAP)));
 }
 
+function resourceBudgetedSimulationIterations(payload: PiosRequest, entryCount: number): number {
+  const requested = normalizedSimulationIterations(payload.simulationIterations);
+  if (payload.sport === 'mlb' && payload.contestType === 'classic') {
+    return Math.min(requested, entryCount > 1 ? 500 : 650);
+  }
+  return Math.min(requested, entryCount > 1 ? 750 : MAX_MONTE_CARLO_ITERATIONS);
+}
+
+function resourceBudgetedFieldSimulationSize(payload: PiosRequest, fieldSize: number, entryCount: number): number {
+  const requested = normalizedFieldSimulationSize(payload.fieldSimulationSize, fieldSize);
+  if (payload.sport === 'mlb' && payload.contestType === 'classic') {
+    return Math.min(requested, entryCount > 1 ? 180 : 220);
+  }
+  return Math.min(requested, entryCount > 1 ? 260 : MAX_FIELD_LINEUP_CAP);
+}
+
 function responseSimulationIterations(lineupMode: string, rules: LineupConstructionRules): number {
   return lineupMode === 'max_fpts' ? 0 : rules.simulationIterations;
 }
@@ -1781,8 +1800,8 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
   const forceUniqueCaptains = Boolean(payload.forceUniqueCaptains ?? entryCount <= 5);
   const minSalaryUsed = Math.round(clampNumber(payload.minSalaryUsed, 40_000, 50_000, 49_000));
   const maxDuplication = Math.round(clampNumber(payload.maxDuplication, 1, 500, payoutShape === 'winner_take_all' ? 5 : 25));
-  const simulationIterations = normalizedSimulationIterations(payload.simulationIterations);
-  const fieldSimulationSize = Math.min(normalizedFieldSimulationSize(payload.fieldSimulationSize, fieldSize), fieldSize, MAX_FIELD_LINEUP_CAP);
+  const simulationIterations = resourceBudgetedSimulationIterations(payload, entryCount);
+  const fieldSimulationSize = Math.min(resourceBudgetedFieldSimulationSize(payload, fieldSize, entryCount), fieldSize, MAX_FIELD_LINEUP_CAP);
   const showDiagnostics = Boolean(payload.showDiagnostics ?? false);
   if ((payload.lineupMode ?? defaultLineupMode(payoutShape)) === 'max_fpts') {
     return {

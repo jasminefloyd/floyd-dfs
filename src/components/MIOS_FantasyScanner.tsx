@@ -581,7 +581,14 @@ function deriveScanOptions(input: DerivedScanInput) {
           ? 0.6
           : 0.5;
   const contestStrategy = deriveContestStrategy(input.fieldSize, input.payoutShape, maxEntriesPerUser, lineupMode);
-  const simulationIterations = input.fieldSize >= 10_000 ? 2_000 : DEFAULT_SCAN_OPTIONS.simulationIterations;
+  const simulationIterations = input.sport === 'mlb' && input.contestType === 'classic'
+    ? input.entryCount > 1 ? 500 : 650
+    : input.fieldSize >= 10_000
+      ? 750
+      : DEFAULT_SCAN_OPTIONS.simulationIterations;
+  const fieldSimulationSize = input.sport === 'mlb' && input.contestType === 'classic'
+    ? input.entryCount > 1 ? 180 : 220
+    : Math.min(360, Math.max(120, input.fieldSize));
 
   return {
     riskTolerance: DEFAULT_SCAN_OPTIONS.riskTolerance,
@@ -599,7 +606,7 @@ function deriveScanOptions(input: DerivedScanInput) {
     minSalaryUsed: input.contestType === 'showdown' ? DEFAULT_SCAN_OPTIONS.minSalaryUsed : 0,
     maxDuplication: input.payoutShape === 'winner_take_all' ? 5 : input.payoutShape === 'double_up' ? 500 : DEFAULT_SCAN_OPTIONS.maxDuplication,
     simulationIterations,
-    fieldSimulationSize: Math.min(750, Math.max(120, input.fieldSize)),
+    fieldSimulationSize,
   };
 }
 
