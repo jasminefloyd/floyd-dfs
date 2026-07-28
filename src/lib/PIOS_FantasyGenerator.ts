@@ -342,9 +342,14 @@ function validateLineup(lineup: DraftLineup, contestType: string): boolean {
 
 function isPlayerEligibleForConfirmedRole(player: LineupPlayerDraft, sport: string): boolean {
   if (sport !== 'mlb') return true;
-  if (/^(P|SP|RP)$/.test(String(player.position ?? '').toUpperCase())) return true;
-  if (typeof player.confirmed_starter === 'boolean') return player.confirmed_starter;
-  return !player.news_note?.includes('not in confirmed lineup');
+  if (/^(P|SP|RP)$/.test(String(player.position ?? '').toUpperCase())) return player.own_probable_starter === true;
+  if (typeof player.confirmed_starter === 'boolean' && !player.confirmed_starter) return false;
+  return hasConfirmedMlbBattingRole(player);
+}
+
+function hasConfirmedMlbBattingRole(player: LineupPlayerDraft): boolean {
+  if (typeof player.batting_order === 'number' && player.batting_order > 0) return true;
+  return player.news_note?.includes('batting') ?? false;
 }
 
 function uniqueTeams(players: LineupPlayerDraft[]): string[] {
