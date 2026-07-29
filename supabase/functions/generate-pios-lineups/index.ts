@@ -990,20 +990,21 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
       .filter((player) => player.salary <= remainingSalary)
       .sort((a, b) => adjustedProjection(b) - adjustedProjection(a));
 
+    const captainKeepCount = maximizePoints
+      ? Math.max(1, rules.entryCount)
+      : Math.max(12, Math.ceil(keepCount / Math.max(captains.length, 1)));
+
     function search(startIndex: number, selected: LineupPlayerDraft[], salaryUsed: number) {
       const needed = rosterSize - 1 - selected.length;
       if (needed < 0) return;
       if (fieldCandidates.length - startIndex < needed) return;
 
       const selectedProjection = selected.reduce((sum, player) => sum + adjustedProjection(player), 0);
-      const captainKeepCount = maximizePoints
-        ? keepCount
-        : Math.max(12, Math.ceil(keepCount / Math.max(captains.length, 1)));
       const worstKeptProjection = captainLineups.length >= captainKeepCount
         ? captainLineups[captainLineups.length - 1].projected_points
         : -Infinity;
       const upperBound = captainWithMultiplier.projected_points! + selectedProjection + bestRemainingProjection(fieldCandidates, startIndex, needed);
-      if (!maximizePoints && upperBound < worstKeptProjection) return;
+      if (upperBound < worstKeptProjection) return;
 
       if (selected.length === rosterSize - 1) {
         const lineupPlayers = [
