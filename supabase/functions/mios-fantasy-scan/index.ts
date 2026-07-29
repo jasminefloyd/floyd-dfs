@@ -2,6 +2,7 @@ import { NEWS_INJURY_PREFILTER_PATTERN, injuryContextNear, normalizeInjuryStatus
 import { dkFantasyPoints, type DkSport } from '../_shared/dkScoring.ts';
 import { mapWithConcurrency } from './enrichment.ts';
 import { computeOpportunityProjection } from './opportunity.ts';
+import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
 
 type SourceStatus = Record<string, 'ok' | 'partial' | 'unavailable'>;
 
@@ -25,6 +26,7 @@ interface Player {
   injury_note?: string;
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
+  model_adjusted_fantasy_pts?: number;
   ownership_projection?: number;
   prop_projection?: number;
   implied_total?: number;
@@ -144,17 +146,22 @@ interface AuthResult {
 
 interface DraftKingsSalaryRow {
   player_id: string | null;
+  contest_id?: string | null;
   player_name: string;
   team: string | null;
   position: string;
   salary: number;
   game_id?: string | null;
+  dk_fppg?: number;
   projected_points?: number;
   status?: string | null;
   is_disabled?: boolean;
   is_confirmed_starter?: boolean;
   image_url?: string | null;
   team_logo_url?: string | null;
+  updated_at?: string | null;
+  imported_at?: string | null;
+  source?: 'live_slate' | 'stored_db';
 }
 
 interface CachedSentimentRow {
@@ -178,6 +185,7 @@ interface ProjectionCalibrationV2Row {
   sport: string;
   position_group: string;
   salary_tier: string;
+  projection_source?: string | null;
   sample_size: number;
   avg_error: number | null;
   avg_absolute_error: number | null;
@@ -531,10 +539,16 @@ function normalizeOwnershipProjection(value: unknown): number | undefined {
   return parsed > 1 ? Math.min(parsed / 100, 1) : Math.min(parsed, 1);
 }
 
-async function collectOwnershipProjections(sport: string, contestDate: string): Promise<OwnershipProjectionRow[]> {
-  const rows = await callSupabaseRpc<OwnershipProjectionRow[]>('fantasy_ai_get_ownership_projections', {
+async function collectOwnershipProjections(sport: string, contestDate: string, contestType?: string, contestId?: string, slate?: DraftKingsSlate): Promise<OwnershipProjectionRow[]> {
+  const draftGroupId = String(slate?.data?.draft_group_id ?? slate?.external_contest_id ?? '').trim() || null;
+  const gameId = slate?.game_ids?.length === 1 ? slate.game_ids[0] : null;
+  const rows = await callSupabaseRpc<OwnershipProjectionRow[]>('fantasy_ai_get_ownership_projections_v2', {
     p_sport: sport,
     p_contest_date: contestDate,
+    p_contest_type: contestType ?? null,
+    p_contest_id: contestId ?? null,
+    p_draft_group_id: draftGroupId,
+    p_game_id: gameId,
   }, { allowMissingServiceRole: true }).catch(() => null);
 
   return Array.isArray(rows) ? rows : [];
@@ -649,7 +663,7 @@ async function collectDraftKingsSalaries(sport: string, contestDate: string, con
     console.error('DraftKings salary lookup failed:', error);
     return null;
   });
-  return rows ?? [];
+  return (rows ?? []).map((row) => ({ ...row, source: 'stored_db' as const }));
 }
 
 function slateSalaryRows(slate?: DraftKingsSlate): DraftKingsSalaryRow[] {
@@ -659,19 +673,58 @@ function slateSalaryRows(slate?: DraftKingsSlate): DraftKingsSalaryRow[] {
   return salaries
     .map((row: any) => ({
       player_id: row.player_id ? String(row.player_id) : null,
+      contest_id: slate?.contest_id ?? null,
       player_name: String(row.player_name ?? ''),
       team: row.team ? String(row.team) : null,
       position: String(row.position ?? ''),
       salary: Number(row.salary),
       game_id: row.game_id ? String(row.game_id) : null,
-      projected_points: Number.isFinite(Number(row.projected_points)) ? Number(row.projected_points) : undefined,
+      dk_fppg: Number.isFinite(Number(row.dk_fppg ?? row.projected_points)) ? Number(row.dk_fppg ?? row.projected_points) : undefined,
       status: row.status ? String(row.status) : null,
       is_disabled: Boolean(row.is_disabled),
       is_confirmed_starter: Boolean(row.is_confirmed_starter),
       image_url: row.image_url ? String(row.image_url) : null,
       team_logo_url: row.team_logo_url ? String(row.team_logo_url) : null,
+      updated_at: slate?.updated_at ?? null,
+      source: 'live_slate',
     }))
     .filter((row) => row.player_name && row.position && Number.isFinite(row.salary) && row.salary > 0);
+}
+
+function salaryRowKey(row: DraftKingsSalaryRow): string {
+  return `${row.player_id ?? normalizeName(row.player_name)}:${String(row.position ?? '').toUpperCase()}`;
+}
+
+function salarySourceCoverage(rows: DraftKingsSalaryRow[]): number {
+  return new Set(rows.map(salaryRowKey)).size;
+}
+
+function freshestSalaryTimestamp(rows: DraftKingsSalaryRow[]): number {
+  return rows.reduce((latest, row) => {
+    const timestamp = Date.parse(String(row.updated_at ?? row.imported_at ?? ''));
+    return Number.isFinite(timestamp) ? Math.max(latest, timestamp) : latest;
+  }, 0);
+}
+
+function chooseSalarySource(liveRows: DraftKingsSalaryRow[], storedRows: DraftKingsSalaryRow[]): {
+  rows: DraftKingsSalaryRow[];
+  source: 'live_slate' | 'stored_db' | 'none';
+  reason: string;
+} {
+  if (!liveRows.length && !storedRows.length) return { rows: [], source: 'none', reason: 'no salary rows available' };
+  if (!storedRows.length) return { rows: liveRows, source: 'live_slate', reason: 'stored source was empty' };
+  if (!liveRows.length) return { rows: storedRows, source: 'stored_db', reason: 'live slate source was empty' };
+
+  const liveCoverage = salarySourceCoverage(liveRows);
+  const storedCoverage = salarySourceCoverage(storedRows);
+  const liveFreshness = freshestSalaryTimestamp(liveRows);
+  const storedFreshness = freshestSalaryTimestamp(storedRows);
+  const liveWins = liveCoverage > storedCoverage
+    || (liveCoverage === storedCoverage && liveFreshness >= storedFreshness)
+    || (liveFreshness > storedFreshness && liveFreshness > 0);
+  return liveWins
+    ? { rows: liveRows, source: 'live_slate', reason: `coverage ${liveCoverage} vs ${storedCoverage}; freshness ${liveFreshness || 'unknown'} vs ${storedFreshness || 'unknown'}` }
+    : { rows: storedRows, source: 'stored_db', reason: `coverage ${storedCoverage} vs ${liveCoverage}; freshness ${storedFreshness || 'unknown'} vs ${liveFreshness || 'unknown'}` };
 }
 
 function draftKingsStatusToInjuryStatus(row: DraftKingsSalaryRow): InjuryStatus {
@@ -724,12 +777,7 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       image_url: player.image_url ?? salaryRow.image_url ?? undefined,
       team_logo_url: player.team_logo_url ?? salaryRow.team_logo_url ?? teamLogoFallbackUrl(sport, salaryRow.team ?? undefined),
       game_id: player.game_id ?? salaryRow.game_id ?? undefined,
-      projection_source: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
-        ? 'draftkings'
-        : player.projection_source,
-      projected_points: typeof salaryRow.projected_points === 'number' && salaryRow.projected_points > 0
-        ? salaryRow.projected_points
-        : player.projected_points,
+      projected_points: player.projected_points,
       confirmed_starter: sport === 'mlb' && salaryRow.is_confirmed_starter ? true : player.confirmed_starter,
       own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(normalizePosition(salaryRow.position, sport))
         ? (salaryRow.is_confirmed_starter ? true : player.own_probable_starter)
@@ -747,9 +795,7 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
 
 function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): Player {
   const position = normalizePosition(row.position, sport);
-  const projected = typeof row.projected_points === 'number' && row.projected_points > 0
-    ? row.projected_points
-    : baselineProjection(position, sport);
+  const projected = baselineProjection(position, sport);
 
   return {
     id: row.player_id ? `dk:${row.player_id}` : `dk:${normalizeName(row.player_name)}:${position}`,
@@ -762,7 +808,7 @@ function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): P
     salary_source: 'draftkings_import',
     injury_status: draftKingsStatusToInjuryStatus(row),
     injury_note: row.status && row.status !== 'None' ? `DraftKings status: ${row.status}` : undefined,
-    projection_source: row.projected_points ? 'draftkings' : 'position_baseline',
+    projection_source: 'position_baseline',
     projected_points: projected,
     confirmed_starter: sport === 'mlb' && row.is_confirmed_starter ? true : undefined,
     own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(position) && row.is_confirmed_starter ? true : undefined,
@@ -771,7 +817,7 @@ function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): P
       avg_points: projected,
       avg_fantasy_pts: projected,
       trend: 'stable',
-      confidence: row.projected_points ? 0.62 : 0.45,
+      confidence: 0.45,
       is_synthetic: true,
       games: [],
     },
@@ -1574,10 +1620,7 @@ function applyPropProjections(players: Player[], propCollection: PlayerPropColle
       projection_source: 'props_blend',
       prop_projection: propProjection,
       projected_points: blendedProjection,
-      last_5_stats: player.last_5_stats ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: blendedProjection,
-      } : player.last_5_stats,
+      model_adjusted_fantasy_pts: blendedProjection,
     };
   });
 
@@ -1693,12 +1736,9 @@ function applyConfirmedLineupContext(players: Player[], lineups: ConfirmedLineup
       injury_status: injuryStatus,
       injury_note: injuryChanged ? `Rotowire injury tag: ${row?.injury_tag}` : player.injury_note,
       projected_points: projectedPoints,
+      model_adjusted_fantasy_pts: projectedPoints,
       news_note: noteParts.length ? appendNewsNote(player.news_note, noteParts.join('; ')) : player.news_note,
       context_score: Number(((player.context_score ?? 0) + (multiplier - 1)).toFixed(3)),
-      last_5_stats: player.last_5_stats && typeof projectedPoints === 'number' ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: projectedPoints,
-      } : player.last_5_stats,
     };
   });
 
@@ -1990,12 +2030,9 @@ function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Pla
       game_id: context.game_id || player.game_id,
       context_score: Number((multiplier - 1).toFixed(3)),
       projected_points: projectedPoints,
+      model_adjusted_fantasy_pts: projectedPoints,
       news_score: Number(((player.news_score ?? 0) + (multiplier - 1) * 3).toFixed(2)),
       news_note: [player.news_note, noteParts.join('; ')].filter(Boolean).join(' | '),
-      last_5_stats: player.last_5_stats ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: projectedPoints,
-      } : player.last_5_stats,
     };
   });
 }
@@ -2113,12 +2150,9 @@ function applyVegasContext(
       opponent_team: team === context.home_team ? context.away_team : team === context.away_team ? context.home_team : player.opponent_team,
       game_id: context.game_id || player.game_id,
       projected_points: projectedPoints,
+      model_adjusted_fantasy_pts: projectedPoints,
       context_score: Number(((player.context_score ?? 0) + (multiplier - 1)).toFixed(3)),
       news_note: appendNewsNote(player.news_note, [vegasNote, blowoutNote].filter(Boolean).join('; ')),
-      last_5_stats: player.last_5_stats && typeof projectedPoints === 'number' ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: projectedPoints,
-      } : player.last_5_stats,
     };
   });
 }
@@ -2325,11 +2359,11 @@ function applyStatcastQuality(players: Player[], qualityByKey: Map<string, Statc
       ...player,
       context_score: Number(((player.context_score ?? 0) + quality.quality_score).toFixed(3)),
       projected_points: projectedPoints,
+      model_adjusted_fantasy_pts: projectedPoints,
       news_score: Number(((player.news_score ?? 0) + quality.quality_score * 4).toFixed(2)),
       news_note: [player.news_note, quality.note].filter(Boolean).join(' | '),
       last_5_stats: player.last_5_stats ? {
         ...player.last_5_stats,
-        avg_fantasy_pts: projectedPoints,
         confidence: Math.min(Math.max((player.last_5_stats.confidence ?? 0.6) + Math.min(Math.abs(quality.quality_score), 0.04), 0.2), 0.95),
       } : player.last_5_stats,
     };
@@ -2919,7 +2953,7 @@ async function cacheLast5Stats(playerId: string, sport: string, stats: any) {
 async function collectLast5Stats(player: Player, sport: string): Promise<any> {
   const cached = await getCachedLast5Stats(player.id, sport);
   if (cached?.games_data?.length) return cached;
-  if (sport === 'mlb') return null;
+  if (sport === 'mlb') return await collectMlbStatsApiLast5Stats(player);
   if (!player.espn_id) {
     return await collectBalldontlieLast5Stats(player, sport);
   }
@@ -3170,8 +3204,8 @@ function prioritizedEnrichmentRoster(players: Player[], sport: string): Enrichme
   // Bounded enrichment request budget: duration ~= request count / concurrency *
   // provider latency. MLB last-5 enrichment can require both a player search and
   // a game-log fetch, so keep its live budget deliberately smaller.
-  const cap = sport === 'mlb' ? 0 : 80;
-  const studCap = sport === 'mlb' ? 0 : 30;
+  const cap = sport === 'mlb' ? 40 : 80;
+  const studCap = sport === 'mlb' ? 16 : 30;
   const bucketByPlayerId = new Map<string, EnrichmentBucket>();
   const selected: Player[] = [];
   const counts: Record<EnrichmentBucket, number> = { stud: 0, value: 0, mid: 0, other: 0 };
@@ -3287,16 +3321,18 @@ function applyProjectionCalibration(players: Player[], calibration: ProjectionCa
     const rawMultiplier = Number(cell.bias_multiplier ?? 1);
     if (cellSampleSize < 30 || !Number.isFinite(rawMultiplier)) continue;
     const multiplier = Math.min(Math.max(rawMultiplier, 0.85), 1.18);
-    activeCells.set(`${cell.position_group}:${cell.salary_tier}`, multiplier);
+    activeCells.set(`${cell.position_group}:${cell.salary_tier}:${cell.projection_source ?? 'unknown'}`, multiplier);
   }
 
   let appliedPlayerCount = 0;
   let v2AppliedPlayerCount = 0;
   const calibratedPlayers = players.map((player) => {
     if (!player.projected_points || player.projection_source === 'position_baseline') return player;
-    const cellKey = `${calibrationPositionGroup(player, sport)}:${calibrationSalaryTier(player)}`;
+    const projectionSource = player.projection_source ?? 'unknown';
+    const cellKey = `${calibrationPositionGroup(player, sport)}:${calibrationSalaryTier(player)}:${projectionSource}`;
     const cellMultiplier = activeCells.get(cellKey);
-    const multiplier = cellMultiplier ?? sportWideMultiplier;
+    if (cellMultiplier === undefined) return player;
+    const multiplier = cellMultiplier;
     if (Math.abs(multiplier - 1) < 0.015) return player;
     appliedPlayerCount += 1;
     if (cellMultiplier !== undefined) v2AppliedPlayerCount += 1;
@@ -3305,10 +3341,7 @@ function applyProjectionCalibration(players: Player[], calibration: ProjectionCa
       ...player,
       projection_source: 'calibrated',
       projected_points: projectedPoints,
-      last_5_stats: player.last_5_stats ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: projectedPoints,
-      } : player.last_5_stats,
+      model_adjusted_fantasy_pts: projectedPoints,
     };
   });
 
@@ -3402,11 +3435,11 @@ function applyPlayerNewsSignals(player: Player, newsItems: any[], sentiment: any
     injury_status: injuryFromNews ?? player.injury_status,
     injury_note: injuryFromNews ? `News signal: ${injuryFromNews}` : player.injury_note,
     projected_points: projectedPoints,
+    model_adjusted_fantasy_pts: projectedPoints,
     news_score: Number(((positiveNews ? 0.5 : 0) - (negativeNews ? 0.75 : 0) + sentimentScore * 0.1).toFixed(2)),
     news_note: noteParts.join('; ') || undefined,
     last_5_stats: player.last_5_stats ? {
       ...player.last_5_stats,
-      avg_fantasy_pts: projectedPoints ?? player.last_5_stats.avg_fantasy_pts,
       confidence,
     } : player.last_5_stats,
   };
@@ -3435,15 +3468,15 @@ async function orchestrateMiosFantasyScan(
     collectDraftKingsSalaries(sport, contestDate, contestType, contestId),
   ]);
   const liveSlateSalaryRows = slateSalaryRows(slate);
-  const liveSlateHasMlbStarterSignals = sport === 'mlb' && liveSlateSalaryRows.some((row) => row.is_confirmed_starter);
-  const effectiveSalaryRows = liveSlateHasMlbStarterSignals || !salaryRows.length ? liveSlateSalaryRows : salaryRows;
+  const salarySelection = chooseSalarySource(liveSlateSalaryRows, salaryRows);
+  const effectiveSalaryRows = salarySelection.rows;
   if (!effectiveSalaryRows.length) {
     throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
   }
   const [fallbackOddsContext, rawMlbFreeContexts, statcastQuality, confirmedLineups] = await Promise.all([
     hasFreeOddsContext(slate) ? Promise.resolve([]) : collectOddsApiContext(sport, slate),
     sport === 'mlb' ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
-    Promise.resolve(new Map<string, StatcastQuality>()),
+    sport === 'mlb' ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
     ['nba', 'wnba', 'nfl', 'mlb'].includes(sport) ? collectConfirmedLineups(sport, contestDate) : Promise.resolve([]),
   ]);
   const mlbFreeContexts = sport === 'mlb' ? mergeRotowireMlbLineups(rawMlbFreeContexts, confirmedLineups) : rawMlbFreeContexts;
@@ -3451,6 +3484,7 @@ async function orchestrateMiosFantasyScan(
   sourceStatus.espn_news = injuries.length ? 'partial' : 'unavailable';
   sourceStatus.draftkings_salaries = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.draftkings_salary_source = effectiveSalaryRows.length ? 'ok' : 'unavailable';
+  warnings.push(`DraftKings salary source: ${salarySelection.source} (${salarySelection.reason}).`);
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = vegasContext.some((context) => context.over_under || context.spread) ? 'ok' : 'unavailable';
   if (sport === 'mlb') {
@@ -3463,6 +3497,7 @@ async function orchestrateMiosFantasyScan(
   }
   if (['nba', 'wnba', 'nfl', 'mlb'].includes(sport)) {
     sourceStatus.rotowire_confirmed_lineups = confirmedLineups.length ? 'ok' : 'unavailable';
+    if (!confirmedLineups.length) warnings.push('Confirmed-lineup extraction returned zero rows; starter availability was not applied from Rotowire.');
   }
 
   let playerRoster = filterRosterBySlateTeams(applyDraftKingsSalaries(dedupePlayers(roster), effectiveSalaryRows, sport), slate);
@@ -3473,7 +3508,7 @@ async function orchestrateMiosFantasyScan(
   if (playerRoster.length < effectiveSalaryRows.length) {
     warnings.push('Some DraftKings salary rows could not be matched to roster metadata and were omitted.');
   }
-  const ownershipRows = await collectOwnershipProjections(sport, contestDate);
+  const ownershipRows = await collectOwnershipProjections(sport, contestDate, contestType, contestId, slate);
   const ownershipApplied = applyOwnershipProjections(playerRoster, ownershipRows);
   playerRoster = ownershipApplied.players;
   const ownershipCoverage = playerRoster.length ? ownershipApplied.matchedPlayers / playerRoster.length : 0;
@@ -3578,20 +3613,20 @@ async function orchestrateMiosFantasyScan(
     playerRoster = applyMlbFreeContext(playerRoster, mlbFreeContexts);
     playerRoster = applyStatcastQuality(playerRoster, statcastQuality);
   }
-  const projectedRows = effectiveSalaryRows.filter((row) => typeof row.projected_points === 'number' && row.projected_points > 0).length;
+  const dkFppgRows = effectiveSalaryRows.filter((row) => typeof row.dk_fppg === 'number' && row.dk_fppg > 0).length;
   const calibration = await getProjectionCalibration(sport);
   const calibrated = applyProjectionCalibration(playerRoster, calibration, sport);
   playerRoster = calibrated.players;
   sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
-  sourceStatus.projections = projectedRows > 0 ? 'ok' : sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
+  sourceStatus.projections = playerRoster.some((player) => typeof player.projected_points === 'number' && player.projected_points > 0)
+    ? 'ok'
+    : sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
   sourceStatus.projection_calibration = calibrated.applied ? 'ok' : 'unavailable';
   sourceStatus.reddit_sentiment = statAndSentiment.some((item) => item.sentiment?.source_status === 'ok') ? 'partial' : 'unavailable';
   sourceStatus.player_news = playerRoster.some((player) => player.news_note) ? 'partial' : 'unavailable';
 
-  if (projectedRows === 0) {
-    warnings.push('DraftKings salary rows did not include projected points; projections were built from last-5 stats and position baselines.');
-  } else if (projectedRows < effectiveSalaryRows.length * 0.6) {
-    warnings.push(`Only ${projectedRows} of ${effectiveSalaryRows.length} DraftKings salary rows included projected points; remaining players used last-5 or baseline projections.`);
+  if (dkFppgRows) {
+    warnings.push(`DraftKings supplied historical FPPG for ${dkFppgRows} salary row${dkFppgRows === 1 ? '' : 's'}; it was retained as a feature and excluded from the forward projection.`);
   }
   if (calibrated.applied) {
     warnings.push(`Projection calibration applied to ${calibrated.appliedPlayerCount} player${calibrated.appliedPlayerCount === 1 ? '' : 's'} using ${calibrated.activeCellCount} active v2 cell${calibrated.activeCellCount === 1 ? '' : 's'} (${calibrated.v2AppliedPlayerCount} cell-level, ${calibrated.appliedPlayerCount - calibrated.v2AppliedPlayerCount} sport-wide fallback from ${calibration.sportWide?.sample_size ?? 0} samples at ${calibrated.sportWideMultiplier.toFixed(2)}x).`);
@@ -3599,9 +3634,7 @@ async function orchestrateMiosFantasyScan(
     warnings.push(`Projection calibration is not active yet; ${calibrated.activeCellCount} v2 cell${calibrated.activeCellCount === 1 ? '' : 's'} met the sample threshold, but no eligible non-baseline projection moved materially. Add actual results after slates to measure and correct projection bias.`);
   }
   if (sourceStatus.espn_last5 === 'unavailable') {
-    warnings.push(sport === 'mlb'
-      ? 'MLB last-5 game-log enrichment is skipped during live edge scans to stay within worker compute limits; using DraftKings projections and free game context.'
-      : 'Verified last-5 game stats are unavailable; using position baseline projections.');
+    warnings.push('Verified last-5 game stats were unavailable for the selected roster; projections used available modeled inputs and position baselines.');
   }
   if (sourceStatus.reddit_sentiment === 'unavailable') {
     warnings.push('Reddit public RSS signals were unavailable and no cached sentiment was found; sentiment score is neutral.');
@@ -3622,7 +3655,7 @@ async function orchestrateMiosFantasyScan(
       const matchedStatcastPlayers = playerRoster.filter((player) => player.news_note?.includes('Statcast')).length;
       warnings.push(`Applied free Baseball Savant Statcast quality signals to ${matchedStatcastPlayers} slate player${matchedStatcastPlayers === 1 ? '' : 's'}.`);
     } else {
-      warnings.push('Baseball Savant Statcast quality signals are skipped during live edge scans to stay within worker compute limits.');
+      warnings.push('Baseball Savant Statcast quality signals were unavailable for the selected roster.');
     }
   }
 
@@ -3746,7 +3779,7 @@ Deno.serve(async (req) => {
     return jsonResponse(persistedManifest);
   } catch (error) {
     const cached = manifestCache.get(cacheKey);
-    if (cached) {
+    if (cached && isManifestCacheFresh(cached.cachedAt)) {
       return jsonResponse({
         ...cached.manifest,
         data_warnings: [
@@ -3756,6 +3789,7 @@ Deno.serve(async (req) => {
         source_status: { ...cached.manifest.source_status, scan_cache: 'partial' },
       });
     }
+    if (cached) manifestCache.delete(cacheKey);
 
     return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
   }

@@ -10,6 +10,10 @@ type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb';
 interface ScrapeRequest {
   sport?: Sport;
   contestDate?: string;
+  contestType?: string;
+  contestId?: string;
+  draftGroupId?: string;
+  gameId?: string;
 }
 
 interface SourceAttempt {
@@ -192,10 +196,14 @@ Deno.serve(async (req) => {
       });
     }
 
-    const upserted = await callSupabaseRpc<number>('fantasy_ai_upsert_ownership_projections', {
+    const upserted = await callSupabaseRpc<number>('fantasy_ai_upsert_ownership_projections_v2', {
       p_sport: sport,
       p_contest_date: contestDate,
       p_source: selected.source,
+      p_contest_type: body.contestType ?? null,
+      p_contest_id: body.contestId ?? null,
+      p_draft_group_id: body.draftGroupId ?? null,
+      p_game_id: body.gameId ?? null,
       p_rows: selected.rows,
     });
 

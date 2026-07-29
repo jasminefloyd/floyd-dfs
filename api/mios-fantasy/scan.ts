@@ -7,6 +7,7 @@ import { collectSleeperProps } from './sleeper-props.js';
 import { collectF1Stats } from './f1-stats.js';
 import { limitedFetch } from './rate-limiter.js';
 import { validateApiAuth } from './auth.js';
+import { isManifestCacheFresh } from '../../supabase/functions/_shared/cachePolicy.ts';
 
 type SourceStatus = MIOS_FantasyManifest['source_status'];
 type CachedManifest = { manifest: MIOS_FantasyManifest; cachedAt: number };
@@ -291,7 +292,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).json(manifest);
   } catch (error) {
     const cached = manifestCache.get(cacheKey);
-    if (cached) {
+    if (cached && isManifestCacheFresh(cached.cachedAt)) {
       res.status(200).json({
         ...cached.manifest,
         data_warnings: [
@@ -305,6 +306,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
       return;
     }
+    if (cached) manifestCache.delete(cacheKey);
 
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }

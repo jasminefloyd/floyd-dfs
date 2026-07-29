@@ -82,6 +82,7 @@ export default function ScanPage() {
             forceUniqueCaptains: params.forceUniqueCaptains,
             minSalaryUsed: params.minSalaryUsed,
             maxDuplication: params.maxDuplication,
+            maxSharedPlayers: params.maxSharedPlayers,
             simulationIterations: params.simulationIterations,
             fieldSimulationSize: params.fieldSimulationSize,
             showDiagnostics: params.showDiagnostics

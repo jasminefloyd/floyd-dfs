@@ -4,6 +4,7 @@ import {
   randomNormal,
   sampleLognormalOutcome,
   scoreIndexedEntries,
+  scaleFinishRank,
   type SimPlayer,
   type SimRosterSlot,
 } from '../simulation.ts';
@@ -109,4 +110,28 @@ Deno.test('showdown captain multiplier makes same players score differently', ()
 
   assert(firstCaptain !== secondCaptain, 'different captains should produce different simulated lineup scores');
   assert(firstCaptain > secondCaptain, 'higher-outcome captain should score more with the same six players');
+});
+
+Deno.test('simulated finish ranks scale to the real contest field', () => {
+  assert(scaleFinishRank(1, 360, 100_000) === 1, 'simulated first place must remain first place');
+  assert(scaleFinishRank(180, 360, 100_000) >= 49_000 && scaleFinishRank(180, 360, 100_000) <= 51_000, 'middle rank should map to the real-field midpoint');
+  assert(scaleFinishRank(360, 360, 100_000) === 100_000, 'simulated last place must map to real last place');
+});
+
+Deno.test('simulated Showdown field obeys two-team legality without a salary floor', () => {
+  const roster: SimPlayer[] = Array.from({ length: 6 }, (_, index) => ({
+    player_id: `showdown_${index}`,
+    name: `Showdown ${index}`,
+    team: index < 3 ? 'AAA' : 'BBB',
+    position: index === 0 ? 'QB' : 'WR',
+    salary: 4_000,
+    projected_points: 10,
+    ownership_projection: 0.15,
+  }));
+  const field = generateFieldLineups(roster, 'nfl', 'showdown', 25, {});
+  assert(field.length === 25, `expected complete low-salary field, got ${field.length}`);
+  for (const lineup of field) {
+    assert(new Set(lineup.players.map((player) => player.playerId)).size === 6, 'Showdown field lineups must have six unique players');
+    assert(new Set(lineup.players.map((player) => roster.find((candidate) => candidate.player_id === player.playerId)?.team)).size >= 2, 'Showdown field lineups must use two teams');
+  }
 });

@@ -16,6 +16,7 @@ interface SlatePlayer {
   position: string | null;
   salary?: number | null;
   projected_points: number | null;
+  projection_source?: string | null;
 }
 
 interface ActualPlayer {
@@ -34,6 +35,7 @@ interface ProjectionResultRow {
   position: string | null;
   projected_points: number | null;
   actual_points: number | null;
+  projection_source?: string | null;
 }
 
 interface GeneratedLineupRow {
@@ -52,6 +54,7 @@ interface GeneratedLineupRow {
     salary?: number | null;
     roster_slot?: string | null;
     projected_points?: number | null;
+    projection_source?: string | null;
   }>;
   projected_points: number;
   salary_used: number;
@@ -379,6 +382,7 @@ function matchActualsToSlate(slatePlayers: SlatePlayer[], actuals: ActualPlayer[
       projected_points: player.projected_points,
       actual_points: actual.actual_points,
       source: 'auto_boxscore',
+      projection_source: player.projection_source ?? 'unknown',
     });
   }
   return { rows, unmatched };
@@ -430,6 +434,7 @@ function slatePlayersFromGeneratedLineups(lineups: GeneratedLineupRow[]): SlateP
         position: player.position ?? null,
         salary: player.salary ?? null,
         projected_points: Number.isFinite(projectedPoints) && projectedPoints > 0 ? projectedPoints : null,
+        projection_source: player.projection_source ?? 'unknown',
       });
     }
   }
@@ -581,7 +586,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
     contest_date: contestDate,
   }));
   const upserted = rows.length
-    ? await callSupabaseRpc<number>('fantasy_ai_upsert_projection_results', { p_rows: rows }) ?? 0
+    ? await callSupabaseRpc<number>('fantasy_ai_upsert_projection_results_v2', { p_rows: rows }) ?? 0
     : 0;
   const scoreboard = rows.length
     ? await scoreGeneratedLineups(sport, contestDate, slatePlayers, rows as ProjectionResultRow[], generatedLineups)

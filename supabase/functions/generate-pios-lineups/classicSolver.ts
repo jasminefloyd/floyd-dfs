@@ -6,4 +6,5 @@ export {
   type SolverLineup,
   type SolverPlayer,
   type SolverRosterSlot,
+  type SolverOptions,
 } from '../_shared/lineupSolver.ts';

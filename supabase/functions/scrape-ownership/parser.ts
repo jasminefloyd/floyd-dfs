@@ -54,8 +54,8 @@ function mergeRows(rows: OwnershipProjection[]): OwnershipProjection[] {
     byName.set(key, {
       player_name: name,
       ownership_pct: row.ownership_pct,
-      cpt_ownership_pct: row.cpt_ownership_pct,
-      flex_ownership_pct: row.flex_ownership_pct,
+      ...(row.cpt_ownership_pct !== undefined ? { cpt_ownership_pct: row.cpt_ownership_pct } : {}),
+      ...(row.flex_ownership_pct !== undefined ? { flex_ownership_pct: row.flex_ownership_pct } : {}),
     });
   }
   return [...byName.values()];

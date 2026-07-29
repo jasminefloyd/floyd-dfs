@@ -21,6 +21,7 @@ export interface ScanValidationInput {
   minPerTeam?: number;
   rosterSize?: number;
   minSalaryUsed?: number;
+  maxSharedPlayers?: number;
   lockedSalaryTotal?: number;
 }
 
@@ -127,6 +128,10 @@ export function validateScanInput(input: ScanValidationInput): string[] {
     && input.lockedSalaryTotal > 50_000
   ) {
     errors.push('Locked players exceed the salary cap.');
+  }
+  if (input.maxSharedPlayers !== undefined
+    && (!Number.isInteger(input.maxSharedPlayers) || input.maxSharedPlayers < 0 || input.maxSharedPlayers > 10)) {
+    errors.push('Maximum shared players must be a whole number between 0 and 10.');
   }
 
   return errors;

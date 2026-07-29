@@ -29,6 +29,18 @@ export function scoreIndexedEntries(outcomes: Float64Array, entries: Array<{ ind
   return entries.reduce((total, entry) => total + (outcomes[entry.index] ?? 0) * entry.multiplier, 0);
 }
 
+/** Maps a simulated-field rank onto the real contest field while preserving first and last place. */
+export function scaleFinishRank(simulatedRank: number, simulatedFieldSize: number, realFieldSize: number): number {
+  const safeSimulatedSize = Math.max(1, Math.floor(simulatedFieldSize));
+  const safeRealSize = Math.max(1, Math.floor(realFieldSize));
+  const safeRank = Math.min(safeSimulatedSize, Math.max(1, Math.floor(simulatedRank)));
+  if (safeSimulatedSize === 1 || safeRealSize === 1) return 1;
+  return Math.min(
+    safeRealSize,
+    Math.max(1, Math.ceil(((safeRank - 1) / (safeSimulatedSize - 1)) * (safeRealSize - 1) + 1)),
+  );
+}
+
 export function randomNormal(mean: number, stdDev: number): number {
   const first = Math.max(Math.random(), Number.EPSILON);
   const second = Math.max(Math.random(), Number.EPSILON);
@@ -256,7 +268,7 @@ export function generateFieldLineups(
   return field;
 }
 
-function buildFieldLineup(
+export function buildFieldLineup(
   roster: SimPlayer[],
   slots: SimRosterSlot[],
   contestType: string,
@@ -266,28 +278,24 @@ function buildFieldLineup(
   const usedIds = new Set<string>();
   let salaryUsed = 0;
   for (const slot of slots) {
-    const remainingSlots = slots.length - selected.length - 1;
-    const salaryRemaining = 50_000 - salaryUsed;
-    const targetRemaining = Math.max(0, 42_500 - salaryUsed);
     const candidates = roster.filter((player) => {
       const salaryMultiplier = contestType === 'showdown' && slot.slot === 'CPT' ? 1.5 : 1;
       const slotSalary = Math.floor(player.salary * salaryMultiplier);
       if (usedIds.has(player.player_id)) return false;
-      if (!playerEligibleForSlot(player, slot) && contestType !== 'showdown') return false;
+      if (!playerEligibleForSlot(player, slot)) return false;
       if (salaryUsed + slotSalary > 50_000) return false;
-      if (remainingSlots === 0) return true;
-      return salaryRemaining - slotSalary >= remainingSlots * 2_000;
+      return true;
     });
     const pick = weightedPick(candidates, (player) => {
-      const affordability = remainingSlots > 0 && player.salary > targetRemaining / Math.max(remainingSlots + 1, 1) ? 0.65 : 1;
-      return weight(player) * affordability;
+      return weight(player);
     });
     if (!pick) return null;
     selected.push(pick);
     usedIds.add(pick.player_id);
     salaryUsed += Math.floor(pick.salary * (contestType === 'showdown' && slot.slot === 'CPT' ? 1.5 : 1));
   }
-  if (salaryUsed > 50_000 || salaryUsed < 42_500) return null;
+  if (salaryUsed > 50_000) return null;
+  if (contestType === 'showdown' && new Set(selected.map((player) => teamKey(player))).size < 2) return null;
   return {
     players: selected.map((player, index) => ({
       playerId: player.player_id,

@@ -315,7 +315,9 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
     const salary = Number(draftable.salary);
 
     const key = `${draftable.playerId ?? draftable.playerDkId ?? playerName}:${position}`;
-    const projectedPoints = Number(draftable.draftStatAttributes?.find((attr) => attr.id === 90 || attr.id === 408)?.value);
+    // DraftKings attribute 90 is retained as a labeled historical FPPG feature.
+    // It is not a forward-looking projection and must not populate projected_points.
+    const dkFppg = Number(draftable.draftStatAttributes?.find((attr) => attr.id === 90)?.value);
     const row = {
       player_id: draftable.playerId ? String(draftable.playerId) : draftable.playerDkId ? String(draftable.playerDkId) : null,
       player_name: playerName,
@@ -323,7 +325,7 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
       position,
       salary: contestType === 'showdown' && isCaptainSlot(draftable.rosterSlotId) ? Math.round(salary / 1.5) : salary,
       game_id: draftable.competition?.competitionId ? String(draftable.competition.competitionId) : null,
-      projected_points: Number.isFinite(projectedPoints) ? projectedPoints : undefined,
+      dk_fppg: Number.isFinite(dkFppg) ? dkFppg : undefined,
       status: draftable.status ?? null,
       is_disabled: draftable.isDisabled ?? false,
       is_confirmed_starter: hasDraftKingsStarterSignal(draftable),

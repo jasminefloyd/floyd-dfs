@@ -28,6 +28,7 @@ export interface PiosLineupRequest {
   forceUniqueCaptains: boolean;
   minSalaryUsed: number;
   maxDuplication: number;
+  maxSharedPlayers?: number;
   simulationIterations: number;
   fieldSimulationSize: number;
   showDiagnostics: boolean;
@@ -84,6 +85,7 @@ export async function invokePiosLineupGeneration(
         salary_source: player.salary_source,
         injury_status: player.injury_status,
         projected_points: player.projected_points,
+        projection_source: player.projection_source,
         prop_projection: player.prop_projection,
         implied_total: player.implied_total,
         spread: player.spread,
@@ -138,6 +140,7 @@ export async function invokePiosLineupGeneration(
       forceUniqueCaptains: params.forceUniqueCaptains,
       minSalaryUsed: params.minSalaryUsed,
       maxDuplication: params.maxDuplication,
+      maxSharedPlayers: params.maxSharedPlayers,
       simulationIterations: params.simulationIterations,
       fieldSimulationSize: params.fieldSimulationSize,
       showDiagnostics: params.showDiagnostics,

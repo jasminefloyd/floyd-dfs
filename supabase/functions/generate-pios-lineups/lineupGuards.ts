@@ -37,8 +37,12 @@ export function takeEntryCount<T>(lineups: T[], entryCount: number): T[] {
 export function maxPlayerExposureCount(lineups: GuardLineup[]): number {
   const counts = new Map<string, number>();
   for (const lineup of lineups) {
+    const playersInLineup = new Set<string>();
     for (const player of lineup.players) {
-      counts.set(player.player_id, (counts.get(player.player_id) ?? 0) + 1);
+      playersInLineup.add(player.player_id);
+    }
+    for (const playerId of playersInLineup) {
+      counts.set(playerId, (counts.get(playerId) ?? 0) + 1);
     }
   }
   return Math.max(0, ...counts.values());

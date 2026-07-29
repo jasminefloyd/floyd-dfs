@@ -1,4 +1,4 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assertEquals } from '../../_shared/testAssert.ts';
 import { parseOwnershipRows } from '../parser.ts';
 
 Deno.test('parseOwnershipRows extracts ownership from a DailyFantasyFuel-style table fixture', async () => {

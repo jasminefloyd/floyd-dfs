@@ -74,13 +74,33 @@ function isStartingPitcherBlock(block: string, sport: LineupSport): boolean {
     || /\bSP\b/i.test(text);
 }
 
+function balancedTagBlocks(html: string, predicate: (tagName: string, attributes: string) => boolean): string[] {
+  const blocks: string[] = [];
+  const tags = [...html.matchAll(/<\/?([a-z0-9]+)\b([^>]*)>/gi)];
+  for (let index = 0; index < tags.length; index += 1) {
+    const match = tags[index];
+    if (match[0].startsWith('</') || !predicate(match[1], match[2])) continue;
+    const tagName = match[1].toLowerCase();
+    let depth = 1;
+    for (let endIndex = index + 1; endIndex < tags.length; endIndex += 1) {
+      const endTag = tags[endIndex];
+      if (endTag[1].toLowerCase() !== tagName) continue;
+      if (endTag[0].startsWith('</')) depth -= 1;
+      else if (!/\/\s*>$/.test(endTag[0])) depth += 1;
+      if (depth === 0) {
+        blocks.push(html.slice(match.index ?? 0, (endTag.index ?? 0) + endTag[0].length));
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
 function splitTeamBlocks(html: string): string[] {
-  const dataTeamBlocks = [...html.matchAll(/<([a-z0-9]+)\b[^>]*\bdata-team=["'][^"']+["'][^>]*>[\s\S]*?<\/\1>/gi)]
-    .map((match) => match[0]);
+  const dataTeamBlocks = balancedTagBlocks(html, (_tagName, attributes) => /\bdata-team=["'][^"']+["']/i.test(attributes));
   if (dataTeamBlocks.length) return dataTeamBlocks;
 
-  return [...html.matchAll(/<([a-z0-9]+)\b[^>]*class=["'][^"']*(?:lineup-card|lineup__team|lineup__list)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi)]
-    .map((match) => match[0]);
+  return balancedTagBlocks(html, (_tagName, attributes) => /class=["'][^"']*(?:lineup-card|lineup__team|lineup__list)[^"']*["']/i.test(attributes));
 }
 
 function teamFromBlock(block: string): string {

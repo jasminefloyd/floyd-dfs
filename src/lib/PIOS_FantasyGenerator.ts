@@ -363,20 +363,10 @@ function uniqueTeams(players: LineupPlayerDraft[]): string[] {
 }
 
 function calculateLineupConfidence(lineup: DraftLineup): number {
-  // Average of player confidence scores
-  const avgConfidence =
-    lineup.players.reduce((sum, p) => sum + (p.confidence_score || 0.5), 0) /
-    lineup.players.length;
-
-  // Boost if salary near cap (efficient use)
-  const salaryEfficiency = lineup.salary_used / 50000;
-  const efficiencyBoost = Math.min(salaryEfficiency * 0.1, 0.1);
-
-  // Penalize if injury concerns
-  const injuryCount = lineup.players.filter((p) => p.injury_status !== 'active').length;
-  const injuryPenalty = injuryCount * 0.05;
-
-  return Math.min(Math.max(avgConfidence + efficiencyBoost - injuryPenalty, 0), 1);
+  if (!lineup.players.length) return 0;
+  const avgConfidence = lineup.players.reduce((sum, player) => sum + (player.confidence_score ?? 0.5), 0) / lineup.players.length;
+  const injuryCount = lineup.players.filter((player) => player.injury_status !== 'active').length;
+  return Math.min(Math.max(avgConfidence - injuryCount * 0.05, 0), 1);
 }
 
 function lineupRankScore(lineup: DraftLineup): number {

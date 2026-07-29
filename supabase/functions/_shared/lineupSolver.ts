@@ -35,10 +35,13 @@ export interface ExactSolverResult {
   bestVerified: boolean;
 }
 
-interface SolverOptions {
+export interface SolverOptions {
   slots?: SolverRosterSlot[];
   salaryCap?: number;
   deadlineMs?: number;
+  minDistinctTeams?: number;
+  minDistinctGames?: number;
+  maxSharedPlayers?: number;
 }
 
 const DEFAULT_SALARY_CAP = 50_000;
@@ -120,11 +123,33 @@ function calculateProjectedPoints(players: SolverPlayer[]): number {
 }
 
 export function lineupSignature(lineup: Pick<SolverLineup, 'players'>): string {
-  return lineup.players.map((player) => player.player_id).sort().join('|');
+  const isShowdown = lineup.players.some((player) => player.roster_slot === 'CPT');
+  return lineup.players
+    .map((player) => isShowdown ? `${player.roster_slot ?? 'FLEX'}:${player.player_id}` : player.player_id)
+    .sort()
+    .join('|');
 }
 
-function violatesNoGoodCut(selectedIds: Set<string>, noGoodCuts: string[][]): boolean {
-  return noGoodCuts.some((cut) => cut.every((playerId) => selectedIds.has(playerId)));
+function violatesNoGoodCut(selectedIds: Set<string>, noGoodCuts: string[][], maxSharedPlayers?: number): boolean {
+  return noGoodCuts.some((cut) => {
+    const sharedPlayers = cut.reduce((count, playerId) => count + (selectedIds.has(playerId) ? 1 : 0), 0);
+    return maxSharedPlayers === undefined ? sharedPlayers === cut.length : sharedPlayers > maxSharedPlayers;
+  });
+}
+
+function satisfiesDistinctConstraints(players: SolverPlayer[], options: SolverOptions): boolean {
+  if (options.minDistinctTeams !== undefined) {
+    const teams = new Set(players.map((player) => String(player.team ?? '').trim()).filter(Boolean));
+    if (teams.size < options.minDistinctTeams) return false;
+  }
+  if (options.minDistinctGames !== undefined) {
+    const hasCompleteGameData = players.every((player) => String(player.game_id ?? '').trim().length > 0);
+    const groups = hasCompleteGameData
+      ? players.map((player) => String(player.game_id).trim())
+      : players.map((player) => String(player.team ?? '').trim()).filter(Boolean);
+    if (new Set(groups).size < options.minDistinctGames) return false;
+  }
+  return true;
 }
 
 function fractionalKnapsackProjectionBound(
@@ -195,6 +220,7 @@ function solveOneLineup(
   deadlineAt: number,
   noGoodCuts: string[][],
   state: SearchState,
+  options: SolverOptions,
 ): SolverLineup | null {
   const orderedSlots = slots
     .map((slot, originalIndex) => ({
@@ -202,7 +228,7 @@ function solveOneLineup(
       originalIndex,
       candidates: players
         .filter((player) => playerEligibleForSlot(player, slot))
-        .sort((a, b) => adjustedProjection(b) - adjustedProjection(a)),
+        .sort((a, b) => adjustedProjection(b) - adjustedProjection(a) || a.player_id.localeCompare(b.player_id)),
     }))
     .sort((a, b) => a.candidates.length - b.candidates.length || a.originalIndex - b.originalIndex);
 
@@ -234,12 +260,18 @@ function solveOneLineup(
     const relaxedSalaryBound = fractionalKnapsackProjectionBound(players, usedIds, remainingSalary, remainingSlots);
     const relaxedSlotBound = slotProjectionBound(orderedSlots, slotIndex, usedIds);
     const upperBound = projection + Math.min(relaxedSalaryBound, relaxedSlotBound);
-    if (upperBound <= bestProjection + 1e-9) return;
+    if (upperBound < bestProjection - 1e-9) return;
 
     if (slotIndex === orderedSlots.length) {
-      if (violatesNoGoodCut(usedIds, noGoodCuts)) return;
-      if (projection <= bestProjection + 1e-9) return;
       const lineupPlayers = selectedByOriginalSlot.filter((player): player is SolverPlayer => Boolean(player));
+      if (!satisfiesDistinctConstraints(lineupPlayers, options)) return;
+      if (violatesNoGoodCut(usedIds, noGoodCuts, options.maxSharedPlayers)) return;
+      const candidateKey = lineupSignature({ players: lineupPlayers });
+      const bestKey = bestLineup ? lineupSignature(bestLineup) : '';
+      const isBetter = projection > bestProjection + 1e-9
+        || (Math.abs(projection - bestProjection) <= 1e-9 && (salaryUsed < (bestLineup?.salary_used ?? Infinity)
+          || (salaryUsed === bestLineup?.salary_used && candidateKey < bestKey)));
+      if (!isBetter) return;
       bestProjection = projection;
       bestLineup = {
         players: lineupPlayers,
@@ -365,7 +397,10 @@ export function solveOptimalLineupsWithMeta(
   const state: SearchState = { timedOut: false, iterations: 0 };
   let bestVerified = false;
 
-  const dpBest = solveBestLineupDp(players, slots, salaryCap, deadlineAt, state);
+  const hasAdditionalConstraints = options.minDistinctTeams !== undefined
+    || options.minDistinctGames !== undefined
+    || options.maxSharedPlayers !== undefined;
+  const dpBest = hasAdditionalConstraints ? null : solveBestLineupDp(players, slots, salaryCap, deadlineAt, state);
   if (dpBest) {
     bestVerified = !state.timedOut;
     const signature = lineupSignature(dpBest);
@@ -375,7 +410,7 @@ export function solveOptimalLineupsWithMeta(
   }
 
   while (lineups.length < count && !state.timedOut) {
-    const lineup = solveOneLineup(players, slots, salaryCap, deadlineAt, noGoodCuts, state);
+    const lineup = solveOneLineup(players, slots, salaryCap, deadlineAt, noGoodCuts, state, options);
     if (!lineup) break;
     const signature = lineupSignature(lineup);
     if (!signatures.has(signature)) {
@@ -384,6 +419,8 @@ export function solveOptimalLineupsWithMeta(
     }
     noGoodCuts.push(lineup.players.map((player) => player.player_id));
   }
+
+  if (hasAdditionalConstraints && lineups.length > 0) bestVerified = !state.timedOut;
 
   return {
     lineups,

@@ -1,0 +1,8 @@
+{
+  "test": {
+    "include": ["supabase/functions"]
+  },
+  "lint": {
+    "include": ["supabase/functions"]
+  }
+}

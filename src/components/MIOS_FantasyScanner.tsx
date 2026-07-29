@@ -32,6 +32,7 @@ export interface ScanParams {
   forceUniqueCaptains: boolean;
   minSalaryUsed: number;
   maxDuplication: number;
+  maxSharedPlayers?: number;
   simulationIterations: number;
   fieldSimulationSize: number;
   showDiagnostics: boolean;
@@ -45,7 +46,7 @@ interface MIOS_FantasyScannerProps {
 
 const DEFAULT_SCAN_OPTIONS = {
   riskTolerance: 'balanced',
-  lineupMode: 'tournament',
+  lineupMode: defaultLineupMode('top_heavy'),
   maxPlayerExposure: 0.8,
   maxTeamExposure: 1,
   minPrimaryStack: 0,
@@ -62,6 +63,7 @@ const DEFAULT_SCAN_OPTIONS = {
   forceUniqueCaptains: true,
   minSalaryUsed: 49_000,
   maxDuplication: 25,
+  maxSharedPlayers: undefined,
   simulationIterations: 1_000,
   fieldSimulationSize: 240,
   showDiagnostics: false,
@@ -84,6 +86,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const [entryCount, setEntryCount] = useState(DEFAULT_SCAN_OPTIONS.entryCount);
   const [fieldSize, setFieldSize] = useState(DEFAULT_SCAN_OPTIONS.fieldSize);
   const [payoutShape, setPayoutShape] = useState(DEFAULT_SCAN_OPTIONS.payoutShape);
+  const [lineupMode, setLineupMode] = useState(DEFAULT_SCAN_OPTIONS.lineupMode);
+  const [maxSharedPlayers, setMaxSharedPlayers] = useState<number | ''>('');
   const [configLoaded, setConfigLoaded] = useState(false);
 
   useEffect(() => {
@@ -100,6 +104,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       entryCount,
       fieldSize,
       payoutShape,
+      lineupMode,
+      maxSharedPlayers,
     });
   }, [
     sport,
@@ -108,12 +114,16 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
     entryCount,
     fieldSize,
     payoutShape,
+    lineupMode,
+    maxSharedPlayers,
   ]);
 
   function applySavedConfig(config: Partial<typeof DEFAULT_SCAN_OPTIONS> & Record<string, unknown>) {
     setEntryCount(numberOrDefault(config.entryCount, DEFAULT_SCAN_OPTIONS.entryCount));
     setFieldSize(numberOrDefault(config.fieldSize, DEFAULT_SCAN_OPTIONS.fieldSize));
     setPayoutShape(typeof config.payoutShape === 'string' ? config.payoutShape : DEFAULT_SCAN_OPTIONS.payoutShape);
+    setLineupMode(typeof config.lineupMode === 'string' ? config.lineupMode : DEFAULT_SCAN_OPTIONS.lineupMode);
+    setMaxSharedPlayers(Number.isInteger(Number(config.maxSharedPlayers)) ? Number(config.maxSharedPlayers) : '');
   }
 
   useEffect(() => {
@@ -151,7 +161,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       contestType,
       entryCount,
       fieldSize,
-      payoutShape,
+    payoutShape,
+    lineupMode,
+    maxSharedPlayers,
       sport,
     });
     const errors = validateScanInput({
@@ -172,6 +184,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       minPerTeam: derived.minPerTeam,
       rosterSize: contestType === 'showdown' ? 6 : classicRosterSize(sport),
       minSalaryUsed: derived.minSalaryUsed,
+      maxSharedPlayers: derived.maxSharedPlayers,
     });
     if (errors.length) {
       onValidationError?.(errors);
@@ -207,6 +220,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       forceUniqueCaptains: derived.forceUniqueCaptains,
       minSalaryUsed: derived.minSalaryUsed,
       maxDuplication: derived.maxDuplication,
+      maxSharedPlayers: derived.maxSharedPlayers,
       simulationIterations: derived.simulationIterations,
       fieldSimulationSize: derived.fieldSimulationSize,
       showDiagnostics: false,
@@ -268,6 +282,36 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label>
+          <span className={labelClass}>Objective</span>
+          <select
+            value={lineupMode}
+            onChange={(event) => setLineupMode(event.target.value)}
+            disabled={loading}
+            className={fieldClass}
+          >
+            <option value="max_fpts">Max Fantasy Points</option>
+            <option value="tournament">Tournament EV</option>
+            <option value="balanced_ev">Balanced EV</option>
+            <option value="safe">Cash / Safe</option>
+          </select>
+        </label>
+        <label>
+          <span className={labelClass}>Max Shared Players</span>
+          <input
+            type="number"
+            min={0}
+            max={10}
+            placeholder="No limit"
+            value={maxSharedPlayers}
+            onChange={(event) => setMaxSharedPlayers(event.target.value === '' ? '' : Number(event.target.value))}
+            disabled={loading}
+            className={fieldClass}
+          />
+        </label>
       </div>
 
       <div>
@@ -555,9 +599,8 @@ function classicRosterSize(sport: string): number {
 }
 
 function defaultLineupMode(shape: string): string {
-  if (shape === 'double_up') return 'safe';
-  if (shape === 'flat') return 'balanced_ev';
-  return 'tournament';
+  void shape;
+  return 'max_fpts';
 }
 
 interface DerivedScanInput {
@@ -565,11 +608,13 @@ interface DerivedScanInput {
   entryCount: number;
   fieldSize: number;
   payoutShape: string;
+  lineupMode: string;
+  maxSharedPlayers: number | '';
   sport: string;
 }
 
 function deriveScanOptions(input: DerivedScanInput) {
-  const lineupMode = defaultLineupMode(input.payoutShape);
+  const lineupMode = input.lineupMode;
   const maxEntriesPerUser = Math.min(150, Math.max(1, input.entryCount));
   const maxPlayerExposure = input.entryCount <= 1
     ? 1
@@ -603,8 +648,9 @@ function deriveScanOptions(input: DerivedScanInput) {
     maxCaptainExposure: input.contestType === 'showdown' && input.entryCount > 1 ? Math.max(1 / input.entryCount, maxPlayerExposure / 2) : 1,
     minPerTeam: DEFAULT_SCAN_OPTIONS.minPerTeam,
     forceUniqueCaptains: input.contestType === 'showdown' && input.entryCount > 1 && input.entryCount <= 5 && input.payoutShape !== 'double_up',
-    minSalaryUsed: input.contestType === 'showdown' ? DEFAULT_SCAN_OPTIONS.minSalaryUsed : 0,
+    minSalaryUsed: input.contestType === 'showdown' && lineupMode !== 'max_fpts' ? DEFAULT_SCAN_OPTIONS.minSalaryUsed : 0,
     maxDuplication: input.payoutShape === 'winner_take_all' ? 5 : input.payoutShape === 'double_up' ? 500 : DEFAULT_SCAN_OPTIONS.maxDuplication,
+    maxSharedPlayers: input.maxSharedPlayers === '' ? undefined : input.maxSharedPlayers,
     simulationIterations,
     fieldSimulationSize,
   };

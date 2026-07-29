@@ -29,15 +29,12 @@ function player(id: string, team: string, slot = 'FLEX', ownership = 0.1) {
 }
 
 function showdownLineup(captainId = 'a1'): GuardLineup {
+  const flexIds = ['a2', 'a3', 'b1', 'b2', 'b3'];
   return {
     salary_used: 47_000,
     players: [
       player(captainId, 'AAA', 'CPT', 0.25),
-      player('a2', 'AAA'),
-      player('a3', 'AAA'),
-      player('b1', 'BBB'),
-      player('b2', 'BBB'),
-      player('b3', 'BBB'),
+      ...flexIds.map((id, index) => player(id, index < 2 ? 'AAA' : 'BBB')),
     ],
   };
 }
@@ -53,10 +50,15 @@ Deno.test('9.3 entry count helper returns exactly requested entries', () => {
   assert(takeEntryCount([1, 2, 3, 4, 5], 3).length === 3, 'entry count should control returned lineups');
 });
 
-Deno.test('9.4 exposure helper detects max player appearances', () => {
+Deno.test('9.4 exposure helper counts lineups, not player appearances', () => {
   const lineups = [showdownLineup('a1'), showdownLineup('b1'), showdownLineup('c1'), showdownLineup('d1')];
-  assert(maxPlayerExposureCount(lineups) === 4, 'shared flex players appear in all four lineups');
-  assert(!playerExposureWithinCap(lineups, 0.5), 'maxPlayerExposure 0.5 over four entries allows at most two appearances');
+  assert(maxPlayerExposureCount(lineups) === 4, 'shared flex players are contained in all four lineups');
+  assert(!playerExposureWithinCap(lineups, 0.5), 'maxPlayerExposure 0.5 over four entries allows at most two lineups');
+  const duplicateSlotFixture = [showdownLineup('a1'), {
+    ...showdownLineup('c1'),
+    players: [showdownLineup('c1').players[0], showdownLineup('c1').players[0], ...showdownLineup('c1').players.slice(2)],
+  }];
+  assert(maxPlayerExposureCount(duplicateSlotFixture) === 2, 'a duplicate player in one lineup counts once');
 });
 
 Deno.test('9.5 unique captain helper counts distinct CPT slots', () => {

@@ -57,7 +57,8 @@ BEGIN
       NULLIF(row_data->>'position', '') AS position,
       NULLIF(row_data->>'projected_points', '')::FLOAT AS projected_points,
       NULLIF(row_data->>'actual_points', '')::FLOAT AS actual_points,
-      COALESCE(NULLIF(row_data->>'source', ''), 'auto_boxscore') AS source
+      COALESCE(NULLIF(row_data->>'source', ''), 'auto_boxscore') AS source,
+      COALESCE(NULLIF(row_data->>'projection_source', ''), 'unknown') AS projection_source
     FROM jsonb_array_elements(COALESCE(p_rows, '[]'::JSONB)) row_data
     WHERE row_data ? 'sport'
       AND row_data ? 'contest_date'
@@ -81,7 +82,8 @@ BEGIN
       position,
       projected_points,
       actual_points,
-      source
+      source,
+      projection_source
     FROM parsed_rows
     ORDER BY sport, contest_date, contest_type, contest_id, player_name, source
   ),
@@ -94,6 +96,7 @@ BEGIN
       projected_points = COALESCE(input_rows.projected_points, existing.projected_points),
       actual_points = COALESCE(input_rows.actual_points, existing.actual_points),
       source = input_rows.source,
+      projection_source = input_rows.projection_source,
       updated_at = NOW()
     FROM input_rows
     WHERE existing.sport = input_rows.sport
@@ -116,6 +119,7 @@ BEGIN
       projected_points,
       actual_points,
       source,
+      projection_source,
       updated_at
     )
     SELECT
@@ -130,6 +134,7 @@ BEGIN
       input_rows.projected_points,
       input_rows.actual_points,
       input_rows.source,
+      input_rows.projection_source,
       NOW()
     FROM input_rows
     WHERE NOT EXISTS (
@@ -149,6 +154,7 @@ BEGIN
       projected_points = COALESCE(EXCLUDED.projected_points, tenant_fantasy_ai.projection_results.projected_points),
       actual_points = COALESCE(EXCLUDED.actual_points, tenant_fantasy_ai.projection_results.actual_points),
       source = EXCLUDED.source,
+      projection_source = EXCLUDED.projection_source,
       updated_at = NOW()
     RETURNING 1
   )

@@ -9,6 +9,7 @@ export interface OpportunityPlayer {
   injury_status: OpportunityInjuryStatus;
   projection_source?: string;
   projected_points?: number;
+  model_adjusted_fantasy_pts?: number;
   minutes_projection?: number;
   depth_chart_order?: number;
   context_score?: number;
@@ -227,13 +228,10 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
       ...player,
       projection_source: 'opportunity_blend',
       projected_points: Number(clampedProjection.toFixed(2)),
+      model_adjusted_fantasy_pts: Number(clampedProjection.toFixed(2)),
       news_note: wasClamped
         ? appendNote(player.news_note, `opportunity projection clamped to ${Math.round(clampWidth * 100)}% move`)
         : player.news_note,
-      last_5_stats: player.last_5_stats ? {
-        ...player.last_5_stats,
-        avg_fantasy_pts: Number(clampedProjection.toFixed(2)),
-      } : player.last_5_stats,
     };
   });
 

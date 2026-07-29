@@ -1,12 +1,14 @@
 import { lineupSignature, solveOptimalLineupsWithMeta, type ExactSolverResult } from './classicSolver.ts';
 import { detectAntiCorrelation } from './antiCorrelation.ts';
 import { PIOS_WEIGHTS } from './weights.ts';
+import { calculateLineupConfidence as calculateSharedLineupConfidence } from '../_shared/confidence.ts';
 import {
   correlateOutcomes,
   generateFieldLineups,
   indexFieldLineups,
   sampleLognormalOutcome,
   scoreIndexedEntries,
+  scaleFinishRank,
 } from './simulation.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
@@ -22,6 +24,7 @@ interface ManifestPlayer {
   salary_source?: string;
   injury_status: InjuryStatus;
   projected_points?: number;
+  projection_source?: string;
   prop_projection?: number;
   implied_total?: number;
   spread?: number;
@@ -69,6 +72,7 @@ interface LineupPlayerDraft {
   last_5_avg_pts: number;
   injury_status: string;
   projected_points?: number;
+  projection_source?: string;
   prop_projection?: number;
   implied_total?: number;
   spread?: number;
@@ -123,6 +127,7 @@ interface LineupConstructionRules {
   forceUniqueCaptains: boolean;
   minSalaryUsed: number;
   maxDuplication: number;
+  maxSharedPlayers?: number;
   simulationIterations: number;
   fieldSimulationSize: number;
   showDiagnostics: boolean;
@@ -195,6 +200,7 @@ interface PiosRequest {
   forceUniqueCaptains?: boolean;
   minSalaryUsed?: number;
   maxDuplication?: number;
+  maxSharedPlayers?: number;
   simulationIterations?: number;
   fieldSimulationSize?: number;
   showDiagnostics?: boolean;
@@ -468,6 +474,7 @@ function persistGeneratedLineups(
       salary: player.base_salary ?? player.salary,
       roster_slot: player.roster_slot,
       projected_points: player.contextual_projection ?? player.projected_points ?? player.last_5_avg_pts ?? 0,
+      projection_source: player.projection_source ?? 'unknown',
     })),
     projected_points: lineup.projected_points,
     salary_used: lineup.salary_used,
@@ -500,7 +507,7 @@ function validatePayload(payload: PiosRequest) {
   const fieldSize = Number(payload.fieldSize ?? 500);
   const maxEntriesPerUser = Number(payload.maxEntriesPerUser ?? 1);
   const minPerTeam = Number(payload.minPerTeam ?? 1);
-  const minSalaryUsed = Number(payload.minSalaryUsed ?? 49_000);
+  const minSalaryUsed = Number(payload.minSalaryUsed ?? (payload.lineupMode === 'max_fpts' ? 0 : 49_000));
   if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 20) throw new Error('Entry count must be between 1 and 20');
   if (!Number.isInteger(fieldSize) || fieldSize < 2 || fieldSize > 500_000) throw new Error('Field size must be between 2 and 500,000');
   if (!Number.isInteger(maxEntriesPerUser) || maxEntriesPerUser < 1 || maxEntriesPerUser > 150) throw new Error('Max entries per user must be between 1 and 150');
@@ -512,8 +519,14 @@ function validatePayload(payload: PiosRequest) {
   if (payload.contestType === 'showdown' && minPerTeam * 2 > showdownRosterSize(payload.sport, payload.slate)) {
     throw new Error('Minimum players per team is not possible for the showdown roster size');
   }
-  if (payload.contestType === 'showdown' && (!Number.isFinite(minSalaryUsed) || minSalaryUsed < 40_000 || minSalaryUsed > 50_000)) {
+  const allowsNoShowdownSalaryFloor = payload.lineupMode === 'max_fpts';
+  if (payload.contestType === 'showdown' && (!Number.isFinite(minSalaryUsed)
+    || minSalaryUsed < (allowsNoShowdownSalaryFloor ? 0 : 40_000)
+    || minSalaryUsed > 50_000)) {
     throw new Error('Showdown minimum salary must be between 40,000 and 50,000');
+  }
+  if (payload.maxSharedPlayers !== undefined && (!Number.isInteger(payload.maxSharedPlayers) || payload.maxSharedPlayers < 0 || payload.maxSharedPlayers > 10)) {
+    throw new Error('Maximum shared players must be a whole number between 0 and 10');
   }
   if (payload.captainPool !== undefined && !Array.isArray(payload.captainPool)) throw new Error('captainPool must be an array');
   if (payload.lockedPlayers !== undefined && !Array.isArray(payload.lockedPlayers)) throw new Error('lockedPlayers must be an array');
@@ -553,9 +566,8 @@ function validatePayload(payload: PiosRequest) {
 }
 
 function defaultLineupMode(payoutShape?: string): string {
-  if (payoutShape === 'double_up') return 'safe';
-  if (payoutShape === 'flat') return 'balanced_ev';
-  return 'tournament';
+  void payoutShape;
+  return 'max_fpts';
 }
 
 function defaultContestStrategy(payload: PiosRequest): string {
@@ -711,10 +723,16 @@ function generateLineups(
   const classicExact = contestType === 'classic'
     ? generateExactClassicCandidatePool(sortedPlayers, sport, rules)
     : undefined;
-  const exactOptimalStatus = classicExact ? exactOptimalValidationStatus(classicExact.unfilteredBest, classicExact.result, sport, rules) : undefined;
   const candidates = contestType === 'showdown'
-    ? generateExactShowdownLineups(sortedPlayers, rules, showdownRosterSize(sport, slate))
+    ? generateExactShowdownLineups(sortedPlayers, rules, showdownRosterSize(sport, slate), lineupMode === 'max_fpts')
     : classicExact?.candidates ?? generateClassicLineups(sortedPlayers, sport, rules);
+  const exactOptimalStatus = classicExact
+    ? exactOptimalValidationStatus(classicExact.unfilteredBest, classicExact.result, sport, 'classic', rules)
+    : lineupMode === 'max_fpts'
+      ? exactOptimalValidationStatus(candidates[0], {
+        lineups: candidates, elapsedMs: 0, timedOut: false, iterations: 0, bestVerified: candidates.length > 0,
+      }, sport, 'showdown', rules)
+      : undefined;
   logStage(rules.requestId, 'candidates_generated', {
     candidates: candidates.length,
     eligible_players: eligiblePlayers.length,
@@ -760,7 +778,10 @@ function generateLineups(
       expected_duplicates: expectedDuplicates(lineup, rules),
       rank_score: lineupRankScore(lineup, riskTolerance, lineupMode, rules),
     }))
-    .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0))
+    .sort((a, b) => (b.rank_score ?? 0) - (a.rank_score ?? 0)
+      || b.projected_points - a.projected_points
+      || a.salary_used - b.salary_used
+      || lineupSignature(a).localeCompare(lineupSignature(b)))
     .map((lineup, index) => ({ ...lineup, optimizer_rank: index + 1 }));
 
   const diversified = diversifyRankedLineups(rankedLineups, rules, lineupMode);
@@ -799,15 +820,38 @@ function dedupeLineups(lineups: DraftLineup[]): DraftLineup[] {
   });
 }
 
+function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules: LineupConstructionRules) {
+  const options: Parameters<typeof solveOptimalLineupsWithMeta>[3] = {
+    deadlineMs: EXACT_SOLVER_DEADLINE_MS,
+    maxSharedPlayers: rules.maxSharedPlayers,
+  };
+  if (sport === 'nba' || sport === 'nfl') {
+    options.minDistinctGames = 2;
+    if (players.some((player) => !String(player.game_id ?? '').trim())) {
+      options.minDistinctTeams = 2;
+    }
+  } else if (sport === 'mlb' || sport === 'wnba') {
+    options.minDistinctTeams = 2;
+  }
+  return options;
+}
+
 function generateExactClassicCandidatePool(
   players: LineupPlayerDraft[],
   sport: string,
   rules: LineupConstructionRules,
 ): ExactClassicPool {
   const exactTarget = sport === 'mlb' && rules.contestStrategy !== 'cash' && rules.minPrimaryStack >= 3 ? 36 : 24;
-  const result = solveOptimalLineupsWithMeta(players, sport, exactTarget, { deadlineMs: EXACT_SOLVER_DEADLINE_MS });
+  const solverOptions = classicSolverOptions(sport, players, rules);
+  const result = solveOptimalLineupsWithMeta(players, sport, exactTarget, solverOptions);
   const unfilteredBest = result.lineups[0] as DraftLineup | undefined;
-  const exactNote = `exact optimizer produced ${result.lineups.length} lineup${result.lineups.length === 1 ? '' : 's'} in ${result.elapsedMs}ms${result.timedOut ? ` before the ${EXACT_SOLVER_DEADLINE_MS}ms cap` : ''}`;
+  const fallbackNote = (sport === 'nba' || sport === 'nfl') && players.some((player) => !String(player.game_id ?? '').trim())
+    ? 'game IDs incomplete; enforced the DraftKings two-team fallback'
+    : '';
+  const exactNote = [
+    `exact optimizer produced ${result.lineups.length} lineup${result.lineups.length === 1 ? '' : 's'} in ${result.elapsedMs}ms${result.timedOut ? ` before the ${EXACT_SOLVER_DEADLINE_MS}ms cap` : ''}`,
+    fallbackNote,
+  ].filter(Boolean).join('; ');
   let exactLineups = (result.lineups as DraftLineup[]).map((lineup, index) => (
     index === 0 ? addStrategyNote(lineup, exactNote) : lineup
   ));
@@ -830,6 +874,7 @@ function exactOptimalValidationStatus(
   exactOptimal: DraftLineup | undefined,
   result: ExactSolverResult,
   sport: string,
+  contestType: string,
   rules: LineupConstructionRules,
 ): ExactOptimalStatus {
   if (result.timedOut && !result.bestVerified) {
@@ -841,7 +886,7 @@ function exactOptimalValidationStatus(
     players: exactOptimal.players.map((player) => ({ ...player })),
     constraint_violations: [],
   };
-  if (!validateLineup(validationProbe, 'classic', sport, rules)) {
+  if (!validateLineup(validationProbe, contestType, sport, rules)) {
     return { failure: validationProbe.constraint_violations.join(', ') || 'exact lineup failed validation' };
   }
   return { signature: lineupSignature(exactOptimal) };
@@ -916,7 +961,7 @@ function exactLineupKeepCount(rules?: LineupConstructionRules) {
   return Math.min(MAX_CANDIDATE_LINEUPS, Math.max(32, (rules?.entryCount ?? 1) * 16));
 }
 
-function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: LineupConstructionRules, rosterSize = 6): DraftLineup[] {
+function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: LineupConstructionRules, rosterSize = 6, maximizePoints = false): DraftLineup[] {
   const lineupsByCaptain = new Map<string, DraftLineup[]>();
   const leverageLineups: DraftLineup[] = [];
   const signatures = new Set<string>();
@@ -925,7 +970,9 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
   const captainPool = new Set(rules.captainPool.map(normalizePlayerKey));
   const captains = [...players]
     .filter((player) => !captainPool.size || captainPool.has(normalizePlayerKey(player.name)))
-    .sort((a, b) => captainLeverageScore(b) - captainLeverageScore(a));
+    .sort((a, b) => maximizePoints
+      ? adjustedProjection(b) - adjustedProjection(a) || a.player_id.localeCompare(b.player_id)
+      : captainLeverageScore(b) - captainLeverageScore(a) || a.player_id.localeCompare(b.player_id));
 
   for (const captain of captains) {
     const captainLineups: DraftLineup[] = [];
@@ -949,12 +996,14 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
       if (fieldCandidates.length - startIndex < needed) return;
 
       const selectedProjection = selected.reduce((sum, player) => sum + adjustedProjection(player), 0);
-      const captainKeepCount = Math.max(12, Math.ceil(keepCount / Math.max(captains.length, 1)));
+      const captainKeepCount = maximizePoints
+        ? keepCount
+        : Math.max(12, Math.ceil(keepCount / Math.max(captains.length, 1)));
       const worstKeptProjection = captainLineups.length >= captainKeepCount
         ? captainLineups[captainLineups.length - 1].projected_points
         : -Infinity;
       const upperBound = captainWithMultiplier.projected_points! + selectedProjection + bestRemainingProjection(fieldCandidates, startIndex, needed);
-      if (upperBound <= worstKeptProjection) return;
+      if (!maximizePoints && upperBound < worstKeptProjection) return;
 
       if (selected.length === rosterSize - 1) {
         const lineupPlayers = [
@@ -967,7 +1016,7 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
           })),
         ];
         if (uniqueTeams(lineupPlayers).length < 2) return;
-        const signature = `${captain.player_id}::${lineupPlayers.map((player) => player.player_id).sort().join('|')}`;
+        const signature = lineupSignature({ players: lineupPlayers });
         if (signatures.has(signature)) return;
         signatures.add(signature);
         const nextLineup = {
@@ -977,8 +1026,8 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
           confidence_score: 0,
           constraint_violations: [],
         };
-        insertTopLineup(captainLineups, nextLineup, captainKeepCount);
-        insertLeverageLineup(leverageLineups, nextLineup, keepCount);
+        if (maximizePoints) insertTopLineup(captainLineups, nextLineup, captainKeepCount);
+        else insertLeverageLineup(leverageLineups, nextLineup, keepCount);
         return;
       }
 
@@ -997,7 +1046,17 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
     lineupsByCaptain.set(captain.player_id, captainLineups);
   }
 
-  return dedupeLineups([...lineupsByCaptain.values()].flat().concat(leverageLineups)).slice(0, keepCount);
+  const ordered = maximizePoints
+    ? dedupeLineups([...lineupsByCaptain.values()].flat())
+      .sort((a, b) => b.projected_points - a.projected_points || a.salary_used - b.salary_used || lineupSignature(a).localeCompare(lineupSignature(b)))
+    : dedupeLineups([...lineupsByCaptain.values()].flat().concat(leverageLineups));
+  const selected: DraftLineup[] = [];
+  for (const lineup of ordered) {
+    if (selected.length >= keepCount) break;
+    if (rules.maxSharedPlayers !== undefined && selected.some((existing) => sharedPlayerCount(lineup, existing) > rules.maxSharedPlayers!)) continue;
+    selected.push(lineup);
+  }
+  return selected;
 }
 
 function insertLeverageLineup(lineups: DraftLineup[], lineup: DraftLineup, maxLineups: number) {
@@ -1167,6 +1226,29 @@ function applyContextualProjectionEngine(
   sport: string,
   _rules: LineupConstructionRules,
 ): LineupPlayerDraft {
+  // MIOS owns projection adjustments. PIOS consumes that final modeled value and only
+  // derives lineup metadata; reapplying park, role, news, or injury multipliers here
+  // would double-count signals already reflected in projected_points.
+  if (typeof player.projected_points === 'number' && player.projected_points > 0) {
+    const battingOrder = player.batting_order ?? parseBattingOrder(player.news_note ?? '');
+    const volatility = clampNumber(
+      player.volatility_score ?? playerVolatilityScore(player, sport, battingOrder, player.run_factor),
+      0.16,
+      0.68,
+      0.3,
+    );
+    const contextualProjection = Number(player.projected_points.toFixed(2));
+    return {
+      ...player,
+      contextual_projection: contextualProjection,
+      floor_projection: player.floor_projection ?? Number(Math.max(0, contextualProjection * (1 - volatility * 0.55)).toFixed(2)),
+      ceiling_projection: player.ceiling_projection ?? Number((contextualProjection * (1 + volatility * 0.85)).toFixed(2)),
+      volatility_score: Number(volatility.toFixed(3)),
+      batting_order: battingOrder,
+      game_context_tags: player.game_context_tags ?? gameContextTags(player, sport, battingOrder),
+    };
+  }
+
   const baseProjection = player.projected_points || player.last_5_avg_pts || 0;
   if (!baseProjection) return player;
 
@@ -1337,6 +1419,21 @@ function validateLineup(lineup: DraftLineup, contestType: string, sport?: string
     }
     if ([...teamCounts.values()].some((count) => count < rules.minPerTeam)) {
       violations.push(`showdown team count below ${rules.minPerTeam}`);
+    }
+  }
+  if (contestType === 'classic' && sport) {
+    if (sport === 'nba' || sport === 'nfl') {
+      const hasCompleteGameData = lineup.players.every((player) => String(player.game_id ?? '').trim().length > 0);
+      const distinctGroups = hasCompleteGameData
+        ? new Set(lineup.players.map((player) => String(player.game_id).trim())).size
+        : uniqueTeams(lineup.players).length;
+      if (distinctGroups < 2) {
+        violations.push(hasCompleteGameData
+          ? 'classic lineups must include players from at least two games'
+          : 'classic lineups must include players from at least two teams when game IDs are incomplete');
+      }
+    } else if ((sport === 'mlb' || sport === 'wnba') && uniqueTeams(lineup.players).length < 2) {
+      violations.push('classic lineups must include players from at least two teams');
     }
   }
   if (lineup.projected_points <= 0) violations.push('projected points must be positive');
@@ -1541,13 +1638,7 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
 }
 
 function calculateLineupConfidence(lineup: DraftLineup): number {
-  const avgConfidence = lineup.players.reduce((sum, player) => sum + (player.confidence_score || 0.5), 0) / lineup.players.length;
-  const salaryEfficiency = lineup.salary_used / 50_000;
-  const efficiencyBoost = Math.min(salaryEfficiency * 0.1, 0.1);
-  const injuryCount = lineup.players.filter((player) => player.injury_status !== 'active').length;
-  const injuryPenalty = injuryCount * 0.05;
-
-  return Math.min(Math.max(avgConfidence + efficiencyBoost - injuryPenalty, 0), 1);
+  return calculateSharedLineupConfidence(lineup.players);
 }
 
 function positiveNumber(value: unknown): number | undefined {
@@ -1735,12 +1826,14 @@ function runMonteCarloSimulations(
     for (const lineup of lineups) {
       const total = scoreIndexedEntries(outcomes, lineupIndexes.get(lineup) ?? []);
       samples.get(lineup)?.push(total);
-      const beaten = fieldScores.length
-        ? lowerBound(fieldScores, total) / fieldScores.length
-        : 0;
-      const finishRank = fieldScores.length ? fieldScores.length - lowerBound(fieldScores, total) + 1 : fieldSize;
-      if (beaten >= 0.99) wins.set(lineup, (wins.get(lineup) ?? 0) + 1);
-      if (beaten >= 0.9) topDeciles.set(lineup, (topDeciles.get(lineup) ?? 0) + 1);
+      const simulatedFinishRank = fieldScores.length
+        ? fieldScores.length - lowerBound(fieldScores, total) + 1
+        : fieldSize;
+      const finishRank = scaleFinishRank(simulatedFinishRank, fieldScores.length || fieldSize, rules.fieldSize);
+      if (finishRank === 1) wins.set(lineup, (wins.get(lineup) ?? 0) + 1);
+      if (finishRank <= Math.max(1, Math.ceil(rules.fieldSize * 0.1))) {
+        topDeciles.set(lineup, (topDeciles.get(lineup) ?? 0) + 1);
+      }
       if (finishRank <= trueTopN) topNs.set(lineup, (topNs.get(lineup) ?? 0) + 1);
       expectedPayouts.set(lineup, (expectedPayouts.get(lineup) ?? 0) + payoutUnitsForFinish(finishRank, rules.fieldSize, rules.payoutShape));
     }
@@ -1832,12 +1925,18 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
   const maxCaptainExposure = clampNumber(payload.maxCaptainExposure, 0.2, 1, entryCount <= 5 ? 0.4 : 0.6);
   const minPerTeam = Math.round(clampNumber(payload.minPerTeam, 1, 3, 1));
   const forceUniqueCaptains = Boolean(payload.forceUniqueCaptains ?? entryCount <= 5);
-  const minSalaryUsed = Math.round(clampNumber(payload.minSalaryUsed, 40_000, 50_000, 49_000));
+  const lineupMode = payload.lineupMode ?? defaultLineupMode(payoutShape);
+  const minSalaryUsed = lineupMode === 'max_fpts'
+    ? 0
+    : Math.round(clampNumber(payload.minSalaryUsed, 40_000, 50_000, 49_000));
+  const maxSharedPlayers = payload.maxSharedPlayers === undefined
+    ? undefined
+    : Math.round(clampNumber(payload.maxSharedPlayers, 0, 10, 10));
   const maxDuplication = Math.round(clampNumber(payload.maxDuplication, 1, 500, payoutShape === 'winner_take_all' ? 5 : 25));
   const simulationIterations = resourceBudgetedSimulationIterations(payload, entryCount);
   const fieldSimulationSize = Math.min(resourceBudgetedFieldSimulationSize(payload, fieldSize, entryCount), fieldSize, MAX_FIELD_LINEUP_CAP);
   const showDiagnostics = Boolean(payload.showDiagnostics ?? false);
-  if ((payload.lineupMode ?? defaultLineupMode(payoutShape)) === 'max_fpts') {
+  if (lineupMode === 'max_fpts') {
     return {
       contestStrategy,
       requestId,
@@ -1857,8 +1956,9 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
       lockedPlayers,
       minPerTeam,
       forceUniqueCaptains: false,
-      minSalaryUsed,
+      minSalaryUsed: 0,
       maxDuplication: 500,
+      maxSharedPlayers,
       simulationIterations: 0,
       fieldSimulationSize,
       showDiagnostics,
@@ -1893,6 +1993,7 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     forceUniqueCaptains,
     minSalaryUsed,
     maxDuplication,
+    maxSharedPlayers,
     simulationIterations,
     fieldSimulationSize,
     showDiagnostics,
