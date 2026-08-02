@@ -118,7 +118,12 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_lineup_scoreboard(
+-- PostgreSQL does not allow CREATE OR REPLACE to change a function's table
+-- return type. The original scoreboard function predates contest-result
+-- fields, so remove that exact overload before recreating its expanded shape.
+DROP FUNCTION IF EXISTS public.fantasy_ai_get_lineup_scoreboard(TEXT, INT);
+
+CREATE FUNCTION public.fantasy_ai_get_lineup_scoreboard(
   p_sport TEXT,
   p_days INT
 )

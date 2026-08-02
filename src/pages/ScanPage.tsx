@@ -45,9 +45,19 @@ export default function ScanPage() {
       setManifest(data);
       const miosWarnings = data.data_warnings ?? [];
       const blockingWarnings = blockingDataWarnings(miosWarnings, params.lineupMode);
-      if (blockingWarnings.length) {
+      const trustBlocks = data.readiness?.hard_blocks ?? [];
+      const tournamentBlocked = params.lineupMode !== 'safe'
+        && params.lineupMode !== 'max_fpts'
+        && data.readiness
+        && !data.readiness.eligible_for_tournament;
+      if (trustBlocks.length || tournamentBlocked || blockingWarnings.length) {
         setDataWarnings(miosWarnings);
-        throw new Error(`Lineup generation blocked: ${blockingWarnings.join(' ')}`);
+        const reasons = [
+          ...trustBlocks,
+          ...(tournamentBlocked ? (data.readiness?.cautions ?? ['The scan is not tournament-ready.']) : []),
+          ...blockingWarnings,
+        ];
+        throw new Error(`Lineup generation blocked: ${[...new Set(reasons)].join(' ')}`);
       }
       setPhase('generating');
 
@@ -147,7 +157,7 @@ export default function ScanPage() {
 
               <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px] xl:items-start">
                 <div className="min-w-0">
-                  <LineupDisplay lineups={lineups} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
+                    <LineupDisplay manifest={manifest} lineups={lineups} onSaveLineup={() => showToast('Lineup saved!', 'success')} />
                 </div>
 
                 <aside className="hidden space-y-3 xl:sticky xl:top-5 xl:block xl:max-h-[calc(100vh-2.5rem)] xl:overflow-y-auto">
@@ -246,10 +256,69 @@ function ScanDiagnostics({
 }) {
   return (
     <div className="space-y-3">
+      <TrustPanel manifest={manifest} />
       <InjuryReport manifest={manifest} />
       <PivotSuggestions lineups={lineups} manifest={manifest} />
     </div>
   );
+}
+
+function TrustPanel({ manifest }: { manifest: MIOS_FantasyManifest | null }) {
+  if (!manifest) return null;
+  const readiness = manifest.readiness;
+  const sourceHealth = Object.entries(manifest.source_health ?? {});
+  const statusStyles = readiness?.status === 'ready'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+    : readiness?.status === 'blocked'
+      ? 'border-red-200 bg-red-50 text-red-800'
+      : 'border-amber-200 bg-amber-50 text-amber-800';
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-[var(--shadow-subtle)]" aria-label="MIOS trust details">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">MIOS trust status</p>
+          <p className="mt-1 text-sm font-black text-[#0b1f3a]">{readiness?.status === 'ready' ? 'Ready' : readiness?.status === 'blocked' ? 'Blocked' : 'Use with caution'}</p>
+        </div>
+        <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wide ${statusStyles}`}>
+          {manifest.is_fallback ? 'Cached fallback' : `Model ${manifest.model_version ?? 'current'}`}
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-slate-600">
+        Confidence is projection reliability—not a probability of winning. It reflects data completeness, freshness, lineup certainty, and historical consistency.
+      </p>
+      {readiness?.hard_blocks?.length ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+          <p className="font-black">Generation limits</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">{readiness.hard_blocks.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      ) : null}
+      {readiness?.cautions?.length ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+          <p className="font-black">Cautions</p>
+          <ul className="mt-1 max-h-32 list-disc space-y-1 overflow-y-auto pl-4">{readiness.cautions.slice(0, 5).map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      ) : null}
+      <details className="mt-3">
+        <summary className="cursor-pointer text-xs font-black text-slate-600">View source coverage</summary>
+        <div className="mt-2 space-y-1.5">
+          {sourceHealth.map(([source, health]) => (
+            <div key={source} className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="truncate text-slate-600">{source.replaceAll('_', ' ')}</span>
+              <span className={health.status === 'ok' ? 'font-bold text-emerald-700' : health.status === 'partial' ? 'font-bold text-amber-700' : 'font-bold text-red-700'}>
+                {health.coverage ? `${health.coverage.percent}% · ` : ''}{health.status}{health.freshness_seconds !== null && health.freshness_seconds !== undefined ? ` · ${formatAge(health.freshness_seconds)}` : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return '<1m';
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 function actionableDataWarnings(messages: string[]): string[] {
@@ -260,6 +329,9 @@ function blockingDataWarnings(messages: string[], lineupMode: string): string[] 
   if (lineupMode === 'safe' || lineupMode === 'max_fpts') return [];
   return messages.filter((message) => (
     /confirmed-lineup data is .*hours old/i.test(message)
+    || /Confirmed-lineup extraction returned zero rows/i.test(message)
+    || /Ownership coverage is (?:0|[0-5]\d)%/i.test(message)
+    || /Public ownership projections were unavailable/i.test(message)
   ));
 }
 
@@ -329,6 +401,8 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       game_id: p.game_id,
       game_context_tags: p.game_context_tags,
       news_note: p.news_note,
+      news_evidence: p.news_evidence,
+      home_away: p.home_away,
       last_5_stats: {
         avg_fantasy_pts: p.last_5_avg_pts,
         stdev_fantasy_pts: p.stdev_fantasy_pts,
@@ -365,6 +439,10 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     portfolio_correlation_flags: lu.portfolio_correlation_flags,
     late_swap_flags: lu.late_swap_flags,
     strategy_notes: lu.strategy_notes,
+    scenario_key: lu.scenario_key,
+    scenario_confidence: lu.scenario_confidence,
+    relationship_score: lu.relationship_score,
+    evidence_summary: lu.evidence_summary,
     narrative: lineupNarrative(lu, idx)
   }));
 }
@@ -373,5 +451,5 @@ function lineupNarrative(lineup: DraftLineup, idx: number): string {
   const expectedFpts = lineup.simulation_ev !== undefined ? lineup.simulation_ev : lineup.projected_points;
   const leverage = lineup.leverage_score !== undefined ? ` Secondary leverage score: ${lineup.leverage_score.toFixed(1)}.` : '';
   const intelligence = lineup.lineup_intelligence_score !== undefined ? ` PIOS intelligence score: ${lineup.lineup_intelligence_score.toFixed(1)}.` : '';
-  return `Lineup #${idx + 1} ranked by ${expectedFpts.toFixed(1)} expected total FPTS, ${(lineup.confidence_score * 100).toFixed(0)}% confidence, and $${lineup.salary_used.toLocaleString()} salary used.${leverage}${intelligence}`;
+  return `Lineup #${idx + 1} ranked by ${expectedFpts.toFixed(1)} expected total FPTS, ${(lineup.confidence_score * 100).toFixed(0)}% projection reliability, and $${lineup.salary_used.toLocaleString()} salary used.${leverage}${intelligence}`;
 }

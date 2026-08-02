@@ -2,7 +2,9 @@ ALTER TABLE tenant_fantasy_ai.ownership_projections
   ADD COLUMN IF NOT EXISTS cpt_ownership_pct FLOAT NULL CHECK (cpt_ownership_pct >= 0 AND cpt_ownership_pct <= 100),
   ADD COLUMN IF NOT EXISTS flex_ownership_pct FLOAT NULL CHECK (flex_ownership_pct >= 0 AND flex_ownership_pct <= 100);
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_ownership_projections(
+DROP FUNCTION IF EXISTS public.fantasy_ai_get_ownership_projections(TEXT, DATE);
+
+CREATE FUNCTION public.fantasy_ai_get_ownership_projections(
   p_sport TEXT,
   p_contest_date DATE
 )

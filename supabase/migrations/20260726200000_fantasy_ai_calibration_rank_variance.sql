@@ -1,4 +1,6 @@
-CREATE OR REPLACE FUNCTION public.fantasy_ai_projection_calibration(
+DROP FUNCTION IF EXISTS public.fantasy_ai_projection_calibration(TEXT, INT);
+
+CREATE FUNCTION public.fantasy_ai_projection_calibration(
   p_sport TEXT,
   p_days INT DEFAULT 30
 )

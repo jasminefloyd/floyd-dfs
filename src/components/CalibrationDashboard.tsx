@@ -118,6 +118,9 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
         <Signal label="Lineup Range" value={topLineupRange} />
         <Signal label="Auto Tuning" value={calibration && sampleSize >= 30 ? `${tuningLabel} · variance ${formatMultiplier(calibration.variance_calibration_ratio)}` : 'Needs scored results'} />
       </div>
+      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+        <span className="font-black text-slate-800">Trust record:</span> model {manifest.model_version ?? 'legacy'} · {manifest.snapshot_id ? 'immutable scan snapshot saved' : 'snapshot not confirmed'} · automated evaluation begins after matched actual results are ingested.
+      </div>
 
       {!hasBacktestData ? (
         <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-3">

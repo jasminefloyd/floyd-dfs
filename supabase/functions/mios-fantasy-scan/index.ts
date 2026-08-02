@@ -5,6 +5,55 @@ import { computeOpportunityProjection } from './opportunity.ts';
 import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
 
 type SourceStatus = Record<string, 'ok' | 'partial' | 'unavailable'>;
+type ReadinessStatus = 'ready' | 'caution' | 'blocked';
+type ModelVersion = 'mios-v1.1-trust';
+
+interface SourceHealth {
+  status: 'ok' | 'partial' | 'unavailable';
+  provider?: string;
+  coverage?: { matched: number; total: number; percent: number };
+  collected_at?: string;
+  freshness_seconds?: number | null;
+  fallback_used?: boolean;
+  failure_reason?: string;
+  observed_at?: string | null;
+  data_class?: 'live' | 'cached' | 'modeled' | 'unknown';
+}
+
+interface ConfidenceBreakdown {
+  data_completeness: number;
+  data_freshness: number;
+  lineup_certainty: number;
+  projection_reliability: number;
+  outcome_uncertainty: number;
+  label: 'projection_reliability';
+}
+
+interface ProjectionTrace {
+  model_version: ModelVersion;
+  base_projection: number | null;
+  final_projection: number | null;
+  total_adjustment: number;
+  applied_models: string[];
+  stages: Array<{ name: string; projection: number | null; delta: number }>;
+  note: string;
+}
+
+interface FieldProvenance {
+  source: string;
+  observed_at?: string | null;
+  freshness_seconds?: number | null;
+  is_modeled: boolean;
+  is_fallback: boolean;
+}
+
+interface Readiness {
+  status: ReadinessStatus;
+  eligible_for_lineups: boolean;
+  eligible_for_tournament: boolean;
+  hard_blocks: string[];
+  cautions: string[];
+}
 
 interface Last5Game {
   date: string;
@@ -27,6 +76,15 @@ interface Player {
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
   model_adjusted_fantasy_pts?: number;
+  p10_projection?: number;
+  p25_projection?: number;
+  p50_projection?: number;
+  p75_projection?: number;
+  p90_projection?: number;
+  p95_projection?: number;
+  stdev_fantasy_pts?: number;
+  boom_probability?: number;
+  bust_probability?: number;
   ownership_projection?: number;
   prop_projection?: number;
   implied_total?: number;
@@ -44,15 +102,22 @@ interface Player {
   context_score?: number;
   news_score?: number;
   news_note?: string;
+  news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
     trend: 'up' | 'down' | 'stable';
     confidence: number;
+    stdev_fantasy_pts?: number;
     minutes_avg?: number;
     is_synthetic?: boolean;
     games: Last5Game[];
+    source?: string;
+    last_updated_at?: string;
   };
+  field_provenance?: Record<string, FieldProvenance>;
+  confidence_breakdown?: ConfidenceBreakdown;
+  projection_trace?: ProjectionTrace;
 }
 
 interface MiosManifest {
@@ -70,6 +135,17 @@ interface MiosManifest {
   catalysts: { type: string; player_id?: string; description: string }[];
   narrative_seeds: string[];
   source_status: SourceStatus;
+  source_health: Record<string, SourceHealth>;
+  readiness: Readiness;
+  model_version: ModelVersion;
+  is_fallback?: boolean;
+  fallback_reason?: string;
+  projection_recipe: {
+    base_projection: string;
+    adjustments: string[];
+    confidence_definition: string;
+  };
+  snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
 }
@@ -1444,6 +1520,21 @@ async function collectPlayerProps(sport: string, slate?: DraftKingsSlate): Promi
   if (!apiKey || !sportKey || !markets?.length || slateTeams.length < 2) return empty;
 
   const knownEventIds = slatePropEventIds(slate);
+  // A large MLB classic slate can contain five or more games. Fetching every
+  // event's prop market in the scan competes with roster/stat enrichment for
+  // the Edge Function compute budget; cached prop rows remain usable below.
+  if (sport === 'mlb' && knownEventIds.length > 2) {
+    const cachedByKnownEvent = await Promise.all(knownEventIds.map((eventId) => getCachedPropLines(sport, eventId)));
+    const byPlayer = propsByPlayer(cachedByKnownEvent.flat());
+    return {
+      ...empty,
+      propsByPlayer: byPlayer,
+      matchedEvents: cachedByKnownEvent.filter((lines) => lines.length > 0).length,
+      cachedEvents: cachedByKnownEvent.filter((lines) => lines.length > 0).length,
+      propPlayers: byPlayer.size,
+      cacheOnly: true,
+    };
+  }
   if (knownEventIds.length) {
     const cachedByKnownEvent = await Promise.all(knownEventIds.map((eventId) => getCachedPropLines(sport, eventId)));
     if (cachedByKnownEvent.every((lines) => lines.length > 0)) {
@@ -1967,7 +2058,32 @@ function mlbContextByTeam(contexts: MlbGameContext[]): Map<string, MlbGameContex
 
 function mergeRotowireMlbLineups(contexts: MlbGameContext[], lineups: ConfirmedLineupRow[]): MlbGameContext[] {
   if (!contexts.length || !lineups.length) return contexts;
-  return contexts;
+  const contextsByTeam = mlbContextByTeam(contexts);
+  const merged = contexts.map((context) => ({
+    ...context,
+    batting_orders: Object.fromEntries(Object.entries(context.batting_orders ?? {}).map(([team, orders]) => [team, { ...orders }])),
+    confirmed_starters: Object.fromEntries(Object.entries(context.confirmed_starters ?? {}).map(([team, starters]) => [team, new Set(starters)])),
+  }));
+  const mergedByTeam = mlbContextByTeam(merged);
+
+  for (const row of lineups) {
+    const team = normalizeMlbTeam(row.team);
+    const context = mergedByTeam.get(team) ?? contextsByTeam.get(team);
+    if (!context || !row.player_name) continue;
+    const battingOrders = context.batting_orders ?? (context.batting_orders = {});
+    const confirmedStarters = context.confirmed_starters ?? (context.confirmed_starters = {});
+    const orderByPlayer = battingOrders[team] ?? (battingOrders[team] = {});
+    const starters = confirmedStarters[team] ?? (confirmedStarters[team] = new Set<string>());
+    const playerKey = normalizeName(row.player_name);
+
+    // Expected orders are useful for role context, but only confirmed rows are
+    // allowed to establish a confirmed starting-lineup gate.
+    if (row.batting_order && row.batting_order > 0) orderByPlayer[playerKey] = row.batting_order;
+    if (row.lineup_status === 'confirmed' && !row.injury_tag?.match(/OUT|QUES|GTD/)) {
+      starters.add(playerKey);
+    }
+  }
+  return merged;
 }
 
 function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Player[] {
@@ -2025,7 +2141,7 @@ function applyMlbFreeContext(players: Player[], contexts: MlbGameContext[]): Pla
       opposing_probable_pitcher_id: opponentProbable?.id ?? player.opposing_probable_pitcher_id,
       opposing_probable_pitcher_name: opponentProbablePitcher ?? player.opposing_probable_pitcher_name,
       own_probable_starter: isPitcher
-        ? (ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : isDraftKingsConfirmedStarter)
+        ? (ownProbablePitcher ? normalizeName(ownProbablePitcher) === normalizeName(player.name) : isDraftKingsConfirmedStarter || isConfirmedStarter)
         : player.own_probable_starter,
       game_id: context.game_id || player.game_id,
       context_score: Number((multiplier - 1).toFixed(3)),
@@ -2366,6 +2482,44 @@ function applyStatcastQuality(players: Player[], qualityByKey: Map<string, Statc
         ...player.last_5_stats,
         confidence: Math.min(Math.max((player.last_5_stats.confidence ?? 0.6) + Math.min(Math.abs(quality.quality_score), 0.04), 0.2), 0.95),
       } : player.last_5_stats,
+    };
+  });
+}
+
+function applyMlbConfidenceSignals(players: Player[], contexts: MlbGameContext[], qualityByKey: Map<string, StatcastQuality>): Player[] {
+  const byTeam = mlbContextByTeam(contexts);
+  return players.map((player) => {
+    const baseConfidence = player.last_5_stats?.confidence ?? 0.45;
+    const team = normalizeMlbTeam(player.team);
+    const context = byTeam.get(team);
+    const isPitcher = /^(P|SP|RP)$/.test(player.position);
+    const confirmedLineupAvailable = Boolean(context && (context.confirmed_starters?.[team]?.size ?? 0) >= 8);
+    const playerKey = String(player.id).replace(/^dk:/, '');
+    const hasStatcastQuality = Boolean(qualityByKey.get(playerKey) ?? qualityByKey.get(normalizeName(player.name)));
+    let confidence = baseConfidence;
+
+    // These are confidence adjustments for verified information, not projection
+    // boosts. They keep MLB lineup certainty separate from fantasy-point variance.
+    if (context) confidence += 0.03;
+    if (hasStatcastQuality) confidence += 0.03;
+    if (isPitcher) {
+      if (player.own_probable_starter === true) confidence += 0.07;
+      else if (context) confidence -= 0.08;
+    } else {
+      if (player.confirmed_starter === true) confidence += 0.07;
+      if (player.batting_order && player.batting_order <= 6) confidence += 0.03;
+      else if (player.batting_order && player.batting_order >= 7) confidence += 0.015;
+      if (confirmedLineupAvailable && player.confirmed_starter !== true) confidence -= 0.12;
+    }
+
+    const adjustedConfidence = Number(clampNumber(confidence, 0.2, 0.95).toFixed(3));
+    if (!player.last_5_stats) return player;
+    return {
+      ...player,
+      last_5_stats: {
+        ...player.last_5_stats,
+        confidence: adjustedConfidence,
+      },
     };
   });
 }
@@ -3158,6 +3312,7 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
   const avg = stats?.aggregated_stats?.avg_fantasy_pts ?? stats?.aggregated_stats?.fantasy_points;
   if (!Array.isArray(games) || games.length === 0 || typeof avg !== 'number') return player;
   const minutesAvg = minutesAverageFromAggregates(stats);
+  const stdev = Number(stats?.aggregated_stats?.stdev_fantasy_pts);
 
   if (sport === 'mlb' && player.projection_source === 'draftkings' && typeof player.projected_points === 'number' && player.projected_points > 0) {
     const blendedProjection = Number((player.projected_points * 0.72 + avg * 0.28).toFixed(2));
@@ -3176,7 +3331,10 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
         confidence: Math.max(stats.confidence_score ?? 0.7, player.last_5_stats?.confidence ?? 0.62),
         minutes_avg: minutesAvg,
         games,
+        source: stats.source ?? 'last5_stats',
+        last_updated_at: stats.last_updated_at,
       },
+      stdev_fantasy_pts: Number.isFinite(stdev) ? stdev : undefined,
     };
   }
 
@@ -3192,7 +3350,10 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
       confidence: stats.confidence_score ?? 0.7,
       minutes_avg: minutesAvg,
       games,
+      source: stats.source ?? 'last5_stats',
+      last_updated_at: stats.last_updated_at,
     },
+    stdev_fantasy_pts: Number.isFinite(stdev) ? stdev : undefined,
   };
 }
 
@@ -3200,12 +3361,81 @@ function projectedPointsForPriority(player: Player): number {
   return player.projected_points ?? player.last_5_stats?.avg_fantasy_pts ?? 0;
 }
 
+const NORMAL_QUANTILES = { p10: -1.282, p25: -0.674, p75: 0.674, p90: 1.282, p95: 1.645 };
+
+function deriveOutcomeDistributions(
+  players: Player[],
+  sport: string,
+  contestDate: string,
+  contestType: string,
+  contestId?: string,
+  gameId?: string,
+) {
+  const rows = players.map((player) => {
+    const projection = projectedPointsForPriority(player);
+    const observedStdev = Number(player.stdev_fantasy_pts ?? player.last_5_stats?.stdev_fantasy_pts);
+    const sampleSize = Number(player.last_5_stats?.games.length ?? 0);
+    const stdev = Number.isFinite(observedStdev) && observedStdev > 0
+      ? observedStdev
+      : Math.max(projection * (sport === 'mlb' ? 0.55 : 0.35), 1.5);
+    const source = Number.isFinite(observedStdev) && observedStdev > 0
+      ? 'last5_empirical'
+      : 'derived_sport_prior';
+    const quantile = (z: number) => Number(Math.max(0, projection + z * stdev).toFixed(2));
+    const boomProbability = Number(Math.min(0.85, Math.max(0.01, 1 / (1 + Math.exp((projection * 1.5 - (projection + stdev)) / Math.max(stdev, 1))))).toFixed(3));
+    const bustProbability = Number(Math.min(0.95, Math.max(0.01, 1 / (1 + Math.exp((projection * 0.5 - projection) / Math.max(stdev, 1))))).toFixed(3));
+    return {
+      ...player,
+      p10_projection: quantile(NORMAL_QUANTILES.p10),
+      p25_projection: quantile(NORMAL_QUANTILES.p25),
+      p50_projection: Number(projection.toFixed(2)),
+      p75_projection: quantile(NORMAL_QUANTILES.p75),
+      p90_projection: quantile(NORMAL_QUANTILES.p90),
+      p95_projection: quantile(NORMAL_QUANTILES.p95),
+      stdev_fantasy_pts: Number(stdev.toFixed(2)),
+      boom_probability: boomProbability,
+      bust_probability: bustProbability,
+      distribution_source: source,
+      distribution_sample_size: sampleSize,
+      distribution_row: {
+        sport,
+        contest_date: contestDate,
+        contest_type: contestType,
+        contest_id: contestId,
+        game_id: gameId,
+        player_id: player.id,
+        player_name: player.name,
+        projection_source: player.projection_source,
+        sample_size: sampleSize,
+        p10: quantile(NORMAL_QUANTILES.p10),
+        p25: quantile(NORMAL_QUANTILES.p25),
+        p50: Number(projection.toFixed(2)),
+        p75: quantile(NORMAL_QUANTILES.p75),
+        p90: quantile(NORMAL_QUANTILES.p90),
+        p95: quantile(NORMAL_QUANTILES.p95),
+        stdev_fantasy_pts: Number(stdev.toFixed(2)),
+        boom_probability: boomProbability,
+        bust_probability: bustProbability,
+        source,
+      },
+    };
+  });
+  return {
+    players: rows.map(({ distribution_row: _row, ...player }) => player),
+    rows: rows.map((row) => row.distribution_row),
+  };
+}
+
 function prioritizedEnrichmentRoster(players: Player[], sport: string): EnrichmentPlan {
   // Bounded enrichment request budget: duration ~= request count / concurrency *
   // provider latency. MLB last-5 enrichment can require both a player search and
   // a game-log fetch, so keep its live budget deliberately smaller.
-  const cap = sport === 'mlb' ? 40 : 80;
-  const studCap = sport === 'mlb' ? 16 : 30;
+  // MLB game-log enrichment can require a Stats API player lookup plus a
+  // second game-log request. Keep live scans bounded so a large classic slate
+  // does not exhaust the Edge Function compute budget. Pre-lock ingestion and
+  // cached rows still provide coverage for players outside this priority set.
+  const cap = sport === 'mlb' ? 16 : 80;
+  const studCap = sport === 'mlb' ? 12 : 30;
   const bucketByPlayerId = new Map<string, EnrichmentBucket>();
   const selected: Player[] = [];
   const counts: Record<EnrichmentBucket, number> = { stud: 0, value: 0, mid: 0, other: 0 };
@@ -3358,6 +3588,7 @@ function applyProjectionCalibration(players: Player[], calibration: ProjectionCa
 interface MatchedNewsItem {
   raw: string;
   timestamp: number;
+  published_at?: string;
 }
 
 const PLAYER_NEWS_ALIASES: Record<string, string[]> = {
@@ -3384,7 +3615,7 @@ function matchingNewsItems(player: Player, newsItems: any[]): MatchedNewsItem[] 
   const teamKey = normalizeName(player.team ?? '');
   const aliases = PLAYER_NEWS_ALIASES[playerKey] ?? [];
   return newsItems
-    .map((item) => ({ raw: String(item?.raw ?? item?.title ?? item?.description ?? ''), timestamp: newsTimestamp(item) }))
+    .map((item) => ({ raw: String(item?.raw ?? item?.title ?? item?.description ?? ''), timestamp: newsTimestamp(item), published_at: item?.published_at ?? item?.publishedAt ?? item?.date }))
     .filter((item) => !item.timestamp || item.timestamp >= recentNewsCutoff())
     .filter((item) => {
       const rawKey = normalizeName(item.raw);
@@ -3438,11 +3669,260 @@ function applyPlayerNewsSignals(player: Player, newsItems: any[], sentiment: any
     model_adjusted_fantasy_pts: projectedPoints,
     news_score: Number(((positiveNews ? 0.5 : 0) - (negativeNews ? 0.75 : 0) + sentimentScore * 0.1).toFixed(2)),
     news_note: noteParts.join('; ') || undefined,
+    news_events: matchedNews.slice(0, 5).map((item) => ({
+      headline: item.raw,
+      source: 'MIOS matched sports news feed',
+      published_at: item.published_at,
+      impact_type: newsInjuryStatus([item]) ? 'availability' : /start|rotation|minutes|snap|batting order|role/i.test(item.raw) ? 'role' : 'performance',
+      confirmed: /confirmed|official|will start|starting|active|out|ruled out/i.test(item.raw),
+      is_speculative: !/confirmed|official|will start|starting|active|out|ruled out/i.test(item.raw),
+    })),
     last_5_stats: player.last_5_stats ? {
       ...player.last_5_stats,
       confidence,
     } : player.last_5_stats,
   };
+}
+
+const MIOS_MODEL_VERSION: ModelVersion = 'mios-v1.1-trust';
+
+function clamp01(value: number): number {
+  return Math.min(Math.max(Number.isFinite(value) ? value : 0, 0), 1);
+}
+
+function buildConfidenceBreakdown(player: Player, sourceStatus: SourceStatus): ConfidenceBreakdown {
+  const completenessFields = [
+    typeof player.projected_points === 'number',
+    typeof player.salary === 'number' && player.salary > 0,
+    Boolean(player.last_5_stats?.games?.length),
+    Boolean(player.news_note || player.news_score !== undefined),
+    player.ownership_projection !== undefined,
+  ];
+  const dataCompleteness = completenessFields.filter(Boolean).length / completenessFields.length;
+  const dataFreshness = sourceStatus.scan_cache === 'partial' ? 0.5 : sourceStatus.draftkings_salaries === 'ok' ? 1 : 0.65;
+  const lineupCertainty = player.injury_status === 'out'
+    ? 0
+    : player.confirmed_starter === true || player.own_probable_starter === true
+      ? 1
+      : player.injury_status === 'active' || player.injury_status === 'probable'
+        ? 0.7
+        : 0.35;
+  const historyReliability = clamp01(player.last_5_stats?.confidence ?? 0.45);
+  const outcomeUncertainty = typeof player.stdev_fantasy_pts === 'number' && typeof player.projected_points === 'number'
+    ? clamp01(1 - Math.abs(player.stdev_fantasy_pts) / Math.max(Math.abs(player.projected_points), 1))
+    : 0.45;
+  const projectionReliability = clamp01(
+    dataCompleteness * 0.35 + dataFreshness * 0.15 + lineupCertainty * 0.2 + historyReliability * 0.3,
+  );
+  return {
+    data_completeness: Number(dataCompleteness.toFixed(3)),
+    data_freshness: Number(dataFreshness.toFixed(3)),
+    lineup_certainty: Number(lineupCertainty.toFixed(3)),
+    projection_reliability: Number(projectionReliability.toFixed(3)),
+    outcome_uncertainty: Number(outcomeUncertainty.toFixed(3)),
+    label: 'projection_reliability',
+  };
+}
+
+function recordProjectionStage(stageMap: Map<string, Map<string, number | null>>, stage: string, players: Player[]) {
+  for (const player of players) {
+    const stages = stageMap.get(player.id) ?? new Map<string, number | null>();
+    stages.set(stage, typeof player.projected_points === 'number' ? player.projected_points : null);
+    stageMap.set(player.id, stages);
+  }
+}
+
+function applyTrustMetadata(
+  players: Player[],
+  baseProjectionByPlayerId: Map<string, number | null>,
+  projectionStagesByPlayerId: Map<string, Map<string, number | null>>,
+  sourceStatus: SourceStatus,
+  provenanceByPlayerId: Map<string, Record<string, FieldProvenance>>,
+): Player[] {
+  return players.map((player) => {
+    const baseProjection = baseProjectionByPlayerId.get(player.id) ?? null;
+    const finalProjection = typeof player.projected_points === 'number' ? player.projected_points : null;
+    const appliedModels = [
+      player.last_5_stats?.games?.length ? 'last_5_history' : '',
+      player.prop_projection !== undefined ? 'player_props' : '',
+      player.news_score !== undefined ? 'news_context' : '',
+      player.minutes_projection !== undefined ? 'opportunity_model' : '',
+      player.implied_total !== undefined ? 'vegas_context' : '',
+      sourceStatus.mlb_statsapi_context ? 'mlb_game_context' : '',
+      sourceStatus.baseball_savant_statcast ? 'statcast_quality' : '',
+      sourceStatus.projection_calibration === 'ok' ? 'projection_calibration' : '',
+    ].filter(Boolean);
+    const stages = [...(projectionStagesByPlayerId.get(player.id) ?? new Map())]
+      .map(([name, projection], index, all) => ({
+        name,
+        projection,
+        delta: index === 0 || projection === null || all[index - 1][1] === null
+          ? 0
+          : Number((projection - Number(all[index - 1][1])).toFixed(3)),
+      }));
+    return {
+      ...player,
+      field_provenance: provenanceByPlayerId.get(player.id),
+      confidence_breakdown: buildConfidenceBreakdown(player, sourceStatus),
+      projection_trace: {
+        model_version: MIOS_MODEL_VERSION,
+        base_projection: baseProjection,
+        final_projection: finalProjection,
+        total_adjustment: baseProjection !== null && finalProjection !== null
+          ? Number((finalProjection - baseProjection).toFixed(3))
+          : 0,
+        applied_models: appliedModels,
+        stages,
+        note: 'Each stage is the player projection after that model was applied. Deltas are calculated from the preceding recorded stage.',
+      },
+    };
+  });
+}
+
+function providerForSource(source: string): string {
+  if (source.startsWith('draftkings')) return 'DraftKings';
+  if (source.startsWith('rotowire')) return 'Rotowire';
+  if (source.startsWith('espn')) return 'ESPN';
+  if (source.includes('odds') || source.includes('props')) return 'Odds provider/cache';
+  if (source.includes('statcast')) return 'Baseball Savant';
+  if (source.includes('reddit')) return 'Reddit RSS';
+  if (source.includes('calibration')) return 'MIOS calibration store';
+  return 'MIOS';
+}
+
+function buildSourceHealth(
+  sourceStatus: SourceStatus,
+  collectedAt: string,
+  coverage: Record<string, { matched: number; total: number }> = {},
+  observedAt: Record<string, string | null | undefined> = {},
+): Record<string, SourceHealth> {
+  return Object.fromEntries(Object.entries(sourceStatus).map(([source, status]) => {
+    const coverageValue = coverage[source];
+    const sourceObservedAt = observedAt[source] ?? null;
+    return [source, {
+      status,
+      provider: providerForSource(source),
+      collected_at: collectedAt,
+      observed_at: sourceObservedAt,
+      freshness_seconds: freshnessSeconds(sourceObservedAt ?? undefined),
+      data_class: status === 'unavailable'
+        ? 'unknown'
+        : ['projections', 'opportunity_model', 'vegas_applied', 'outcome_distributions', 'projection_calibration'].includes(source)
+          ? 'modeled'
+          : 'live',
+      ...(coverageValue ? {
+        coverage: {
+          matched: coverageValue.matched,
+          total: coverageValue.total,
+          percent: coverageValue.total ? Number((coverageValue.matched / coverageValue.total * 100).toFixed(1)) : 0,
+        },
+      } : {}),
+      fallback_used: false,
+    } satisfies SourceHealth];
+  }));
+}
+
+function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: Player[], ownershipCoverage: number): Readiness {
+  const hardBlocks: string[] = [];
+  const cautions: string[] = [];
+  if (!roster.length) hardBlocks.push('No eligible roster players were collected.');
+  if (sourceStatus.draftkings_salaries !== 'ok') hardBlocks.push('Verified DraftKings salary data is unavailable.');
+  if (sourceStatus.projections === 'unavailable') hardBlocks.push('No usable player projections were produced.');
+  if (sourceStatus.scan_cache === 'partial') cautions.push('This result uses a cached fallback after live collection failed.');
+  if (ownershipCoverage < 0.7) cautions.push(`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage estimates are less reliable.`);
+  if (sourceStatus.rotowire_confirmed_lineups === 'unavailable') cautions.push('Confirmed lineup data is unavailable; starter certainty is reduced.');
+  if (sourceStatus.projection_calibration !== 'ok') cautions.push('No qualifying projection calibration was applied.');
+  for (const warning of warnings) {
+    if (/timed out|failed|unavailable/i.test(warning) && !cautions.includes(warning)) cautions.push(warning);
+  }
+  const status: ReadinessStatus = hardBlocks.length ? 'blocked' : cautions.length ? 'caution' : 'ready';
+  return {
+    status,
+    eligible_for_lineups: hardBlocks.length === 0,
+    eligible_for_tournament: hardBlocks.length === 0 && ownershipCoverage >= 0.7 && sourceStatus.rotowire_confirmed_lineups !== 'unavailable',
+    hard_blocks: hardBlocks,
+    cautions: cautions.slice(0, 12),
+  };
+}
+
+function freshnessSeconds(observedAt: string | undefined, now = Date.now()): number | null {
+  if (!observedAt) return null;
+  const timestamp = Date.parse(observedAt);
+  return Number.isFinite(timestamp) ? Math.max(0, Math.round((now - timestamp) / 1000)) : null;
+}
+
+function buildPlayerProvenance(
+  players: Player[],
+  salaryObservedAtByPlayerId: Map<string, string | undefined>,
+  ownershipObservedAt: string | undefined,
+  lineupObservedAt: string | undefined,
+  isFallback = false,
+): Map<string, Record<string, FieldProvenance>> {
+  return new Map(players.map((player) => {
+    const last5ObservedAt = player.last_5_stats?.last_updated_at;
+    const fields: Record<string, FieldProvenance> = {
+      salary: {
+        source: player.salary_source ?? 'draftkings_salaries',
+        observed_at: salaryObservedAtByPlayerId.get(player.id) ?? null,
+        freshness_seconds: freshnessSeconds(salaryObservedAtByPlayerId.get(player.id)),
+        is_modeled: player.salary_source === 'estimated',
+        is_fallback: isFallback,
+      },
+      projected_points: {
+        source: 'mios_projection',
+        observed_at: null,
+        freshness_seconds: null,
+        is_modeled: true,
+        is_fallback: isFallback,
+      },
+      last_5_stats: {
+        source: player.last_5_stats?.source ?? 'last5_stats',
+        observed_at: last5ObservedAt ?? null,
+        freshness_seconds: freshnessSeconds(last5ObservedAt),
+        is_modeled: Boolean(player.last_5_stats?.is_synthetic),
+        is_fallback: isFallback,
+      },
+      ownership_projection: {
+        source: 'ownership_projections',
+        observed_at: ownershipObservedAt ?? null,
+        freshness_seconds: freshnessSeconds(ownershipObservedAt),
+        is_modeled: player.ownership_projection === undefined,
+        is_fallback: isFallback,
+      },
+      lineup_status: {
+        source: 'confirmed_lineups',
+        observed_at: lineupObservedAt ?? null,
+        freshness_seconds: freshnessSeconds(lineupObservedAt),
+        is_modeled: false,
+        is_fallback: isFallback,
+      },
+    };
+    return [player.id, fields];
+  }));
+}
+
+function provenanceRows(manifest: MiosManifest) {
+  const collectedAt = manifest.collected_at;
+  return manifest.player_roster.flatMap((player) => {
+    const rows = [
+      { field_name: 'salary', field_value: player.salary, source: player.salary_source ?? 'draftkings_salaries', stage: 'salary_matching', is_modeled: false },
+      { field_name: 'projected_points', field_value: player.projected_points ?? null, source: player.projection_trace?.model_version ?? 'mios_projection', stage: 'final_projection', is_modeled: true },
+      { field_name: 'confidence_breakdown', field_value: player.confidence_breakdown ?? null, source: 'mios_trust_model', stage: 'confidence', is_modeled: true },
+      { field_name: 'projection_trace', field_value: player.projection_trace ?? null, source: 'mios_projection', stage: 'projection_audit', is_modeled: true },
+    ];
+    if (player.confirmed_starter !== undefined || player.own_probable_starter !== undefined) {
+      rows.push({ field_name: 'lineup_status', field_value: { confirmed_starter: player.confirmed_starter, own_probable_starter: player.own_probable_starter }, source: 'confirmed_lineups', stage: 'lineup_context', is_modeled: false });
+    }
+    return rows.map((row) => ({
+      player_id: player.id,
+      player_name: player.name,
+      ...row,
+      observed_at: player.field_provenance?.[row.field_name]?.observed_at ?? collectedAt,
+      freshness_seconds: player.field_provenance?.[row.field_name]?.freshness_seconds ?? null,
+      is_fallback: Boolean(manifest.is_fallback),
+      model_version: manifest.model_version,
+    }));
+  });
 }
 
 async function orchestrateMiosFantasyScan(
@@ -3473,10 +3953,11 @@ async function orchestrateMiosFantasyScan(
   if (!effectiveSalaryRows.length) {
     throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
   }
+  const largeMlbSlate = sport === 'mlb' && effectiveSalaryRows.length > 40;
   const [fallbackOddsContext, rawMlbFreeContexts, statcastQuality, confirmedLineups] = await Promise.all([
     hasFreeOddsContext(slate) ? Promise.resolve([]) : collectOddsApiContext(sport, slate),
-    sport === 'mlb' ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
-    sport === 'mlb' ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
+    sport === 'mlb' && !largeMlbSlate ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
+    sport === 'mlb' && !largeMlbSlate ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
     ['nba', 'wnba', 'nfl', 'mlb'].includes(sport) ? collectConfirmedLineups(sport, contestDate) : Promise.resolve([]),
   ]);
   const mlbFreeContexts = sport === 'mlb' ? mergeRotowireMlbLineups(rawMlbFreeContexts, confirmedLineups) : rawMlbFreeContexts;
@@ -3488,6 +3969,7 @@ async function orchestrateMiosFantasyScan(
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = vegasContext.some((context) => context.over_under || context.spread) ? 'ok' : 'unavailable';
   if (sport === 'mlb') {
+    if (largeMlbSlate) warnings.push('Large MLB slate detected; live Statcast, weather, probable-pitcher, and lineup context calls were skipped to protect Edge Function compute limits. Cached/preloaded context remains eligible.');
     sourceStatus.mlb_statsapi_context = mlbFreeContexts.length ? 'ok' : 'unavailable';
     sourceStatus.nws_weather = mlbFreeContexts.some((context) => context.weather_note && context.weather_note !== 'roof/indoor park') ? 'partial' : 'unavailable';
     sourceStatus.mlb_confirmed_lineups = mlbFreeContexts.some((context) => Object.keys(context.batting_orders ?? {}).some((team) => Object.keys(context.batting_orders?.[team] ?? {}).length >= 8))
@@ -3508,6 +3990,11 @@ async function orchestrateMiosFantasyScan(
   if (playerRoster.length < effectiveSalaryRows.length) {
     warnings.push('Some DraftKings salary rows could not be matched to roster metadata and were omitted.');
   }
+  const baseProjectionByPlayerId = new Map(
+    playerRoster.map((player) => [player.id, typeof player.projected_points === 'number' ? player.projected_points : null]),
+  );
+  const projectionStagesByPlayerId = new Map<string, Map<string, number | null>>();
+  recordProjectionStage(projectionStagesByPlayerId, 'salary_matched_base', playerRoster);
   const ownershipRows = await collectOwnershipProjections(sport, contestDate, contestType, contestId, slate);
   const ownershipApplied = applyOwnershipProjections(playerRoster, ownershipRows);
   playerRoster = ownershipApplied.players;
@@ -3525,12 +4012,14 @@ async function orchestrateMiosFantasyScan(
     const age = hoursSince(Date.parse(ownershipApplied.latestScrapedAt));
     if (age !== null && age > 3) warnings.push(`Ownership projections are ${age.toFixed(1)} hours old; late DFS ownership can move sharply near lock.`);
   }
-  if (contestType === 'showdown' && ownershipCoverage < 0.7) {
+  if (ownershipCoverage < 0.7) {
     warnings.push(`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage and duplicate estimates will use heuristic ownership until coverage reaches 70%.`);
   }
   const propCollection = await collectPlayerProps(sport, slate);
+  if (largeMlbSlate) warnings.push('Large MLB slate used cached player props only; live prop-market fetching was skipped to protect Edge Function compute limits.');
   const propBlend = applyPropProjections(playerRoster, propCollection, sport);
   playerRoster = propBlend.players;
+  recordProjectionStage(projectionStagesByPlayerId, 'player_props', playerRoster);
   sourceStatus.player_props = propBlend.appliedCount
     ? (propBlend.appliedCount === propCollection.propPlayers ? 'ok' : 'partial')
     : 'unavailable';
@@ -3554,12 +4043,15 @@ async function orchestrateMiosFantasyScan(
 
   const enrichmentPlan = prioritizedEnrichmentRoster(playerRoster, sport);
   const enrichmentRoster = enrichmentPlan.players;
+  if (sport === 'mlb' && playerRoster.length > enrichmentRoster.length) {
+    warnings.push(`MLB live game-log enrichment capped at ${enrichmentRoster.length} priority players to stay within the Edge Function compute budget; remaining players use cached or slate inputs.`);
+  }
   warnings.push(
     `Enriched ${enrichmentRoster.length} of ${playerRoster.length} slate players with recent game logs (${enrichmentPlan.counts.stud} studs, ${enrichmentPlan.counts.value} value candidates, ${enrichmentPlan.counts.mid} mid-salary${enrichmentPlan.counts.other ? `, ${enrichmentPlan.counts.other} others` : ''}).`,
   );
-  const statAndSentiment = await mapWithConcurrency(enrichmentRoster, 8, async (player) => {
+  const statAndSentiment = await mapWithConcurrency(enrichmentRoster, sport === 'mlb' ? 3 : 8, async (player) => {
     const bucket = enrichmentPlan.bucketByPlayerId.get(player.id) ?? 'other';
-    const sentimentPromise = bucket === 'stud'
+    const sentimentPromise = bucket === 'stud' && sport !== 'mlb'
       ? collectRedditSentiment(player.id, player.name, sport)
       : Promise.resolve(undefined);
     const [stats, sentiment] = await Promise.all([
@@ -3572,10 +4064,13 @@ async function orchestrateMiosFantasyScan(
   const statsByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.stats]));
   const sentimentByPlayer = new Map(statAndSentiment.map((item) => [item.playerId, item.sentiment]));
   playerRoster = playerRoster.map((player) => applyLast5Stats(player, statsByPlayer.get(player.id), sport));
+  recordProjectionStage(projectionStagesByPlayerId, 'last_5_history', playerRoster);
   playerRoster = playerRoster.map((player) => applyPlayerNewsSignals(player, injuries, sentimentByPlayer.get(player.id)));
+  recordProjectionStage(projectionStagesByPlayerId, 'news_context', playerRoster);
   if (['nba', 'wnba', 'nfl'].includes(sport)) {
     const lineupContext = applyConfirmedLineupContext(playerRoster, confirmedLineups, sport);
     playerRoster = lineupContext.players;
+    recordProjectionStage(projectionStagesByPlayerId, 'confirmed_lineups', playerRoster);
     const confirmedAge = hoursSince(newestTimestamp(confirmedLineups));
     if (lineupContext.appliedCount || lineupContext.injuryCount) {
       warnings.push(`Applied Rotowire lineup context to ${lineupContext.appliedCount} starter/bench projection${lineupContext.appliedCount === 1 ? '' : 's'} and ${lineupContext.injuryCount} injury tag${lineupContext.injuryCount === 1 ? '' : 's'}${confirmedAge !== null ? `; latest scrape ${confirmedAge.toFixed(1)} hours old` : ''}.`);
@@ -3587,6 +4082,7 @@ async function orchestrateMiosFantasyScan(
   if (sport === 'nba' || sport === 'wnba') {
     const opportunity = computeOpportunityProjection(playerRoster, sport);
     playerRoster = opportunity.players;
+    recordProjectionStage(projectionStagesByPlayerId, 'opportunity_model', playerRoster);
     sourceStatus.opportunity_model = opportunity.projectedCount
       ? (opportunity.missingMinutesCount ? 'partial' : 'ok')
       : 'unavailable';
@@ -3601,6 +4097,7 @@ async function orchestrateMiosFantasyScan(
   }
   if (['nba', 'wnba', 'nfl'].includes(sport)) {
     playerRoster = applyVegasContext(playerRoster, vegasContext, slate, sport);
+    recordProjectionStage(projectionStagesByPlayerId, 'vegas_context', playerRoster);
     const vegasAppliedCount = playerRoster.filter((player) => /Team implied|DST opponent implied/.test(player.news_note ?? '')).length;
     sourceStatus.vegas_applied = vegasAppliedCount ? 'ok' : 'unavailable';
     warnings.push(vegasAppliedCount
@@ -3611,12 +4108,32 @@ async function orchestrateMiosFantasyScan(
   }
   if (sport === 'mlb') {
     playerRoster = applyMlbFreeContext(playerRoster, mlbFreeContexts);
+    recordProjectionStage(projectionStagesByPlayerId, 'mlb_game_context', playerRoster);
     playerRoster = applyStatcastQuality(playerRoster, statcastQuality);
+    recordProjectionStage(projectionStagesByPlayerId, 'statcast_quality', playerRoster);
+    playerRoster = applyMlbConfidenceSignals(playerRoster, mlbFreeContexts, statcastQuality);
   }
   const dkFppgRows = effectiveSalaryRows.filter((row) => typeof row.dk_fppg === 'number' && row.dk_fppg > 0).length;
   const calibration = await getProjectionCalibration(sport);
   const calibrated = applyProjectionCalibration(playerRoster, calibration, sport);
   playerRoster = calibrated.players;
+  recordProjectionStage(projectionStagesByPlayerId, 'projection_calibration', playerRoster);
+  const distributions = deriveOutcomeDistributions(playerRoster, sport, contestDate, contestType, contestId, gameId);
+  playerRoster = distributions.players;
+  recordProjectionStage(projectionStagesByPlayerId, 'outcome_distributions', playerRoster);
+  const persistedDistributions = await callSupabaseRpc<number>('fantasy_ai_upsert_player_outcome_distributions', {
+    p_rows: distributions.rows,
+  }, { serviceRole: true, allowMissingServiceRole: true }).catch((error) => {
+    console.error('Outcome distribution persistence failed:', error);
+    return null;
+  });
+  if (persistedDistributions === null) {
+    sourceStatus.outcome_distributions = 'partial';
+    warnings.push('Outcome distributions were calculated for this scan but could not be persisted; replay calibration will not see this scan until storage is available.');
+  } else {
+    sourceStatus.outcome_distributions = 'ok';
+    warnings.push(`Calculated outcome distributions for ${distributions.rows.length} players${typeof persistedDistributions === 'number' ? ` and persisted ${persistedDistributions}` : ''}. Quantiles are empirical when last-5 volatility exists and sport-prior modeled otherwise.`);
+  }
   sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
   sourceStatus.projections = playerRoster.some((player) => typeof player.projected_points === 'number' && player.projected_points > 0)
     ? 'ok'
@@ -3659,6 +4176,36 @@ async function orchestrateMiosFantasyScan(
     }
   }
 
+  const salaryObservedAtByPlayerId = new Map<string, string | undefined>();
+  for (const row of effectiveSalaryRows) {
+    const observedAt = row.updated_at ?? row.imported_at;
+    if (row.player_id) salaryObservedAtByPlayerId.set(String(row.player_id), observedAt);
+    salaryObservedAtByPlayerId.set(normalizeName(row.player_name), observedAt);
+  }
+  const confirmedLineupTimestamp = newestTimestamp(confirmedLineups);
+  const confirmedLineupObservedAt = confirmedLineupTimestamp ? new Date(confirmedLineupTimestamp).toISOString() : undefined;
+  const ownershipObservedAt = ownershipApplied.latestScrapedAt ?? undefined;
+  const provenanceByPlayerId = buildPlayerProvenance(
+    playerRoster,
+    new Map(playerRoster.map((player) => [player.id, salaryObservedAtByPlayerId.get(player.id) ?? salaryObservedAtByPlayerId.get(normalizeName(player.name))])),
+    ownershipObservedAt,
+    confirmedLineupObservedAt,
+  );
+  playerRoster = applyTrustMetadata(playerRoster, baseProjectionByPlayerId, projectionStagesByPlayerId, sourceStatus, provenanceByPlayerId);
+  const collectedAt = new Date().toISOString();
+  const sourceHealth = buildSourceHealth(sourceStatus, collectedAt, {
+    ownership_projections: { matched: ownershipApplied.matchedPlayers, total: playerRoster.length },
+    draftkings_salaries: { matched: playerRoster.length, total: effectiveSalaryRows.length },
+    espn_last5: { matched: enrichmentRoster.length, total: playerRoster.length },
+  }, {
+    draftkings_salaries: effectiveSalaryRows[0]?.updated_at ?? effectiveSalaryRows[0]?.imported_at,
+    ownership_projections: ownershipObservedAt,
+    rotowire_confirmed_lineups: confirmedLineupObservedAt,
+    espn_last5: playerRoster.find((player) => player.last_5_stats?.last_updated_at)?.last_5_stats?.last_updated_at,
+    projection_calibration: new Date().toISOString(),
+  });
+  const readiness = buildReadiness(sourceStatus, warnings, playerRoster, ownershipCoverage);
+
   const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({
     player_id: item.player_id,
     mentions: item.reddit_mentions,
@@ -3683,8 +4230,16 @@ async function orchestrateMiosFantasyScan(
     catalysts: warnings.map((description) => ({ type: 'data_warning', description })),
     narrative_seeds: warnings,
     source_status: sourceStatus,
+    source_health: sourceHealth,
+    readiness,
+    model_version: MIOS_MODEL_VERSION,
+    projection_recipe: {
+      base_projection: 'Verified DraftKings salary-matched roster projection, when supplied; otherwise sport-specific modeled baseline.',
+      adjustments: ['last_5_history', 'player_props', 'news_context', 'opportunity_model', 'vegas_context', 'sport_context', 'projection_calibration'],
+      confidence_definition: 'Projection reliability based on data completeness, freshness, lineup certainty, and historical consistency. It is not a probability of winning.',
+    },
     data_warnings: warnings,
-    collected_at: new Date().toISOString(),
+    collected_at: collectedAt,
   };
 }
 
@@ -3721,11 +4276,48 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
 
     if (!persistedId) throw new Error('Manifest insert did not return an id');
 
-    return {
+    const persistedManifest: MiosManifest = {
       ...manifest,
       manifest_id: persistedId,
       source_status: { ...manifest.source_status, manifest_persistence: 'ok' },
     };
+    try {
+      const snapshotId = await callSupabaseRpc<string>('fantasy_ai_insert_mios_scan_snapshot', {
+        p_manifest_id: persistedId,
+        p_sport: persistedManifest.sport,
+        p_contest_type: persistedManifest.contest_type,
+        p_contest_date: persistedManifest.contest_date,
+        p_contest_id: persistedManifest.contest_id ?? '',
+        p_game_id: persistedManifest.game_id ?? '',
+        p_model_version: persistedManifest.model_version,
+        p_readiness_status: persistedManifest.readiness.status,
+        p_is_fallback: Boolean(persistedManifest.is_fallback),
+        p_fallback_reason: persistedManifest.fallback_reason ?? '',
+        p_collected_at: persistedManifest.collected_at,
+        p_source_health: persistedManifest.source_health,
+        p_projection_recipe: persistedManifest.projection_recipe,
+        p_manifest_data: persistedManifest,
+        p_provenance: provenanceRows(persistedManifest),
+      }, { serviceRole: true, allowMissingServiceRole: true });
+      return {
+        ...persistedManifest,
+        snapshot_id: snapshotId ?? undefined,
+        source_status: { ...persistedManifest.source_status, scan_snapshot: snapshotId ? 'ok' : 'partial' },
+        data_warnings: snapshotId
+          ? persistedManifest.data_warnings
+          : [...persistedManifest.data_warnings, 'The scan was persisted, but its immutable trust snapshot was not created.'],
+      };
+    } catch (error) {
+      console.error('MIOS trust snapshot persistence failed:', error);
+      return {
+        ...persistedManifest,
+        source_status: { ...persistedManifest.source_status, scan_snapshot: 'unavailable' },
+        data_warnings: [
+          ...persistedManifest.data_warnings,
+          `Trust snapshot persistence failed: ${error instanceof Error ? error.message : String(error)}`,
+        ],
+      };
+    }
   } catch (error) {
     return {
       ...manifest,
@@ -3757,6 +4349,7 @@ Deno.serve(async (req) => {
   const slate = payload.slate;
   const userId = String(payload.userId ?? '');
   const cacheKey = `${sport}:${contestType}:${contestDate}:${contestId ?? 'no-contest'}:${gameId ?? 'all-games'}`;
+  let requestAuth: AuthResult | null = null;
 
   try {
     if (slate) {
@@ -3768,6 +4361,7 @@ Deno.serve(async (req) => {
     }
 
     const auth = await validateFunctionAuth(req, userId);
+    requestAuth = auth;
     const effectiveUserId = auth.userId ?? userId;
     const manifest = await withTimeout(
       orchestrateMiosFantasyScan(sport, contestType, contestDate, effectiveUserId ?? '', contestId, gameId, slate),
@@ -3780,14 +4374,38 @@ Deno.serve(async (req) => {
   } catch (error) {
     const cached = manifestCache.get(cacheKey);
     if (cached && isManifestCacheFresh(cached.cachedAt)) {
-      return jsonResponse({
+      const fallbackManifest: MiosManifest = {
         ...cached.manifest,
+        manifest_id: crypto.randomUUID(),
+        is_fallback: true,
+        fallback_reason: error instanceof Error ? error.message : String(error),
         data_warnings: [
           ...cached.manifest.data_warnings,
           `Live scan failed; using cached data. Reason: ${error instanceof Error ? error.message : String(error)}`,
         ],
         source_status: { ...cached.manifest.source_status, scan_cache: 'partial' },
-      });
+        source_health: {
+          ...cached.manifest.source_health,
+          scan_cache: {
+            status: 'partial',
+            provider: 'MIOS edge cache',
+            collected_at: new Date().toISOString(),
+            freshness_seconds: Math.max(0, Math.round((Date.now() - cached.cachedAt) / 1000)),
+            fallback_used: true,
+            failure_reason: error instanceof Error ? error.message : String(error),
+          },
+        },
+        readiness: {
+          ...cached.manifest.readiness,
+          status: cached.manifest.readiness.status === 'blocked' ? 'blocked' : 'caution',
+          cautions: [
+            'This result uses cached data because live MIOS collection failed.',
+            ...cached.manifest.readiness.cautions,
+          ].slice(0, 12),
+        },
+      };
+      const persistedFallback = requestAuth ? await persistMiosManifest(fallbackManifest, requestAuth) : fallbackManifest;
+      return jsonResponse(persistedFallback);
     }
     if (cached) manifestCache.delete(cacheKey);
 

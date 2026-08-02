@@ -599,8 +599,7 @@ function classicRosterSize(sport: string): number {
 }
 
 function defaultLineupMode(shape: string): string {
-  void shape;
-  return 'max_fpts';
+  return shape === 'double_up' ? 'safe' : 'tournament';
 }
 
 interface DerivedScanInput {

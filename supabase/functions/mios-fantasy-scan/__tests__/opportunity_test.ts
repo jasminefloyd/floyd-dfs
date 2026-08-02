@@ -1,4 +1,9 @@
-import { redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
+import { positionMeanPpm, redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
+
+Deno.test('WNBA opportunity priors are sport-specific rather than an NBA scale factor', () => {
+  if (positionMeanPpm('PG', 'wnba') !== 0.91) throw new Error('Expected the WNBA PG prior to be used');
+  if (positionMeanPpm('PG', 'nba') !== 1.05) throw new Error('Expected the NBA PG prior to remain unchanged');
+});
 
 Deno.test('redistributeMinutes sends 70 percent of out guard minutes to active guard teammates', () => {
   const players: OpportunityPlayer[] = [

@@ -10,6 +10,7 @@ export interface SimPlayer {
   ownership_projection?: number;
   salary_multiplier?: number;
   roster_slot?: string;
+  relationship_edges?: Array<{ related_player_id: string; direction: 'positive' | 'negative' | 'neutral'; strength: number; sample_size: number; validated: boolean }>;
 }
 
 export interface SimRosterSlot {
@@ -108,6 +109,24 @@ export function correlateOutcomes(
   } else if (sport === 'mlb') {
     applyMlbCorrelation(outcomes, means, roster, gamePairs);
   }
+  applyShrunkRelationshipCorrelation(outcomes, means, roster);
+}
+
+function applyShrunkRelationshipCorrelation(outcomes: Float64Array, means: Float64Array, roster: SimPlayer[]): void {
+  const indexById = new Map(roster.map((player, index) => [player.player_id, index]));
+  roster.forEach((player, index) => {
+    for (const edge of player.relationship_edges ?? []) {
+      const relatedIndex = indexById.get(edge.related_player_id);
+      if (relatedIndex === undefined || relatedIndex <= index) continue;
+      // Derived relationships are intentionally shrunk until historical pair outcomes
+      // are supplied. This adds structure without pretending the edge is validated.
+      const shrinkage = edge.validated && edge.sample_size >= 20 ? 1 : 0.35;
+      const coefficient = Math.max(-0.18, Math.min(0.18, edge.strength * shrinkage)) * (edge.direction === 'negative' ? -1 : 1);
+      const deviation = outcomes[relatedIndex] - means[relatedIndex];
+      outcomes[index] = Math.max(0, outcomes[index] + deviation * coefficient);
+      outcomes[relatedIndex] = Math.max(0, outcomes[relatedIndex] + (outcomes[index] - means[index]) * coefficient * 0.35);
+    }
+  });
 }
 
 function applyBasketballCorrelation(

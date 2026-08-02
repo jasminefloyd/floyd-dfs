@@ -1,6 +1,7 @@
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 import { ExportLineup } from './ExportLineup';
+import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
 
 export interface LineupPlayer {
   id?: string;
@@ -37,6 +38,8 @@ export interface LineupPlayer {
   bust_probability?: number;
   batting_order?: number;
   game_context_tags?: string[];
+  home_away?: 'home' | 'away' | 'unknown';
+  news_evidence?: { summary?: string; confirmed: boolean; is_speculative: boolean; reliability: number; source: string };
   last_5_stats?: {
     avg_fantasy_pts?: number;
     stdev_fantasy_pts?: number;
@@ -79,15 +82,20 @@ export interface Lineup {
   portfolio_correlation_flags?: string[];
   late_swap_flags?: string[];
   strategy_notes?: string[];
+  scenario_key?: string;
+  scenario_confidence?: number;
+  relationship_score?: number;
+  evidence_summary?: string[];
   narrative: string;
 }
 
 interface LineupDisplayProps {
   lineups: Lineup[];
+  manifest?: MIOS_FantasyManifest | null;
   onSaveLineup?: (lineup: Lineup) => void;
 }
 
-export function LineupDisplay({ lineups, onSaveLineup }: LineupDisplayProps) {
+export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
   const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
   const toggleLineup = (rank: number) => {
     setExpandedRanks((current) => {
@@ -103,6 +111,11 @@ export function LineupDisplay({ lineups, onSaveLineup }: LineupDisplayProps) {
 
   return (
     <div className="space-y-3">
+      {manifest?.readiness?.cautions?.length ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <span className="font-black">Trust note:</span> {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
+        </div>
+      ) : null}
       {lineups.map((lineup) => {
         const isExpanded = expandedRanks.has(lineup.rank);
         const summaryId = `lineup-${lineup.rank}-summary`;
@@ -125,7 +138,7 @@ export function LineupDisplay({ lineups, onSaveLineup }: LineupDisplayProps) {
                     <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Lineup #{lineup.rank}</p>
                     <h3 className="mt-1 truncate text-base font-black text-[#0b1f3a] sm:text-lg">{lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
                     <p className="mt-1 text-[12px] font-medium text-slate-500">
-                      Confidence: {(lineup.confidence_score * 100).toFixed(0)}%
+                      Projection reliability: {(lineup.confidence_score * 100).toFixed(0)}%
                     </p>
                   </div>
                   <div className="flex shrink-0 items-start gap-2 text-right">
@@ -162,6 +175,12 @@ export function LineupDisplay({ lineups, onSaveLineup }: LineupDisplayProps) {
                 {lineup.narrative}
                 {lineup.win_condition ? (
                   <span className="mt-2 block font-bold text-[#0b1f3a]">{lineup.win_condition}</span>
+                ) : null}
+                {(lineup.scenario_key || lineup.relationship_score !== undefined) ? (
+                  <span className="mt-2 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                    {lineup.scenario_key ? `Scenario: ${lineup.scenario_key.replace(/_/g, ' ')}` : ''}
+                    {lineup.relationship_score !== undefined ? ` • Relationship evidence: ${lineup.relationship_score.toFixed(2)}` : ''}
+                  </span>
                 ) : null}
               </p>
               {!isExpanded ? (

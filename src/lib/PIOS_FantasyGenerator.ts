@@ -47,6 +47,9 @@ export interface LineupPlayerDraft {
   bust_probability?: number;
   batting_order?: number;
   game_context_tags?: string[];
+  home_away?: 'home' | 'away' | 'unknown';
+  form_metrics?: { last_3_avg: number | null; last_5_avg: number | null; recency_weighted_avg: number | null; trend: 'up' | 'down' | 'stable' | 'unknown'; sample_size: number; source: string; is_synthetic: boolean };
+  news_evidence?: { summary?: string; score: number; impact_type: string; confirmed: boolean; is_speculative: boolean; reliability: number; source: string };
 }
 
 export interface DraftLineup {
@@ -79,6 +82,10 @@ export interface DraftLineup {
   portfolio_correlation_flags?: string[];
   late_swap_flags?: string[];
   strategy_notes?: string[];
+  scenario_key?: 'high_total' | 'favorite_control' | 'underdog_comeback' | 'close_game' | 'blowout_risk' | 'neutral';
+  scenario_confidence?: number;
+  relationship_score?: number;
+  evidence_summary?: string[];
   constraint_violations: string[];
 }
 

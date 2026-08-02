@@ -38,6 +38,14 @@ const NBA_POSITION_MEAN_PPM: Record<string, number> = {
   C: 1.15,
 };
 
+const WNBA_POSITION_MEAN_PPM: Record<string, number> = {
+  PG: 0.91,
+  SG: 0.84,
+  SF: 0.86,
+  PF: 0.94,
+  C: 1.03,
+};
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -91,17 +99,16 @@ export function minutesAverage(player: OpportunityPlayer): number | null {
 }
 
 export function positionMeanPpm(position: string, sport: OpportunitySport): number {
+  const positionMeans = sport === 'wnba' ? WNBA_POSITION_MEAN_PPM : NBA_POSITION_MEAN_PPM;
   const parts = positionParts(position);
   const means = parts.flatMap((part) => {
-    const mean = NBA_POSITION_MEAN_PPM[part];
+    const mean = positionMeans[part];
     return typeof mean === 'number' ? [mean] : [];
   });
-  const nbaMean = means.length
+  const mean = means.length
     ? means.reduce((sum, value) => sum + value, 0) / means.length
-    : 1;
-  // Tunable baseline priors: NBA means are approximate DK points/minute by position;
-  // WNBA uses the same shape scaled by 0.85 until enough local calibration exists.
-  return sport === 'wnba' ? nbaMean * 0.85 : nbaMean;
+    : sport === 'wnba' ? 0.88 : 1;
+  return mean;
 }
 
 export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): {

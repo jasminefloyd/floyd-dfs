@@ -9,7 +9,7 @@ ALTER TABLE tenant_fantasy_ai.draftkings_player_salaries
 
 DROP FUNCTION IF EXISTS public.fantasy_ai_get_draftkings_salaries(TEXT, DATE, TEXT, UUID);
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_draftkings_salaries(
+CREATE FUNCTION public.fantasy_ai_get_draftkings_salaries(
   p_sport TEXT,
   p_contest_date DATE,
   p_contest_type TEXT,

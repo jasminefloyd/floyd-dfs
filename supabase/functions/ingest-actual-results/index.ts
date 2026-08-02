@@ -591,6 +591,14 @@ async function ingestSport(sport: Sport, contestDate: string) {
   const scoreboard = rows.length
     ? await scoreGeneratedLineups(sport, contestDate, slatePlayers, rows as ProjectionResultRow[], generatedLineups)
     : { scored: 0, missing_players: 0 };
+  const snapshotsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_mios_snapshots', {
+    p_sport: sport,
+    p_contest_date: contestDate,
+  }).catch(() => 0) ?? 0;
+  const piosRelationshipsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_pios_relationships_for_date', {
+    p_sport: sport,
+    p_contest_date: contestDate,
+  }).catch(() => 0) ?? 0;
   return {
     sport,
     matched: rows.length,
@@ -598,6 +606,8 @@ async function ingestSport(sport: Sport, contestDate: string) {
     upserted,
     lineups_scored: scoreboard.scored,
     lineup_missing_players: scoreboard.missing_players,
+    snapshots_evaluated: snapshotsEvaluated,
+    pios_relationships_evaluated: piosRelationshipsEvaluated,
     unmatched_names: matched.unmatched.slice(0, 40),
   };
 }
@@ -633,6 +643,7 @@ Deno.serve(async (req) => {
       upserted: results.reduce((sum, item) => sum + item.upserted, 0),
       lineups_scored: results.reduce((sum, item) => sum + item.lineups_scored, 0),
       lineup_missing_players: results.reduce((sum, item) => sum + item.lineup_missing_players, 0),
+      snapshots_evaluated: results.reduce((sum, item) => sum + item.snapshots_evaluated, 0),
     });
   } catch (error) {
     return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);

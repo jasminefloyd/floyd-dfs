@@ -5,7 +5,7 @@ ALTER TABLE tenant_fantasy_ai.draftkings_player_salaries
 
 DROP FUNCTION IF EXISTS public.fantasy_ai_get_draftkings_salaries(TEXT, DATE, TEXT, UUID);
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_draftkings_salaries(
+CREATE FUNCTION public.fantasy_ai_get_draftkings_salaries(
   p_sport TEXT,
   p_contest_date DATE,
   p_contest_type TEXT,
@@ -222,7 +222,9 @@ $$;
 GRANT EXECUTE ON FUNCTION public.fantasy_ai_upsert_projection_results_v2(JSONB)
   TO service_role;
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_projection_calibration_v2(
+DROP FUNCTION IF EXISTS public.fantasy_ai_projection_calibration_v2(TEXT, INT);
+
+CREATE FUNCTION public.fantasy_ai_projection_calibration_v2(
   p_sport TEXT,
   p_days INT DEFAULT 45
 )

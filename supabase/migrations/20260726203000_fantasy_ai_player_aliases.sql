@@ -27,7 +27,9 @@ CREATE POLICY player_aliases_select ON tenant_fantasy_ai.player_aliases
 GRANT SELECT ON tenant_fantasy_ai.player_aliases TO anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON tenant_fantasy_ai.player_aliases TO service_role;
 
-CREATE OR REPLACE FUNCTION public.fantasy_ai_get_player_aliases(
+DROP FUNCTION IF EXISTS public.fantasy_ai_get_player_aliases(TEXT);
+
+CREATE FUNCTION public.fantasy_ai_get_player_aliases(
   p_sport TEXT
 )
 RETURNS TABLE (

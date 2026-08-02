@@ -10,6 +10,7 @@ import {
   scoreIndexedEntries,
   scaleFinishRank,
 } from './simulation.ts';
+import { deriveFormMetrics, deriveNewsEvidence, deriveRelationships, deriveScenario, relationshipScore, type PiosFormMetrics, type PiosNewsEvidence, type PiosRelationship, type PiosScenario, type PiosHomeAway } from './intelligence.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -24,6 +25,15 @@ interface ManifestPlayer {
   salary_source?: string;
   injury_status: InjuryStatus;
   projected_points?: number;
+  p10_projection?: number;
+  p25_projection?: number;
+  p50_projection?: number;
+  p75_projection?: number;
+  p90_projection?: number;
+  p95_projection?: number;
+  stdev_fantasy_pts?: number;
+  boom_probability?: number;
+  bust_probability?: number;
   projection_source?: string;
   prop_projection?: number;
   implied_total?: number;
@@ -46,6 +56,7 @@ interface ManifestPlayer {
   context_score?: number;
   news_score?: number;
   news_note?: string;
+  news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
   last_5_stats?: {
     avg_fantasy_pts?: number;
     stdev_fantasy_pts?: number;
@@ -53,7 +64,16 @@ interface ManifestPlayer {
     minutes_stdev?: number;
     confidence?: number;
     is_synthetic?: boolean;
+    games?: Array<Record<string, unknown> & { date?: string; fantasy_points?: number; fantasy_pts?: number; minutes?: number; usage_rate?: number }>;
+    source?: string;
+    last_updated_at?: string;
   };
+  home_away?: PiosHomeAway;
+  venue?: string;
+  rest_days?: number;
+  field_provenance?: Record<string, { source?: string; observed_at?: string | null; is_modeled?: boolean; is_fallback?: boolean }>;
+  confidence_breakdown?: Record<string, number | string>;
+  projection_trace?: { model_version?: string; stages?: Array<{ name: string; projection: number | null; delta: number }> };
 }
 
 interface LineupPlayerDraft {
@@ -91,6 +111,12 @@ interface LineupPlayerDraft {
   usage_rate?: number;
   pace_metric?: number;
   stdev_fantasy_pts?: number;
+  p10_projection?: number;
+  p25_projection?: number;
+  p50_projection?: number;
+  p75_projection?: number;
+  p90_projection?: number;
+  p95_projection?: number;
   games_sample_size?: number;
   minutes_stdev?: number;
   context_score?: number;
@@ -104,6 +130,11 @@ interface LineupPlayerDraft {
   bust_probability?: number;
   batting_order?: number;
   game_context_tags?: string[];
+  home_away?: PiosHomeAway;
+  form_metrics?: PiosFormMetrics;
+  news_evidence?: PiosNewsEvidence;
+  news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
+  relationship_edges?: PiosRelationship[];
 }
 
 interface LineupConstructionRules {
@@ -131,6 +162,8 @@ interface LineupConstructionRules {
   simulationIterations: number;
   fieldSimulationSize: number;
   showDiagnostics: boolean;
+  nflStackMinimum: number;
+  nflBringbackMinimum: number;
 }
 
 interface DraftLineup {
@@ -165,6 +198,10 @@ interface DraftLineup {
   portfolio_correlation_flags?: string[];
   late_swap_flags?: string[];
   strategy_notes?: string[];
+  scenario_key?: PiosScenario['key'];
+  scenario_confidence?: number;
+  relationship_score?: number;
+  evidence_summary?: string[];
   constraint_violations: string[];
 }
 
@@ -205,6 +242,7 @@ interface PiosRequest {
   fieldSimulationSize?: number;
   showDiagnostics?: boolean;
   userId?: string;
+  historical_relationships?: Array<{ player_id: string; related_player_id: string; relationship_type?: PiosRelationship['type']; direction: PiosRelationship['direction']; correlation?: number; mean_lift?: number; sample_size?: number; source?: string; confidence?: number }>;
 }
 
 interface DraftKingsSlate {
@@ -412,6 +450,24 @@ async function callSupabaseRpc<T>(functionName: string, body: Record<string, unk
   return text ? JSON.parse(text) as T : null;
 }
 
+async function loadHistoricalRelationships(sport: string, players: ManifestPlayer[]): Promise<PiosRelationship[]> {
+  const ids = players.map((player) => player.id).filter(Boolean);
+  if (!ids.length || !envSupabaseUrl() || !envSupabaseServiceRoleKey()) return [];
+  try {
+    const rows = await callSupabaseRpc<Array<Record<string, unknown>>>('fantasy_ai_get_pios_relationships', { p_sport: sport, p_player_ids: ids });
+    return (rows ?? []).map((row) => ({
+      player_id: String(row.player_id), related_player_id: String(row.related_player_id),
+      type: (row.relationship_type as PiosRelationship['type']) ?? 'same_game',
+      direction: (row.direction as PiosRelationship['direction']) ?? 'neutral',
+      strength: Number(row.correlation ?? row.mean_lift ?? 0), source: 'historical_pair_data',
+      sample_size: Number(row.sample_size ?? 0), validated: Number(row.sample_size ?? 0) >= 20,
+    }));
+  } catch (error) {
+    console.warn('PIOS historical relationship load skipped:', error instanceof Error ? error.message : String(error));
+    return [];
+  }
+}
+
 function persistGeneratedLineups(
   lineups: DraftLineup[],
   payload: PiosRequest,
@@ -440,6 +496,7 @@ function persistGeneratedLineups(
     payout_shape: rules.payoutShape,
     ownership_weight: rules.ownershipWeight,
     config: {
+      manifestId: payload.manifestId ?? null,
       riskTolerance: payload.riskTolerance,
       lineupMode: payload.lineupMode,
       contestStrategy: rules.contestStrategy,
@@ -492,6 +549,27 @@ function persistGeneratedLineups(
     void promise;
   }
   return null;
+}
+
+async function persistPiosIntelligence(players: LineupPlayerDraft[], sport: string): Promise<string | null> {
+  if (!envSupabaseUrl() || !envSupabaseServiceRoleKey()) return 'PIOS intelligence persistence was skipped because Supabase service-role environment is not configured.';
+  try {
+    const relationships = players.flatMap((player) => (player.relationship_edges ?? []).map((edge) => ({
+      sport, player_id: edge.player_id, related_player_id: edge.related_player_id, relationship_type: edge.type,
+      direction: edge.direction, correlation: edge.strength, mean_lift: 0, sample_size: edge.sample_size,
+      source: edge.source, confidence: edge.validated ? 0.8 : 0.2,
+    })));
+    if (relationships.length) await callSupabaseRpc('fantasy_ai_upsert_pios_relationships', { p_rows: relationships.slice(0, 5000) });
+    const news = players.flatMap((player) => (player.news_events ?? []).map((event) => ({
+      sport, player_id: player.player_id, source: event.source, headline: event.headline, summary: event.headline,
+      impact_type: event.impact_type, published_at: event.published_at, confirmed: event.confirmed,
+      is_speculative: event.is_speculative, reliability: event.confirmed ? 0.85 : 0.35,
+    })));
+    if (news.length) await callSupabaseRpc('fantasy_ai_insert_pios_news_evidence', { p_rows: news });
+    return null;
+  } catch (error) {
+    return `PIOS intelligence persistence failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 function validatePayload(payload: PiosRequest) {
@@ -566,8 +644,7 @@ function validatePayload(payload: PiosRequest) {
 }
 
 function defaultLineupMode(payoutShape?: string): string {
-  void payoutShape;
-  return 'max_fpts';
+  return payoutShape === 'double_up' ? 'safe' : 'tournament';
 }
 
 function defaultContestStrategy(payload: PiosRequest): string {
@@ -623,6 +700,14 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       confidence_score: player.last_5_stats?.confidence ?? 0.5,
       last_5_avg_pts: player.last_5_stats?.avg_fantasy_pts ?? projectedPoints,
       stdev_fantasy_pts: positiveNumber(player.last_5_stats?.stdev_fantasy_pts),
+      p10_projection: positiveNumber(player.p10_projection),
+      p25_projection: positiveNumber(player.p25_projection),
+      p50_projection: positiveNumber(player.p50_projection),
+      p75_projection: positiveNumber(player.p75_projection),
+      p90_projection: positiveNumber(player.p90_projection),
+      p95_projection: positiveNumber(player.p95_projection),
+      boom_probability: positiveNumber(player.boom_probability),
+      bust_probability: positiveNumber(player.bust_probability),
       games_sample_size: positiveNumber(player.last_5_stats?.games_sample_size),
       minutes_stdev: positiveNumber(player.last_5_stats?.minutes_stdev),
       injury_status: player.injury_status ?? 'active',
@@ -647,9 +732,47 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       context_score: normalizeContextScore(player.context_score),
       news_score: normalizeNewsScore(player.news_score),
       news_note: player.news_note,
+      news_events: player.news_events,
       batting_order: player.batting_order,
+      form_metrics: deriveFormMetrics(player.last_5_stats, sport, player.position),
+      news_evidence: deriveNewsEvidence(player.news_score, player.news_note, player.last_5_stats?.last_updated_at, player.news_events),
+      home_away: player.home_away ?? 'unknown',
     };
   });
+}
+
+function enrichPiosIntelligence(players: LineupPlayerDraft[], sport: string, slate?: DraftKingsSlate, historicalRelationships: PiosRelationship[] = []): LineupPlayerDraft[] {
+  const events = Array.isArray(slate?.data?.events) ? slate.data.events as Record<string, unknown>[] : [];
+  const homeTeams = new Set(events.map((event) => teamFromEventSide(event, 'home')).filter(Boolean));
+  const awayTeams = new Set(events.map((event) => teamFromEventSide(event, 'away')).filter(Boolean));
+  const derivedRelationships = deriveRelationships(players.map((player) => ({
+    id: player.player_id, team: player.team, position: player.position, opponent_team: player.opponent_team, game_id: player.game_id, batting_order: player.batting_order,
+  })), sport);
+  const historicalKeys = new Set(historicalRelationships.map((edge) => `${edge.player_id}:${edge.related_player_id}:${edge.type}`));
+  const relationshipEdges = [...historicalRelationships, ...derivedRelationships.filter((edge) => !historicalKeys.has(`${edge.player_id}:${edge.related_player_id}:${edge.type}`))];
+  return players.map((player) => {
+    const homeAway = homeTeams.has(normalizeTeam(player.team)) ? 'home' : awayTeams.has(normalizeTeam(player.team)) ? 'away' : player.home_away ?? 'unknown';
+    const edges = relationshipEdges.filter((edge) => edge.player_id === player.player_id);
+    return { ...player, home_away: homeAway, relationship_edges: edges };
+  });
+}
+
+function applyLineupIntelligence(lineup: DraftLineup, sport: string, _slate?: DraftKingsSlate): DraftLineup {
+  const scenario = deriveScenario(lineup.players, sport);
+  const allEdges = lineup.players.flatMap((player) => player.relationship_edges ?? []);
+  const relationScore = relationshipScore(lineup.players.map((player) => player.player_id), allEdges);
+  const evidence = lineup.players.flatMap((player) => [
+    player.form_metrics?.sample_size ? `${player.name}: ${player.form_metrics.trend} recent form (${player.form_metrics.sample_size} games)` : '',
+    player.news_evidence?.is_speculative ? `${player.name}: unconfirmed news signal` : '',
+  ]).filter(Boolean);
+  return {
+    ...lineup,
+    scenario_key: scenario.key,
+    scenario_confidence: scenario.confidence,
+    relationship_score: relationScore,
+    evidence_summary: [...scenario.evidence, ...evidence].slice(0, 5),
+    strategy_notes: [...(lineup.strategy_notes ?? []), `Scenario: ${scenario.key.replace(/_/g, ' ')} (${Math.round(scenario.confidence * 100)}% evidence confidence)`, relationScore ? `Derived relationship score ${relationScore.toFixed(2)}; historical validation sample is unavailable.` : 'No validated player-pair history was supplied.'].filter(Boolean),
+  };
 }
 
 function rosterDiagnostics(
@@ -1242,8 +1365,8 @@ function applyContextualProjectionEngine(
     return {
       ...player,
       contextual_projection: contextualProjection,
-      floor_projection: player.floor_projection ?? Number(Math.max(0, contextualProjection * (1 - volatility * 0.55)).toFixed(2)),
-      ceiling_projection: player.ceiling_projection ?? Number((contextualProjection * (1 + volatility * 0.85)).toFixed(2)),
+      floor_projection: player.floor_projection ?? player.p10_projection ?? Number(Math.max(0, contextualProjection * (1 - volatility * 0.55)).toFixed(2)),
+      ceiling_projection: player.ceiling_projection ?? player.p90_projection ?? Number((contextualProjection * (1 + volatility * 0.85)).toFixed(2)),
       volatility_score: Number(volatility.toFixed(3)),
       batting_order: battingOrder,
       game_context_tags: player.game_context_tags ?? gameContextTags(player, sport, battingOrder),
@@ -1356,6 +1479,10 @@ function playerValueScore(player: LineupPlayerDraft, sport = '', rules?: LineupC
   const ownership = player.ownership_projection ?? 0.12;
   const newsBoost = (player.news_score ?? 0) * weights.news;
   const contextBoost = (player.context_score ?? 0) * weights.context;
+  const formBoost = player.form_metrics?.recency_weighted_avg !== null && player.form_metrics?.recency_weighted_avg !== undefined
+    ? (player.form_metrics.recency_weighted_avg - (player.last_5_avg_pts || projected)) * 0.12
+    : 0;
+  const evidenceBoost = (player.news_evidence?.score ?? player.news_score ?? 0) * (player.news_evidence?.reliability ?? 0.25) * 0.6;
   const ceiling = player.ceiling_projection ?? projected;
   const floor = player.floor_projection ?? projected;
   const battingOrderBoost = sport === 'mlb' && !isPitcher(player) && player.batting_order
@@ -1374,6 +1501,8 @@ function playerValueScore(player: LineupPlayerDraft, sport = '', rules?: LineupC
     - ownership * weights.ownershipBasePenalty
     + newsBoost
     + contextBoost
+    + formBoost
+    + evidenceBoost
     + battingOrderBoost
     + tournamentBoost
     + cashBoost;
@@ -1454,6 +1583,15 @@ function validateLineup(lineup: DraftLineup, contestType: string, sport?: string
       violations.push('too many bottom-order hitters for cash construction');
     }
   }
+  if (sport === 'nfl' && contestType === 'classic' && rules && rules.nflStackMinimum > 0) {
+    const stack = nflStackShape(lineup);
+    if (stack.sameTeamPassCatchers < rules.nflStackMinimum) {
+      violations.push(`NFL lineup needs QB plus ${rules.nflStackMinimum} same-team pass catcher${rules.nflStackMinimum === 1 ? '' : 's'}`);
+    }
+    if (stack.opponentKnown && stack.opponentPassCatchers < rules.nflBringbackMinimum) {
+      violations.push(`NFL tournament lineup needs ${rules.nflBringbackMinimum} opponent pass-catcher bring-back`);
+    }
+  }
 
   lineup.constraint_violations = violations;
   return violations.length === 0;
@@ -1492,6 +1630,9 @@ function detectLateSwapFlags(lineup: DraftLineup, rules: LineupConstructionRules
 }
 
 function stackQualityScore(lineup: DraftLineup, rules: LineupConstructionRules): number {
+  if (lineup.players.some((player) => String(player.position ?? '').toUpperCase() === 'QB')) {
+    return nflCorrelationScore(lineup, rules);
+  }
   const stack = largestTeamStack(lineup);
   if (!stack.size) return 0;
   const stackHitters = hitters(lineup).filter((player) => String(player.team ?? '').toUpperCase() === stack.team);
@@ -1507,6 +1648,48 @@ function stackQualityScore(lineup: DraftLineup, rules: LineupConstructionRules):
     + avgContext * 14
     - lowOrderPenalty
   ).toFixed(2));
+}
+
+function nflStackShape(lineup: DraftLineup): {
+  sameTeamPassCatchers: number;
+  opponentPassCatchers: number;
+  hasOpposingDefense: boolean;
+  opponentKnown: boolean;
+} {
+  const quarterback = lineup.players.find((player) => String(player.position ?? '').toUpperCase() === 'QB');
+  if (!quarterback) return { sameTeamPassCatchers: 0, opponentPassCatchers: 0, hasOpposingDefense: false, opponentKnown: false };
+  const qbTeam = String(quarterback.team ?? '').toUpperCase();
+  const qbOpponent = String(quarterback.opponent_team ?? '').toUpperCase();
+  const passCatchers = lineup.players.filter((player) => ['WR', 'TE'].includes(String(player.position ?? '').toUpperCase()));
+  return {
+    sameTeamPassCatchers: passCatchers.filter((player) => String(player.team ?? '').toUpperCase() === qbTeam).length,
+    opponentPassCatchers: qbOpponent
+      ? passCatchers.filter((player) => String(player.team ?? '').toUpperCase() === qbOpponent).length
+      : 0,
+    hasOpposingDefense: lineup.players.some((player) => ['DST', 'DEF'].includes(String(player.position ?? '').toUpperCase())
+      && String(player.team ?? '').toUpperCase() === qbOpponent),
+    opponentKnown: Boolean(qbOpponent),
+  };
+}
+
+function nflCorrelationScore(lineup: DraftLineup, rules: LineupConstructionRules): number {
+  const shape = nflStackShape(lineup);
+  const score = shape.sameTeamPassCatchers * 2.4
+    + shape.opponentPassCatchers * 1.5
+    - (shape.hasOpposingDefense ? 3.5 : 0);
+  return Number((score + (rules.contestStrategy === 'large_field_gpp' && shape.opponentPassCatchers ? 1.5 : 0)).toFixed(2));
+}
+
+function wnbaGameEnvironmentScore(lineup: DraftLineup): number {
+  const byGame = new Map<string, number>();
+  for (const player of lineup.players) {
+    const game = String(player.game_id ?? '').trim();
+    if (game) byGame.set(game, (byGame.get(game) ?? 0) + 1);
+  }
+  const largestGame = Math.max(...byGame.values(), 0);
+  const confirmedRotation = lineup.players.filter((player) => player.confirmed_starter === true).length;
+  const uncertainRotation = lineup.players.filter((player) => player.confirmed_starter === false).length;
+  return Number((largestGame * 0.8 + confirmedRotation * 0.35 - uncertainRotation * 0.65).toFixed(2));
 }
 
 function battingOrderAdjacencyScore(players: LineupPlayerDraft[]): number {
@@ -1542,7 +1725,7 @@ function lineupVolatilityScore(lineup: DraftLineup): number {
 
 function lineupIntelligenceScore(lineup: DraftLineup, rules: LineupConstructionRules): number {
   const weights = PIOS_WEIGHTS.lineupIntelligence;
-  const stack = stackQualityScore(lineup, rules);
+  const stack = lineup.stack_quality_score ?? stackQualityScore(lineup, rules);
   const context = contextEdgeScore(lineup);
   const volatility = lineupVolatilityScore(lineup);
   const ownership = lineup.ownership_sum ?? lineup.players.reduce((sum, player) => sum + (player.ownership_projection ?? 0.12), 0);
@@ -1550,12 +1733,16 @@ function lineupIntelligenceScore(lineup: DraftLineup, rules: LineupConstructionR
   const bust = lineup.players.reduce((sum, player) => sum + (player.bust_probability ?? 0.18), 0);
   const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * weights.antiCorrelationPenalty;
   const latePenalty = (lineup.late_swap_flags?.length ?? 0) * weights.lateSwapPenalty;
+  const relationshipBonus = (lineup.relationship_score ?? 0) * 4;
+  const scenarioBonus = (lineup.scenario_confidence ?? 0) * 2;
   const ownershipAdjustment = rules.contestStrategy === 'large_field_gpp'
     ? (weights.largeFieldOwnershipTarget - ownership) * weights.largeFieldOwnershipMultiplier
     : -Math.max(0, ownership - weights.chalkPenaltyThreshold) * weights.chalkPenaltyMultiplier;
   return Number((
     stack * rules.correlationWeight
     + context
+    + relationshipBonus
+    + scenarioBonus
     + boom * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldBoom : weights.standardBoom)
     + volatility * (rules.contestStrategy === 'cash' ? weights.cashVolatility : weights.tournamentVolatility)
     + ownershipAdjustment
@@ -1608,13 +1795,19 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
   const stack = largestTeamStack(lineup);
   const antiCorrelationFlags = detectAntiCorrelation(lineup, sport);
   const lateSwapFlags = detectLateSwapFlags(lineup, rules, sport);
-  const stackQuality = sport === 'mlb' ? stackQualityScore(lineup, rules) : 0;
+  const stackQuality = sport === 'mlb'
+    ? stackQualityScore(lineup, rules)
+    : sport === 'nfl'
+      ? nflCorrelationScore(lineup, rules)
+      : sport === 'wnba'
+        ? wnbaGameEnvironmentScore(lineup)
+        : 0;
   const contextEdge = contextEdgeScore(lineup);
   const volatility = lineupVolatilityScore(lineup);
   const strategyNotes = [
     ...(lineup.strategy_notes ?? []),
     stack.size ? `${stack.team} ${stack.size}-player primary stack` : '',
-    sport === 'mlb' && stackQuality ? `Stack quality ${stackQuality.toFixed(1)} from batting order, context, and correlation` : '',
+    stackQuality ? `${sport.toUpperCase()} correlation/rotation score ${stackQuality.toFixed(1)}` : '',
     contextEdge ? `Context edge ${contextEdge.toFixed(1)} from park/weather/news/role signals` : '',
     antiCorrelationFlags.length ? `Anti-correlation: ${antiCorrelationFlags.join(', ')}` : '',
     lateSwapFlags.length ? `${lateSwapFlags.length} late-swap watch item${lateSwapFlags.length === 1 ? '' : 's'}` : '',
@@ -1631,10 +1824,11 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
     volatility_score: volatility,
     strategy_notes: strategyNotes,
   };
+  const intelligent = applyLineupIntelligence(enriched, sport);
   return {
-    ...enriched,
-    lineup_intelligence_score: lineupIntelligenceScore(enriched, rules),
-    win_condition: lineupWinCondition(enriched, rules),
+    ...intelligent,
+    lineup_intelligence_score: lineupIntelligenceScore(intelligent, rules),
+    win_condition: lineupWinCondition(intelligent, rules),
   };
 }
 
@@ -1963,6 +2157,8 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
       simulationIterations: 0,
       fieldSimulationSize,
       showDiagnostics,
+      nflStackMinimum: 0,
+      nflBringbackMinimum: 0,
     };
   }
   const strategyDefaults: Record<string, Pick<LineupConstructionRules, 'maxPlayerExposure' | 'maxTeamExposure' | 'minPrimaryStack' | 'diversifyLineups' | 'lateSwapMode'>> = {
@@ -1998,6 +2194,8 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     simulationIterations,
     fieldSimulationSize,
     showDiagnostics,
+    nflStackMinimum: contestStrategy === 'large_field_gpp' ? 2 : 1,
+    nflBringbackMinimum: contestStrategy === 'large_field_gpp' ? 1 : 0,
   };
 }
 
@@ -2134,7 +2332,8 @@ function portfolioMarginalScore(lineup: DraftLineup, selected: DraftLineup[], ru
     ? 80
     : 0;
   const scriptOverlapPenalty = selected.some((existing) => lineupWinCondition(existing, rules) === lineupWinCondition(lineup, rules)) ? 25 : 0;
-  return base + setTopNGain * 5_000 + win * 2_000 - duplicatePenalty - similarityPenalty - captainOverlapPenalty - scriptOverlapPenalty;
+  const scenarioOverlapPenalty = lineup.scenario_key && selected.some((existing) => existing.scenario_key === lineup.scenario_key) ? 18 : 0;
+  return base + setTopNGain * 5_000 + win * 2_000 - duplicatePenalty - similarityPenalty - captainOverlapPenalty - scriptOverlapPenalty - scenarioOverlapPenalty;
 }
 
 function portfolioAtLeastOneTopNRate(lineups: DraftLineup[]): number {
@@ -2164,6 +2363,9 @@ function portfolioCorrelationFlags(lineups: DraftLineup[], rules: LineupConstruc
   for (const [captain, count] of repeatedCaptains) flags.push(`${count} lineups use ${captain} at captain`);
   const repeatedScripts = [...scriptCounts.entries()].filter(([, count]) => count > 1);
   for (const [script, count] of repeatedScripts) flags.push(`${count} lineups share the same game script: ${script}`);
+  const scenarioCounts = new Map<string, number>();
+  for (const lineup of lineups) if (lineup.scenario_key) scenarioCounts.set(lineup.scenario_key, (scenarioCounts.get(lineup.scenario_key) ?? 0) + 1);
+  for (const [scenario, count] of [...scenarioCounts.entries()].filter(([, count]) => count > 1)) flags.push(`${count} lineups share the ${scenario.replace(/_/g, ' ')} scenario`);
   const maxShared = Math.max(...lineups.flatMap((lineup, index) => lineups.slice(index + 1).map((other) => sharedPlayerCount(lineup, other))), 0);
   if (maxShared > Math.max(1, (lineups[0]?.players.length ?? 6) - 2)) flags.push(`Most similar pair shares ${maxShared} players`);
   return flags;
@@ -2184,7 +2386,8 @@ function lineupRankScore(lineup: DraftLineup, riskTolerance: string, lineupMode:
   const contextEdge = lineup.context_edge_score ?? 0;
   const volatility = lineup.volatility_score ?? 0.3;
   const isShowdown = lineup.players.some((player) => player.roster_slot === 'CPT');
-  const stackBonus = isShowdown ? 0 : (lineup.primary_stack_size ?? 0) * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldStack : rules.contestStrategy === 'cash' ? weights.cashStack : weights.standardStack);
+  const stackMetric = lineup.stack_quality_score ?? lineup.primary_stack_size ?? 0;
+  const stackBonus = isShowdown ? 0 : stackMetric * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldStack : rules.contestStrategy === 'cash' ? weights.cashStack : weights.standardStack);
   const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * weights.antiCorrelationPenalty;
   const latePenalty = (lineup.late_swap_flags?.length ?? 0) * (rules.lateSwapMode ? weights.lateSwapEnabledPenalty : weights.lateSwapDisabledPenalty);
   const ownershipPenalty = (lineup.ownership_sum ?? 0) * weights.ownershipPenalty * rules.ownershipWeight;
@@ -2251,12 +2454,25 @@ Deno.serve(async (req) => {
       lineup_mode: payload.lineupMode,
     });
 
-    const draftPlayers = mapToDraftPlayers(payload.playerRoster, payload.sport);
+    const historicalRelationships = payload.historical_relationships?.map((row) => ({
+      player_id: row.player_id,
+      related_player_id: row.related_player_id,
+      type: row.relationship_type ?? 'same_game',
+      direction: row.direction,
+      strength: Number(row.correlation ?? row.mean_lift ?? 0),
+      source: 'historical_pair_data' as const,
+      sample_size: Number(row.sample_size ?? 0),
+      validated: Number(row.sample_size ?? 0) >= 20,
+    })) ?? await loadHistoricalRelationships(payload.sport, payload.playerRoster);
+    const draftPlayers = enrichPiosIntelligence(mapToDraftPlayers(payload.playerRoster, payload.sport), payload.sport, payload.slate, historicalRelationships);
     const constructionRules = strategyProfile(payload);
     const ownershipCoverage = draftPlayers.length
       ? draftPlayers.filter((player) => player.ownership_projection !== undefined).length / draftPlayers.length
       : 0;
     const tournamentNeedsOwnership = payload.lineupMode !== 'safe' && payload.lineupMode !== 'max_fpts';
+    if (tournamentNeedsOwnership && ownershipCoverage < 0.6) {
+      throw new Error(`Tournament generation blocked: ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; refresh public ownership projections before generating leverage-based lineups.`);
+    }
     const startedAt = Date.now();
     const lineups = generateLineups(
       draftPlayers,
@@ -2268,6 +2484,7 @@ Deno.serve(async (req) => {
       constructionRules,
       payload.slate,
     );
+    const intelligencePersistenceWarning = await persistPiosIntelligence(draftPlayers, payload.sport);
     logStage(payload.requestId, 'lineups_generated', {
       lineups: lineups.length,
       wall_time_ms: Date.now() - startedAt,
@@ -2290,6 +2507,7 @@ Deno.serve(async (req) => {
       : 0;
     const questionableIncludedCount = draftPlayers.filter((player) => player.injury_status === 'questionable').length;
     const dataWarnings = [
+      ...(intelligencePersistenceWarning ? [intelligencePersistenceWarning] : []),
       ...(injuryExcludedCount
         ? [`${injuryExcludedCount} player${injuryExcludedCount === 1 ? '' : 's'} excluded from lineup generation because injury status was out or doubtful.`]
         : []),

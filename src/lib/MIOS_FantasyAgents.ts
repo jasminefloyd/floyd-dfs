@@ -53,6 +53,15 @@ export interface Player {
   injury_note?: string;
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
+  p10_projection?: number;
+  p25_projection?: number;
+  p50_projection?: number;
+  p75_projection?: number;
+  p90_projection?: number;
+  p95_projection?: number;
+  stdev_fantasy_pts?: number;
+  boom_probability?: number;
+  bust_probability?: number;
   ownership_projection?: number;
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
@@ -74,6 +83,7 @@ export interface Player {
   context_score?: number;
   news_score?: number;
   news_note?: string;
+  news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
   last_5_stats?: {
     avg_points: number;
     avg_fantasy_pts: number;
@@ -85,7 +95,61 @@ export interface Player {
     minutes_avg?: number;
     is_synthetic?: boolean;
     games: Last5Game[];
+    source?: string;
+    last_updated_at?: string;
   };
+  field_provenance?: Record<string, FieldProvenance>;
+  confidence_breakdown?: ConfidenceBreakdown;
+  projection_trace?: ProjectionTrace;
+}
+
+export type ReadinessStatus = 'ready' | 'caution' | 'blocked';
+
+export interface ConfidenceBreakdown {
+  data_completeness: number;
+  data_freshness: number;
+  lineup_certainty: number;
+  projection_reliability: number;
+  outcome_uncertainty: number;
+  label: 'projection_reliability';
+}
+
+export interface ProjectionTrace {
+  model_version: string;
+  base_projection: number | null;
+  final_projection: number | null;
+  total_adjustment: number;
+  applied_models: string[];
+  stages: Array<{ name: string; projection: number | null; delta: number }>;
+  note: string;
+}
+
+export interface FieldProvenance {
+  source: string;
+  observed_at?: string | null;
+  freshness_seconds?: number | null;
+  is_modeled: boolean;
+  is_fallback: boolean;
+}
+
+export interface SourceHealth {
+  status: 'ok' | 'partial' | 'unavailable';
+  provider?: string;
+  coverage?: { matched: number; total: number; percent: number };
+  collected_at?: string;
+  freshness_seconds?: number | null;
+  fallback_used?: boolean;
+  failure_reason?: string;
+  observed_at?: string | null;
+  data_class?: 'live' | 'cached' | 'modeled' | 'unknown';
+}
+
+export interface Readiness {
+  status: ReadinessStatus;
+  eligible_for_lineups: boolean;
+  eligible_for_tournament: boolean;
+  hard_blocks: string[];
+  cautions: string[];
 }
 
 export interface MIOS_FantasyManifest {
@@ -112,11 +176,26 @@ export interface MIOS_FantasyManifest {
   catalysts: { type: string; player_id?: string; description: string }[];
   narrative_seeds: string[];
   source_status: Record<string, 'ok' | 'partial' | 'unavailable'>;
+  source_health?: Record<string, SourceHealth>;
+  readiness?: Readiness;
+  model_version?: string;
+  is_fallback?: boolean;
+  fallback_reason?: string;
+  projection_recipe?: {
+    base_projection: string;
+    adjustments: string[];
+    confidence_definition: string;
+  };
+  snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
 }
 
-// Confidence Scorer
+/**
+ * @deprecated The active MIOS edge pipeline uses confidence_breakdown and
+ * labels it projection reliability. Keep this compatibility helper only for
+ * older callers; its result must not be presented as a win probability.
+ */
 export function scorePlayerConfidence(
   stats: any,
   injuryStatus: string,
