@@ -46,6 +46,7 @@ interface GeneratedLineupRow {
   contest_id: string | null;
   lineup_mode: string;
   contest_strategy: string;
+  config?: { scenarioKey?: string; scenarioConfidence?: number; relationshipScore?: number } | null;
   players: Array<{
     player_id?: string | null;
     player_name?: string | null;
@@ -541,6 +542,7 @@ async function scoreGeneratedLineups(
   const optimalCache = new Map<string, number>();
   let scored = 0;
   let missingPlayers = 0;
+  const piosEvaluations: Array<Record<string, unknown>> = [];
 
   for (const lineup of targetLineups) {
     const { actual, missingPlayers: missingForLineup } = lineupActualPoints(lineup, actualByNameTeam);
@@ -559,7 +561,26 @@ async function scoreGeneratedLineups(
       p_actual: actual,
       p_optimal: optimal,
     });
+    piosEvaluations.push({
+      generated_lineup_id: lineup.id,
+      sport,
+      contest_date: contestDate,
+      scenario_key: lineup.config?.scenarioKey,
+      scenario_confidence: lineup.config?.scenarioConfidence,
+      relationship_score: lineup.config?.relationshipScore,
+      projection_reliability: null,
+      projected_points: lineup.projected_points,
+      actual_points: actual,
+      point_error: actual - lineup.projected_points,
+      outperformed_projection: actual > lineup.projected_points,
+    });
     scored += 1;
+  }
+
+  if (piosEvaluations.length) {
+    await callSupabaseRpc('fantasy_ai_upsert_pios_lineup_evaluations', { p_rows: piosEvaluations }).catch((error) => {
+      console.error('PIOS lineup evaluation persistence failed:', error);
+    });
   }
 
   return { scored, missing_players: missingPlayers };

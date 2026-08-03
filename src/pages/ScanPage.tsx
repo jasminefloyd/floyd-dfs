@@ -403,6 +403,7 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       news_note: p.news_note,
       news_evidence: p.news_evidence,
       home_away: p.home_away,
+      form_metrics: p.form_metrics,
       last_5_stats: {
         avg_fantasy_pts: p.last_5_avg_pts,
         stdev_fantasy_pts: p.stdev_fantasy_pts,

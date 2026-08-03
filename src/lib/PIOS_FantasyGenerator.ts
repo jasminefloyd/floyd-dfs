@@ -48,7 +48,7 @@ export interface LineupPlayerDraft {
   batting_order?: number;
   game_context_tags?: string[];
   home_away?: 'home' | 'away' | 'unknown';
-  form_metrics?: { last_3_avg: number | null; last_5_avg: number | null; recency_weighted_avg: number | null; trend: 'up' | 'down' | 'stable' | 'unknown'; sample_size: number; source: string; is_synthetic: boolean };
+  form_metrics?: { last_3_avg: number | null; last_5_avg: number | null; last_10_avg: number | null; season_to_date_avg: number | null; recency_weighted_avg: number | null; trend: 'up' | 'down' | 'stable' | 'unknown'; opportunity_trend: 'up' | 'down' | 'stable' | 'unknown'; sample_size: number; source: string; is_synthetic: boolean };
   news_evidence?: { summary?: string; score: number; impact_type: string; confirmed: boolean; is_speculative: boolean; reliability: number; source: string };
 }
 

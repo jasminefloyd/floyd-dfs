@@ -14,8 +14,11 @@ export interface PiosRecentGame {
 export interface PiosFormMetrics {
   last_3_avg: number | null;
   last_5_avg: number | null;
+  last_10_avg: number | null;
+  season_to_date_avg: number | null;
   recency_weighted_avg: number | null;
   trend: 'up' | 'down' | 'stable' | 'unknown';
+  opportunity_trend: 'up' | 'down' | 'stable' | 'unknown';
   sample_size: number;
   source: string;
   is_synthetic: boolean;
@@ -67,18 +70,28 @@ export function deriveFormMetrics(stats?: { avg_fantasy_pts?: number; games_samp
   }).filter(Number.isFinite).slice(0, 5);
   const fallback = Number(stats?.avg_fantasy_pts);
   const values = games.length ? games : Number.isFinite(fallback) ? [fallback] : [];
-  if (!values.length) return { last_3_avg: null, last_5_avg: null, recency_weighted_avg: null, trend: 'unknown', sample_size: 0, source: 'unavailable', is_synthetic: true };
+  if (!values.length) return { last_3_avg: null, last_5_avg: null, last_10_avg: null, season_to_date_avg: null, recency_weighted_avg: null, trend: 'unknown', opportunity_trend: 'unknown', sample_size: 0, source: 'unavailable', is_synthetic: true };
+  const orderedGames = [...(stats?.games ?? [])].sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')));
+  const orderedValues = orderedGames.map((game) => Number(game.fantasy_points ?? game.fantasy_pts)).filter(Number.isFinite).length ? orderedGames.map((game) => {
+    const supplied = Number(game.fantasy_points ?? game.fantasy_pts);
+    return Number.isFinite(supplied) ? supplied : NaN;
+  }).filter(Number.isFinite) : values;
   const avg = (items: number[]) => items.length ? items.reduce((sum, value) => sum + value, 0) / items.length : null;
-  const recent = values.slice(0, 3);
+  const recent = orderedValues.slice(0, 3);
   const weights = [0.4, 0.25, 0.18, 0.11, 0.06];
-  const weighted = values.reduce((sum, value, index) => sum + value * (weights[index] ?? 0), 0) / weights.slice(0, values.length).reduce((sum, value) => sum + value, 0);
-  const trendDelta = values.length >= 4 ? avg(values.slice(0, 2))! - avg(values.slice(-2))! : 0;
+  const weighted = orderedValues.reduce((sum, value, index) => sum + value * (weights[index] ?? 0), 0) / weights.slice(0, orderedValues.length).reduce((sum, value) => sum + value, 0);
+  const trendDelta = orderedValues.length >= 4 ? avg(orderedValues.slice(0, 2))! - avg(orderedValues.slice(-2))! : 0;
+  const opportunityValues = orderedGames.map((game) => Number(game.minutes ?? game.snap_count ?? game.targets ?? game.at_bats)).filter(Number.isFinite);
+  const opportunityDelta = opportunityValues.length >= 4 ? avg(opportunityValues.slice(0, 2))! - avg(opportunityValues.slice(-2))! : 0;
   return {
     last_3_avg: Number((avg(recent) ?? 0).toFixed(2)),
-    last_5_avg: Number((avg(values) ?? 0).toFixed(2)),
+    last_5_avg: Number((avg(orderedValues.slice(0, 5)) ?? 0).toFixed(2)),
+    last_10_avg: orderedValues.length >= 10 ? Number((avg(orderedValues.slice(0, 10)) ?? 0).toFixed(2)) : null,
+    season_to_date_avg: null,
     recency_weighted_avg: Number(weighted.toFixed(2)),
     trend: Math.abs(trendDelta) < 1 ? 'stable' : trendDelta > 0 ? 'up' : 'down',
-    sample_size: values.length,
+    opportunity_trend: Math.abs(opportunityDelta) < 1 ? 'stable' : opportunityDelta > 0 ? 'up' : 'down',
+    sample_size: orderedValues.length,
     source: stats?.games?.length ? `MIOS recent game logs (${normalizedSport || 'unknown'} DK scoring)` : 'MIOS aggregate fallback',
     is_synthetic: Boolean(stats?.is_synthetic) || !stats?.games?.length,
   };

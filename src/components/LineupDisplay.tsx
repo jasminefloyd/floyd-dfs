@@ -40,6 +40,7 @@ export interface LineupPlayer {
   game_context_tags?: string[];
   home_away?: 'home' | 'away' | 'unknown';
   news_evidence?: { summary?: string; confirmed: boolean; is_speculative: boolean; reliability: number; source: string };
+  form_metrics?: { last_3_avg: number | null; last_5_avg: number | null; last_10_avg: number | null; trend: string; opportunity_trend: string; sample_size: number; is_synthetic: boolean };
   last_5_stats?: {
     avg_fantasy_pts?: number;
     stdev_fantasy_pts?: number;
@@ -176,10 +177,15 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 {lineup.win_condition ? (
                   <span className="mt-2 block font-bold text-[#0b1f3a]">{lineup.win_condition}</span>
                 ) : null}
-                {(lineup.scenario_key || lineup.relationship_score !== undefined) ? (
+              {(lineup.scenario_key || lineup.relationship_score !== undefined) ? (
                   <span className="mt-2 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
                     {lineup.scenario_key ? `Scenario: ${lineup.scenario_key.replace(/_/g, ' ')}` : ''}
                     {lineup.relationship_score !== undefined ? ` • Relationship evidence: ${lineup.relationship_score.toFixed(2)}` : ''}
+                  </span>
+                ) : null}
+                {lineup.evidence_summary?.length ? (
+                  <span className="mt-1 block text-[11px] text-slate-500">
+                    Evidence: {lineup.evidence_summary.slice(0, 3).join(' · ')}
                   </span>
                 ) : null}
               </p>
@@ -231,12 +237,15 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                             {player.name || player.full_name}
                           </p>
                           <p className="truncate text-[12px] font-medium text-slate-500">
-                            {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}
+                            {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}{player.home_away && player.home_away !== 'unknown' ? ` • ${player.home_away}` : ''}
                           </p>
                           {player.news_note ? (
                             <p className="mt-1 max-h-8 overflow-hidden text-[11px] text-slate-500">
                               {player.news_note}
                             </p>
+                          ) : null}
+                          {player.news_evidence?.is_speculative ? (
+                            <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-amber-700">Unconfirmed news signal</p>
                           ) : null}
                         </div>
                         <div className="shrink-0 text-right">
@@ -249,6 +258,11 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                               : ''}
                             {player.salary_source === 'estimated' ? ' • est. salary' : ''}
                           </p>
+                          {player.form_metrics?.sample_size ? (
+                            <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                              Form {player.form_metrics.trend} · {player.form_metrics.sample_size} games{player.form_metrics.is_synthetic ? ' · fallback' : ''}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     );

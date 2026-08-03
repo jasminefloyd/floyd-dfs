@@ -2,10 +2,16 @@ import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { deriveFormMetrics, deriveNewsEvidence, deriveRelationships, deriveScenario, evaluateRelationship } from '../intelligence.ts';
 
 Deno.test('PIOS form metrics are recency weighted and expose sample size', () => {
-  const result = deriveFormMetrics({ games: [{ fantasy_points: 30 }, { fantasy_points: 20 }, { fantasy_points: 10 }, { fantasy_points: 10 }, { fantasy_points: 10 }] });
+  const result = deriveFormMetrics({ games: [{ fantasy_points: 30 }, { fantasy_points: 20 }, { fantasy_points: 10 }, { fantasy_points: 10 }, { fantasy_points: 10 }] }, 'nba', 'PG');
   assertEquals(result.last_3_avg, 20);
   assertEquals(result.trend, 'up');
   assertEquals(result.sample_size, 5);
+  assertEquals(result.is_synthetic, false);
+});
+
+Deno.test('PIOS calculates DraftKings fantasy points from raw game logs', () => {
+  const result = deriveFormMetrics({ games: [{ date: '2026-08-02', points: 20, rebounds: 8, assists: 6, steals: 1, blocks: 0, turnovers: 2 }] }, 'nba', 'PG');
+  assertEquals(result.last_3_avg, 40);
   assertEquals(result.is_synthetic, false);
 });
 

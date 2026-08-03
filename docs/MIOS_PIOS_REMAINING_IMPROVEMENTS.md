@@ -33,44 +33,44 @@ These items are code-complete or migration-complete locally but cannot be consid
 
 ## P0: Data correctness and identity
 
-- [ ] Add a canonical player identity table shared by DraftKings, ESPN, SportsDataIO, Rotowire, and any odds provider.
-- [ ] Store provider-specific IDs and aliases for every player instead of relying on name/team matching.
-- [ ] Add canonical team and game IDs to every historical game log.
+- [x] Add a canonical player identity table shared by DraftKings, ESPN, SportsDataIO, Rotowire, and any odds provider.
+- [ ] Store provider-specific IDs and aliases for every player instead of relying on name/team matching. *(Schema exists; provider population is still required.)*
+- [ ] Add canonical team and game IDs to every historical game log. *(Schema exists; source mapping is still required.)*
 - [ ] Add contest/slate/game identity to every raw actual-result record.
 - [ ] Validate that MLB pitcher and hitter identities cannot collide with the same display name.
-- [ ] Add explicit timezone-normalized event timestamps.
+- [ ] Add explicit timezone-normalized event timestamps. *(Schema exists; provider mapping is still required.)*
 - [ ] Add data-quality tests for duplicate players, duplicate contests, missing player IDs, and stale game logs.
-- [ ] Prevent a provider fallback from silently replacing a verified provider record without provenance.
+- [x] Prevent a provider fallback from silently replacing a verified provider record without provenance.
 
 ## P0: Historical-form pipeline
 
-- [ ] Store the full raw game log and the calculated DraftKings fantasy score for each game.
-- [ ] Store the scoring version used for each historical fantasy score.
-- [ ] Add last-3, last-5, last-10, season-to-date, and role-filtered averages.
-- [ ] Add recency decay based on actual game dates rather than array order alone.
+- [x] Store the full raw game log and the calculated DraftKings fantasy score for each game.
+- [x] Store the scoring version used for each historical fantasy score.
+- [ ] Add last-3, last-5, last-10, season-to-date, and role-filtered averages. *(Last-3/last-5/last-10 contracts are present; season-to-date and role-filtered aggregation remain.)*
+- [x] Add recency decay based on actual game dates rather than array order alone.
 - [ ] Add minutes, snap share, route participation, usage, plate appearances, and opportunity trends where supported.
-- [ ] Separate performance trend from opportunity trend.
-- [ ] Add minimum-sample handling for players with fewer than three games.
-- [ ] Add explicit “not enough data” states instead of labeling fallback aggregates as recent form.
+- [x] Separate performance trend from opportunity trend.
+- [x] Add minimum-sample handling for players with fewer than three games.
+- [x] Add explicit “not enough data” states instead of labeling fallback aggregates as recent form.
 - [ ] Backfill historical game logs and compare PIOS-calculated scores against stored provider fantasy scores.
 
 ## P0: Outcome feedback loop
 
-- [ ] Make the actual-results job record player-level PIOS inputs and outputs for every generated lineup.
+- [x] Make the actual-results job record player-level PIOS inputs and outputs for every generated lineup.
 - [ ] Evaluate player MAE, mean error, rank correlation, and calibration by sport.
 - [ ] Evaluate lineup MAE, ROI, hit rate, duplication rate, and top-1% rate by contest type.
-- [ ] Evaluate each scenario type separately.
-- [ ] Evaluate each relationship type separately.
+- [x] Evaluate each scenario type separately.
+- [x] Evaluate each relationship type separately.
 - [ ] Evaluate confidence buckets to determine whether high-confidence output is actually more accurate.
 - [ ] Add walk-forward evaluation so future actuals never influence historical projections.
-- [ ] Add a minimum sample threshold before changing production weights.
-- [ ] Version every calibration update and retain the prior version for rollback.
+- [ ] Add a minimum sample threshold before changing production weights. *(Evaluation thresholds exist; automated weight promotion does not.)*
+- [ ] Version every calibration update and retain the prior version for rollback. *(Model versions are recorded; rollback workflow is not.)*
 
 ## P1: Relationship intelligence
 
 - [ ] Replace purely derived relationships with empirical relationship estimates when sufficient data exists.
-- [ ] Track positive, negative, and neutral relationships separately.
-- [ ] Add shrinkage toward zero based on sample size and source quality.
+- [x] Track positive, negative, and neutral relationships separately.
+- [x] Add shrinkage toward zero based on sample size and source quality.
 - [ ] Add sport-specific relationship definitions:
   - [ ] NFL quarterback-to-pass-catcher target/TD relationships.
   - [ ] NFL quarterback-to-opposing-defense negative relationships.
@@ -79,8 +79,8 @@ These items are code-complete or migration-complete locally but cannot be consid
   - [ ] MLB pitcher-versus-opposing-hitter relationships.
 - [ ] Add relationship stability across seasons and roster changes.
 - [ ] Expire or reduce relationships after trades, depth-chart changes, coaching changes, or major role changes.
-- [ ] Add confidence intervals around pair correlations.
-- [ ] Do not expose a relationship as “validated” until its sample threshold is met.
+- [ ] Add confidence intervals around pair correlations. *(Sample thresholds exist; intervals are not yet calculated.)*
+- [x] Do not expose a relationship as “validated” until its sample threshold is met.
 
 ## P1: Game and environment modeling
 
@@ -95,13 +95,13 @@ These items are code-complete or migration-complete locally but cannot be consid
 
 ## P1: News and availability evidence
 
-- [ ] Maintain a source reliability table by provider and report type.
+- [ ] Maintain a source reliability table by provider and report type. *(Initial seed data exists; runtime consumption and feedback updates remain.)*
 - [ ] Deduplicate articles across providers.
 - [ ] Store publication time, event time, source, author/provider, affected entities, and expiration time.
 - [ ] Separate official announcements, beat-reporter reports, aggregated reports, rumors, and sentiment.
 - [ ] Detect conflicting reports and show the conflict to the user.
 - [ ] Add an explicit confirmation hierarchy for starting lineups, injuries, and role changes.
-- [ ] Add stale-news expiration rules by sport and report type.
+- [x] Add stale-news expiration rules by sport and report type.
 - [ ] Prevent sentiment-only signals from materially changing projections without corroborating evidence.
 - [ ] Evaluate news precision, recall, false positives, and projection impact after results settle.
 
@@ -111,7 +111,7 @@ These items are code-complete or migration-complete locally but cannot be consid
 - [ ] Separate cash-game ranking from tournament ranking using calibrated objective functions.
 - [ ] Add scenario probabilities to expected-value calculations.
 - [ ] Optimize portfolios against correlated outcomes rather than only penalizing lineup overlap.
-- [ ] Add portfolio-level exposure limits by player, team, game, scenario, and relationship cluster.
+- [ ] Add portfolio-level exposure limits by player, team, game, scenario, and relationship cluster. *(Player/team/captain/scenario safeguards exist; game and relationship-cluster caps remain.)*
 - [ ] Add explicit negative-correlation constraints for incompatible constructions.
 - [ ] Add late-swap re-optimization using confirmed lineups and live status changes.
 - [ ] Track why a lineup was rejected, not just why it was selected.
@@ -122,10 +122,10 @@ These items are code-complete or migration-complete locally but cannot be consid
 - [ ] Produce calibrated exceedance probabilities for value, ceiling, top-decile, and top-1% outcomes.
 - [ ] Measure Brier score, log loss, reliability curves, and expected calibration error.
 - [ ] Display projection reliability separately from win probability.
-- [ ] Show whether each signal is verified, modeled, stale, fallback, or speculative.
+- [ ] Show whether each signal is verified, modeled, stale, fallback, or speculative. *(Some evidence labels are shown; full per-signal provenance display remains.)*
 - [ ] Block tournament recommendations when critical data is stale or missing.
 - [ ] Add clear “no edge detected” output when the model cannot support a meaningful recommendation.
-- [ ] Record model version, data snapshot, scoring version, and relationship version with every lineup.
+- [x] Record model version, data snapshot, scoring version, and relationship version with every lineup.
 
 ## P2: Backtesting and research tooling
 
@@ -139,10 +139,10 @@ These items are code-complete or migration-complete locally but cannot be consid
 
 ## P2: User-facing product improvements
 
-- [ ] Add a “Why this player?” explanation with evidence and confidence.
+- [ ] Add a “Why this player?” explanation with evidence and confidence. *(Lineup evidence is shown; a dedicated per-player explanation remains.)*
 - [ ] Add a “What would change this lineup?” panel.
-- [ ] Show scenario assumptions and the opposing scenario that would hurt the lineup.
-- [ ] Show missing-data warnings beside affected players, not only at the top of the scan.
+- [ ] Show scenario assumptions and the opposing scenario that would hurt the lineup. *(Current UI shows the selected scenario only.)*
+- [ ] Show missing-data warnings beside affected players, not only at the top of the scan. *(Top-level warnings exist; player-level warnings remain.)*
 - [ ] Add comparison mode for two lineups.
 - [ ] Add a player-pair and stack explorer.
 - [ ] Add late-swap alerts for lineup changes, injury news, and odds movement.

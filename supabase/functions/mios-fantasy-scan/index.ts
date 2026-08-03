@@ -1,5 +1,5 @@
 import { NEWS_INJURY_PREFILTER_PATTERN, injuryContextNear, normalizeInjuryStatus, type InjuryStatus } from './injuryStatus.ts';
-import { dkFantasyPoints, type DkSport } from '../_shared/dkScoring.ts';
+import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring.ts';
 import { mapWithConcurrency } from './enrichment.ts';
 import { computeOpportunityProjection } from './opportunity.ts';
 import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
@@ -3090,17 +3090,48 @@ async function getCachedLast5Stats(playerId: string, sport: string): Promise<any
   return rows?.[0] ?? null;
 }
 
-async function cacheLast5Stats(playerId: string, sport: string, stats: any) {
+function gameLogRole(position?: string): DkRole | undefined {
+  const normalized = String(position ?? '').toUpperCase();
+  if (['DST', 'DEF', 'D/ST'].includes(normalized)) return 'dst';
+  if (['P', 'SP', 'RP'].includes(normalized)) return 'pitcher';
+  return normalized ? 'hitter' : undefined;
+}
+
+async function cacheLast5Stats(playerId: string, sport: string, stats: any, position?: string) {
   const expiresAt = new Date(Date.now() + LAST5_CACHE_HOURS * 60 * 60 * 1000).toISOString();
+  const games = (Array.isArray(stats.games_data) ? stats.games_data : []).map((game: Record<string, unknown>) => ({
+    ...game,
+    fantasy_points: Number.isFinite(Number(game.fantasy_points))
+      ? Number(game.fantasy_points)
+      : Number(dkFantasyPoints(game as Record<string, number>, sport as DkSport, gameLogRole(position)).toFixed(2)),
+  }));
+  const aggregated = aggregateGames(games, sport);
   await callSupabaseRpc('fantasy_ai_upsert_last5_stats', {
     p_player_id: playerId,
     p_sport: sport,
-    p_games_data: stats.games_data,
-    p_aggregated_stats: stats.aggregated_stats,
+    p_games_data: games,
+    p_aggregated_stats: { ...stats.aggregated_stats, ...aggregated, fantasy_points: aggregated.avg_fantasy_pts },
     p_confidence_score: stats.confidence_score,
     p_expires_at: expiresAt,
   }, { serviceRole: true, allowMissingServiceRole: true }).catch((error) => {
     console.error('Last-5 cache write failed:', error);
+  });
+  await callSupabaseRpc('fantasy_ai_upsert_player_game_logs', {
+    p_rows: games.filter((game: Record<string, unknown>) => /^\d{4}-\d{2}-\d{2}$/.test(String(game.date ?? ''))).map((game: Record<string, unknown>) => ({
+      player_id: playerId,
+      sport,
+      provider_game_id: game.game_id ?? game.date,
+      game_date: game.date,
+      opponent: game.opponent,
+      home_away: game.home_away ?? 'unknown',
+      raw_stats: game,
+      fantasy_points: game.fantasy_points,
+      scoring_version: 'dk-scoring-v1',
+      source: stats.source ?? 'last5_stats',
+      observed_at: stats.last_updated_at,
+    })),
+  }, { serviceRole: true, allowMissingServiceRole: true }).catch((error) => {
+    console.error('Player game-log persistence failed:', error);
   });
 }
 
@@ -3130,7 +3161,7 @@ async function collectLast5Stats(player: Player, sport: string): Promise<any> {
     if (!response.ok) throw new Error(`ESPN gamelog ${response.status}`);
     const data = await response.json();
     const stats = parseEspnGamelog(data, sport);
-    if (stats?.games_data?.length) await cacheLast5Stats(player.id, sport, stats);
+    if (stats?.games_data?.length) await cacheLast5Stats(player.id, sport, stats, player.position);
     return stats;
   } catch (error) {
     console.error(`ESPN gamelog error for ${player.name}:`, error);
@@ -3308,7 +3339,14 @@ async function collectRedditSentiment(playerId: string, playerName: string, spor
 }
 
 function applyLast5Stats(player: Player, stats: any, sport: string): Player {
-  const games = stats?.games_data;
+  const games = Array.isArray(stats?.games_data)
+    ? stats.games_data.map((game: Record<string, unknown>) => ({
+      ...game,
+      fantasy_points: Number.isFinite(Number(game.fantasy_points))
+        ? Number(game.fantasy_points)
+        : Number(dkFantasyPoints(game as Record<string, number>, sport as DkSport, gameLogRole(player.position)).toFixed(2)),
+    }))
+    : stats?.games_data;
   const avg = stats?.aggregated_stats?.avg_fantasy_pts ?? stats?.aggregated_stats?.fantasy_points;
   if (!Array.isArray(games) || games.length === 0 || typeof avg !== 'number') return player;
   const minutesAvg = minutesAverageFromAggregates(stats);
