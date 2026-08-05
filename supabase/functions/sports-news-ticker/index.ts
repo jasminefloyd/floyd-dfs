@@ -29,11 +29,14 @@ interface EspnNewsResponse {
   articles?: EspnNewsArticle[];
 }
 
+// site.api.espn.com (used by every other ESPN fetch in this repo, e.g. scoreboard/summary)
+// now returns 403 Access Denied specifically for the /news path, while the identically
+// shaped feed at site.web.api.espn.com still works -- verified live for all 4 sports.
 const FEEDS: Record<string, string> = {
-  wnba: 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/news',
-  nba: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/news',
-  mlb: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/news',
-  nfl: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/news',
+  wnba: 'https://site.web.api.espn.com/apis/site/v2/sports/basketball/wnba/news',
+  nba: 'https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/news',
+  mlb: 'https://site.web.api.espn.com/apis/site/v2/sports/baseball/mlb/news',
+  nfl: 'https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/news',
 };
 
 function jsonResponse(body: unknown, status = 200) {
