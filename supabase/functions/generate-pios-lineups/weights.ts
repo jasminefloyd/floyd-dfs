@@ -20,10 +20,6 @@ export const PIOS_WEIGHTS = {
   lineupIntelligence: {
     antiCorrelationPenalty: 8,
     lateSwapPenalty: 0.75,
-    largeFieldOwnershipTarget: 1.15,
-    largeFieldOwnershipMultiplier: 6,
-    chalkPenaltyThreshold: 1.8,
-    chalkPenaltyMultiplier: 1.5,
     largeFieldBoom: 2.3,
     standardBoom: 1,
     cashVolatility: -2.5,

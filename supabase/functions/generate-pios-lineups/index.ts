@@ -1738,16 +1738,16 @@ function lineupIntelligenceScore(lineup: DraftLineup, rules: LineupConstructionR
   const stack = lineup.stack_quality_score ?? stackQualityScore(lineup, rules);
   const context = contextEdgeScore(lineup);
   const volatility = lineupVolatilityScore(lineup);
-  const ownership = lineup.ownership_sum ?? lineup.players.reduce((sum, player) => sum + (player.ownership_projection ?? 0.12), 0);
   const boom = lineup.players.reduce((sum, player) => sum + (player.boom_probability ?? 0.12), 0);
   const bust = lineup.players.reduce((sum, player) => sum + (player.bust_probability ?? 0.18), 0);
   const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * weights.antiCorrelationPenalty;
   const latePenalty = (lineup.late_swap_flags?.length ?? 0) * weights.lateSwapPenalty;
   const relationshipBonus = (lineup.relationship_score ?? 0) * 4;
   const scenarioBonus = (lineup.scenario_confidence ?? 0) * 2;
-  const ownershipAdjustment = rules.contestStrategy === 'large_field_gpp'
-    ? (weights.largeFieldOwnershipTarget - ownership) * weights.largeFieldOwnershipMultiplier
-    : -Math.max(0, ownership - weights.chalkPenaltyThreshold) * weights.chalkPenaltyMultiplier;
+  // Ownership is penalized once, in lineupRankScore's ownershipPenalty, which is scaled by
+  // rules.ownershipWeight (derived per-contest from field size/payout shape). Do not also
+  // adjust for ownership here, or ownership ends up double-counted and bypasses that
+  // contest-aware scaling.
   return Number((
     stack * rules.correlationWeight
     + context
@@ -1755,7 +1755,6 @@ function lineupIntelligenceScore(lineup: DraftLineup, rules: LineupConstructionR
     + scenarioBonus
     + boom * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldBoom : weights.standardBoom)
     + volatility * (rules.contestStrategy === 'cash' ? weights.cashVolatility : weights.tournamentVolatility)
-    + ownershipAdjustment
     - bust * (rules.contestStrategy === 'cash' ? weights.cashBust : weights.tournamentBust)
     - antiPenalty
     - latePenalty
@@ -1809,7 +1808,7 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
     ? stackQualityScore(lineup, rules)
     : sport === 'nfl'
       ? nflCorrelationScore(lineup, rules)
-      : sport === 'wnba'
+      : sport === 'wnba' || sport === 'nba'
         ? wnbaGameEnvironmentScore(lineup)
         : 0;
   const contextEdge = contextEdgeScore(lineup);
@@ -1939,6 +1938,17 @@ function lowerBound(sortedValues: number[], value: number): number {
   return low;
 }
 
+function upperBound(sortedValues: number[], value: number): number {
+  let low = 0;
+  let high = sortedValues.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (sortedValues[mid] <= value) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
 function normalizeTeam(value: unknown): string {
   return String(value ?? '').toUpperCase();
 }
@@ -2031,8 +2041,10 @@ function runMonteCarloSimulations(
     for (const lineup of lineups) {
       const total = scoreIndexedEntries(outcomes, lineupIndexes.get(lineup) ?? []);
       samples.get(lineup)?.push(total);
+      // Rank by count of field scores strictly greater than ours, so an exact tie with the
+      // field leader ranks 1st instead of 2nd (lowerBound counts the tied score against us).
       const simulatedFinishRank = fieldScores.length
-        ? fieldScores.length - lowerBound(fieldScores, total) + 1
+        ? fieldScores.length - upperBound(fieldScores, total) + 1
         : fieldSize;
       const finishRank = scaleFinishRank(simulatedFinishRank, fieldScores.length || fieldSize, rules.fieldSize);
       if (finishRank === 1) wins.set(lineup, (wins.get(lineup) ?? 0) + 1);

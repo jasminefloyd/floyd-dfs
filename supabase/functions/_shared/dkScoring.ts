@@ -84,6 +84,10 @@ function stat(line: StatLine, keys: string[]): number {
   return 0;
 }
 
+function hasStat(line: StatLine, keys: string[]): boolean {
+  return keys.some((key) => key in line && Number.isFinite(Number(line[key])));
+}
+
 function atLeast(value: number, threshold: number): number {
   return value >= threshold ? 1 : 0;
 }
@@ -181,7 +185,10 @@ export function dkMlbHitterFantasyPoints(statLine: StatLine): number {
   const doubles = stat(statLine, ['doubles', 'double', '2b']);
   const triples = stat(statLine, ['triples', 'triple', '3b']);
   const homeRuns = stat(statLine, ['homeRuns', 'home_runs', 'home_run', 'hr']);
-  const singles = Math.max(0, stat(statLine, ['singles', 'single', '1b']) || hits - doubles - triples - homeRuns);
+  const singlesKeys = ['singles', 'single', '1b'];
+  const singles = Math.max(0, hasStat(statLine, singlesKeys)
+    ? stat(statLine, singlesKeys)
+    : hits - doubles - triples - homeRuns);
 
   return singles * DK_SCORING.mlb.single
     + doubles * DK_SCORING.mlb.double

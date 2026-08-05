@@ -122,9 +122,13 @@ function applyShrunkRelationshipCorrelation(outcomes: Float64Array, means: Float
       // are supplied. This adds structure without pretending the edge is validated.
       const shrinkage = edge.validated && edge.sample_size >= 20 ? 1 : 0.35;
       const coefficient = Math.max(-0.18, Math.min(0.18, edge.strength * shrinkage)) * (edge.direction === 'negative' ? -1 : 1);
-      const deviation = outcomes[relatedIndex] - means[relatedIndex];
-      outcomes[index] = Math.max(0, outcomes[index] + deviation * coefficient);
-      outcomes[relatedIndex] = Math.max(0, outcomes[relatedIndex] + (outcomes[index] - means[index]) * coefficient * 0.35);
+      // Capture both deviations before mutating either outcome, so relatedIndex's nudge is
+      // based on index's pre-adjustment deviation, not a value that already includes the
+      // adjustment just applied to it (which would compound the correlation one-directionally).
+      const relatedDeviation = outcomes[relatedIndex] - means[relatedIndex];
+      const indexDeviation = outcomes[index] - means[index];
+      outcomes[index] = Math.max(0, outcomes[index] + relatedDeviation * coefficient);
+      outcomes[relatedIndex] = Math.max(0, outcomes[relatedIndex] + indexDeviation * coefficient * 0.35);
     }
   });
 }
