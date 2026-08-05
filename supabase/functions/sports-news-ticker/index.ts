@@ -37,6 +37,7 @@ const FEEDS: Record<string, string> = {
   nba: 'https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/news',
   mlb: 'https://site.web.api.espn.com/apis/site/v2/sports/baseball/mlb/news',
   nfl: 'https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/news',
+  golf: 'https://site.web.api.espn.com/apis/site/v2/sports/golf/pga/news',
 };
 
 function jsonResponse(body: unknown, status = 200) {

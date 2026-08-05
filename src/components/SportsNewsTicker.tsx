@@ -7,6 +7,7 @@ const SPORT_LABELS: Record<string, string> = {
   nba: 'NBA',
   mlb: 'MLB',
   nfl: 'NFL',
+  golf: 'GOLF',
 };
 
 const SPORT_LOGOS: Record<string, string> = {
