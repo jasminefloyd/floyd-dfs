@@ -213,14 +213,37 @@ function parseEspnAthleteStats(athlete: any, labels: string[]): Record<string, n
   return statLine;
 }
 
-async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<ActualPlayer[]> {
-  const route = SPORT_ROUTE[sport];
-  const scoreboard = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${route}/scoreboard?dates=${espnDate(contestDate)}`, {
+function previousDate(date: string): string {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() - 1);
+  return parsed.toISOString().slice(0, 10);
+}
+
+async function fetchEspnEvents(route: string, date: string): Promise<any[]> {
+  const scoreboard = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${route}/scoreboard?dates=${espnDate(date)}`, {
     headers: { Accept: 'application/json' },
   });
   if (!scoreboard.ok) throw new Error(`ESPN scoreboard ${scoreboard.status}`);
   const data = await scoreboard.json() as any;
-  const events = data?.events ?? [];
+  return data?.events ?? [];
+}
+
+async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<ActualPlayer[]> {
+  const route = SPORT_ROUTE[sport];
+  // ESPN buckets a scoreboard date by the game's local tip-off date, while DraftKings
+  // labels a slate's contest_date using its own convention. A late tip-off (e.g. 9pm ET,
+  // 01:00 UTC the next day) can land in ESPN's *previous* date bucket even though DK
+  // considers it the next day's slate, so also check the day before and merge by event id.
+  const [currentEvents, priorEvents] = await Promise.all([
+    fetchEspnEvents(route, contestDate),
+    fetchEspnEvents(route, previousDate(contestDate)),
+  ]);
+  const eventsById = new Map<string, any>();
+  for (const event of [...priorEvents, ...currentEvents]) {
+    const eventId = String(event?.id ?? '');
+    if (eventId) eventsById.set(eventId, event);
+  }
+  const events = [...eventsById.values()];
   const rows: ActualPlayer[] = [];
   const statLinesByPlayer = new Map<string, {
     player_name: string;
