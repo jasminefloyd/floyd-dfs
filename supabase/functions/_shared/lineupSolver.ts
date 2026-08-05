@@ -42,6 +42,7 @@ export interface SolverOptions {
   minDistinctTeams?: number;
   minDistinctGames?: number;
   maxSharedPlayers?: number;
+  maxPerTeam?: { max: number; excludePositions?: string[] };
 }
 
 const DEFAULT_SALARY_CAP = 50_000;
@@ -148,6 +149,19 @@ function satisfiesDistinctConstraints(players: SolverPlayer[], options: SolverOp
       ? players.map((player) => String(player.game_id).trim())
       : players.map((player) => String(player.team ?? '').trim()).filter(Boolean);
     if (new Set(groups).size < options.minDistinctGames) return false;
+  }
+  if (options.maxPerTeam) {
+    const { max, excludePositions = [] } = options.maxPerTeam;
+    const excluded = new Set(excludePositions.map((position) => position.toUpperCase()));
+    const counts = new Map<string, number>();
+    for (const player of players) {
+      if (excluded.has(String(player.position ?? '').toUpperCase())) continue;
+      const team = String(player.team ?? '').trim();
+      if (!team) continue;
+      const count = (counts.get(team) ?? 0) + 1;
+      if (count > max) return false;
+      counts.set(team, count);
+    }
   }
   return true;
 }
@@ -399,7 +413,8 @@ export function solveOptimalLineupsWithMeta(
 
   const hasAdditionalConstraints = options.minDistinctTeams !== undefined
     || options.minDistinctGames !== undefined
-    || options.maxSharedPlayers !== undefined;
+    || options.maxSharedPlayers !== undefined
+    || options.maxPerTeam !== undefined;
   const dpBest = hasAdditionalConstraints ? null : solveBestLineupDp(players, slots, salaryCap, deadlineAt, state);
   if (dpBest) {
     bestVerified = !state.timedOut;

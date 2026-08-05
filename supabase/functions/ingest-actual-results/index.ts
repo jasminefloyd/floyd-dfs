@@ -4,6 +4,7 @@
 
 import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring.ts';
 import { solveOptimalLineups, type SolverPlayer, type SolverRosterSlot } from '../_shared/lineupSolver.ts';
+import { parseEspnAthleteStats } from './espnStatParsing.ts';
 
 type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb';
 
@@ -151,66 +152,9 @@ function normalizePositionForSolver(value: unknown, sport: Sport): string {
   return position;
 }
 
-function parseNumber(value: unknown): number {
-  const parsed = Number(String(value ?? '').split('-')[0]);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function parseMlbInnings(value: unknown): number {
   const [whole, outs = '0'] = String(value ?? '0').split('.');
   return Number(whole || 0) + Number(outs || 0) / 3;
-}
-
-function statKeyFromLabel(label: string): string {
-  const key = label.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const map: Record<string, string> = {
-    min: 'minutes',
-    minutes: 'minutes',
-    pts: 'points',
-    points: 'points',
-    reb: 'totalRebounds',
-    rebounds: 'totalRebounds',
-    ast: 'assists',
-    assists: 'assists',
-    stl: 'steals',
-    steals: 'steals',
-    blk: 'blocks',
-    blocks: 'blocks',
-    to: 'turnovers',
-    tov: 'turnovers',
-    turnovers: 'turnovers',
-    '3pt': 'threePointFieldGoalsMade',
-    fg3m: 'threePointFieldGoalsMade',
-    passyds: 'passingYards',
-    passingyards: 'passingYards',
-    passtd: 'passingTouchdowns',
-    passingtd: 'passingTouchdowns',
-    int: 'interceptions',
-    interceptions: 'interceptions',
-    rushyds: 'rushingYards',
-    rushingyards: 'rushingYards',
-    rushtd: 'rushingTouchdowns',
-    rushingtd: 'rushingTouchdowns',
-    rec: 'receptions',
-    receptions: 'receptions',
-    receiving: 'receptions',
-    recyds: 'receivingYards',
-    receivingyards: 'receivingYards',
-    rectd: 'receivingTouchdowns',
-    receivingtd: 'receivingTouchdowns',
-    fumlost: 'fumblesLost',
-    fumbleslost: 'fumblesLost',
-  };
-  return map[key] ?? key;
-}
-
-function parseEspnAthleteStats(athlete: any, labels: string[]): Record<string, number> {
-  const stats = Array.isArray(athlete?.stats) ? athlete.stats : [];
-  const statLine: Record<string, number> = {};
-  labels.forEach((label, index) => {
-    statLine[statKeyFromLabel(label)] = parseNumber(stats[index]);
-  });
-  return statLine;
 }
 
 function previousDate(date: string): string {
@@ -268,7 +212,7 @@ async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<Actu
           const athlete = athleteRow?.athlete ?? athleteRow;
           const playerName = String(athlete?.displayName ?? athlete?.fullName ?? athlete?.name ?? '');
           if (!playerName) continue;
-          const statLine = parseEspnAthleteStats(athleteRow, labels);
+          const statLine = parseEspnAthleteStats(athleteRow, labels, String(group?.name ?? ''));
           const key = `${normalizeName(playerName)}:${team}`;
           const existing = statLinesByPlayer.get(key) ?? {
             player_name: playerName,

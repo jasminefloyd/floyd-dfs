@@ -51,6 +51,31 @@ Deno.test('incomplete game data uses the two-team fallback', () => {
   assert(new Set(lineup.players.map((candidate) => candidate.team)).size === 2, 'expected two distinct teams');
 });
 
+Deno.test('maxPerTeam rejects a higher-scoring lineup that overstacks one team', () => {
+  const threeSlots: SolverRosterSlot[] = [
+    { slot: 'A', eligible: ['A'] },
+    { slot: 'B', eligible: ['B'] },
+    { slot: 'PIT', eligible: ['P'] },
+  ];
+  const players = [
+    player('a_hot', 'A', 100, 'game-1', 'T1'),
+    player('b_hot', 'B', 100, 'game-1', 'T1'),
+    player('c_pitcher_hot', 'P', 100, 'game-1', 'T1'),
+    player('a_cool', 'A', 50, 'game-1', 'T2'),
+    player('b_cool', 'B', 50, 'game-1', 'T2'),
+    player('c_pitcher_cool', 'P', 50, 'game-1', 'T2'),
+  ];
+  const lineup = solveOptimalLineups(players, 'synthetic', 1, {
+    slots: threeSlots,
+    maxPerTeam: { max: 1, excludePositions: ['P'] },
+    deadlineMs: 1_000,
+  })[0];
+
+  const hitterTeams = lineup.players.filter((candidate) => candidate.position !== 'P').map((candidate) => candidate.team);
+  assert(new Set(hitterTeams).size === hitterTeams.length, `expected no team to supply more than 1 hitter, got teams ${hitterTeams}`);
+  assert(lineup.players.some((candidate) => candidate.player_id === 'c_pitcher_hot'), 'excluded position should not count against the cap');
+});
+
 Deno.test('captain identity is part of a Showdown lineup signature', () => {
   const first = { players: [
     player('captain-a', 'UTIL', 10),

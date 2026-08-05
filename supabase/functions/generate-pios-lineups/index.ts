@@ -958,13 +958,15 @@ function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules
     deadlineMs: EXACT_SOLVER_DEADLINE_MS,
     maxSharedPlayers: rules.maxSharedPlayers,
   };
-  if (sport === 'nba' || sport === 'nfl') {
-    options.minDistinctGames = 2;
-    if (players.some((player) => !String(player.game_id ?? '').trim())) {
-      options.minDistinctTeams = 2;
-    }
-  } else if (sport === 'mlb' || sport === 'wnba') {
+  // DraftKings Classic rules require players from at least 2 different games for every
+  // sport (NBA/WNBA/NFL/MLB), not merely 2 different teams -- a lineup can have 2 teams
+  // and still be a single game (e.g. one team's hitters plus the opposing pitcher).
+  options.minDistinctGames = 2;
+  if (players.some((player) => !String(player.game_id ?? '').trim())) {
     options.minDistinctTeams = 2;
+  }
+  if (sport === 'mlb') {
+    options.maxPerTeam = { max: 5, excludePositions: ['P', 'SP', 'RP'] };
   }
   return options;
 }
@@ -978,7 +980,7 @@ function generateExactClassicCandidatePool(
   const solverOptions = classicSolverOptions(sport, players, rules);
   const result = solveOptimalLineupsWithMeta(players, sport, exactTarget, solverOptions);
   const unfilteredBest = result.lineups[0] as DraftLineup | undefined;
-  const fallbackNote = (sport === 'nba' || sport === 'nfl') && players.some((player) => !String(player.game_id ?? '').trim())
+  const fallbackNote = players.some((player) => !String(player.game_id ?? '').trim())
     ? 'game IDs incomplete; enforced the DraftKings two-team fallback'
     : '';
   const exactNote = [

@@ -43,6 +43,36 @@ Deno.test('NFL QB receives passing yard bonus', () => {
   assertEquals(actual, 28, 'NFL QB');
 });
 
+Deno.test('NFL punt returner return TD and offensive fumble recovery TD score correctly', () => {
+  const actual = dkFantasyPoints({
+    kickReturnTouchdowns: 1,
+    puntReturnTouchdowns: 1,
+    offensiveFumbleRecoveryTouchdowns: 1,
+  }, 'nfl');
+
+  assertEquals(actual, 18, 'NFL return/fumble-recovery TDs');
+});
+
+Deno.test('NFL DST two-point return scores correctly', () => {
+  const actual = dkFantasyPoints({
+    pointsAllowed: 10,
+    twoPointReturns: 1,
+  }, 'nfl', 'dst');
+
+  assertEquals(actual, 6, 'NFL DST two-point return');
+});
+
+Deno.test('NFL kicker scores extra points and field goals by distance tier', () => {
+  const actual = dkFantasyPoints({
+    extraPointsMade: 2,
+    fieldGoalsMade0to39: 1,
+    fieldGoalsMade40to49: 1,
+    fieldGoalsMade50Plus: 1,
+  }, 'nfl', 'kicker');
+
+  assertEquals(actual, 14, 'NFL kicker');
+});
+
 Deno.test('NFL DST points-allowed tier scores correctly', () => {
   const actual = dkFantasyPoints({
     pointsAllowed: 10,

@@ -55,6 +55,7 @@ export interface PiosScenario {
 function roleForPosition(position?: string): DkRole | undefined {
   const normalized = String(position ?? '').toUpperCase();
   if (normalized === 'DST' || normalized === 'DEF' || normalized === 'D/ST') return 'dst';
+  if (normalized === 'K') return 'kicker';
   if (['P', 'SP', 'RP'].includes(normalized)) return 'pitcher';
   if (normalized) return 'hitter';
   return undefined;

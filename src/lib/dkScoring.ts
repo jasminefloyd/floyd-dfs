@@ -6,7 +6,7 @@
 // steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
 
 export type DkSport = 'nba' | 'wnba' | 'nfl' | 'mlb';
-export type DkRole = 'hitter' | 'pitcher' | 'dst';
+export type DkRole = 'hitter' | 'pitcher' | 'dst' | 'kicker';
 export type StatLine = Record<string, number>;
 
 export const DK_SCORING = {
@@ -46,12 +46,19 @@ export const DK_SCORING = {
     receivingYardBonus: 3,
     fumbleLost: -1,
     twoPointConversion: 2,
+    returnTouchdown: 6,
+    offensiveFumbleRecoveryTouchdown: 6,
     dstSack: 1,
     dstInterception: 2,
     dstFumbleRecovery: 2,
     dstTouchdown: 6,
     dstSafety: 2,
     dstBlockedKick: 2,
+    dstTwoPointReturn: 2,
+    extraPoint: 1,
+    fieldGoal0to39: 3,
+    fieldGoal40to49: 4,
+    fieldGoal50Plus: 5,
   },
   mlb: {
     single: 3,
@@ -135,6 +142,7 @@ export function dkBasketballFantasyPoints(statLine: StatLine): number {
 
 export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {
   if (role === 'dst') return dkNflDstFantasyPoints(statLine);
+  if (role === 'kicker') return dkNflKickerFantasyPoints(statLine);
 
   const passingYards = stat(statLine, ['passingYards', 'passing_yards', 'passYards', 'pass_yds']);
   const rushingYards = stat(statLine, ['rushingYards', 'rushing_yards', 'rushYards', 'rush_yds']);
@@ -152,7 +160,16 @@ export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {
     + stat(statLine, ['receivingTouchdowns', 'receiving_tds', 'receivingTds', 'receivingTD', 'rec_td']) * DK_SCORING.nfl.receivingTouchdown
     + (receivingYards >= 100 ? DK_SCORING.nfl.receivingYardBonus : 0)
     + stat(statLine, ['fumblesLost', 'fumble_lost', 'lostFumbles']) * DK_SCORING.nfl.fumbleLost
-    + stat(statLine, ['twoPointConversions', 'two_point_conversions', 'twoPtConversions', 'two_pt']) * DK_SCORING.nfl.twoPointConversion;
+    + stat(statLine, ['twoPointConversions', 'two_point_conversions', 'twoPtConversions', 'two_pt']) * DK_SCORING.nfl.twoPointConversion
+    + returnTouchdowns(statLine) * DK_SCORING.nfl.returnTouchdown
+    + stat(statLine, ['offensiveFumbleRecoveryTouchdowns', 'offensive_fumble_recovery_touchdowns']) * DK_SCORING.nfl.offensiveFumbleRecoveryTouchdown;
+}
+
+function returnTouchdowns(statLine: StatLine): number {
+  const combined = stat(statLine, ['returnTouchdowns', 'return_tds']);
+  if (combined) return combined;
+  return stat(statLine, ['kickReturnTouchdowns', 'kick_return_touchdowns'])
+    + stat(statLine, ['puntReturnTouchdowns', 'punt_return_touchdowns']);
 }
 
 export function dkNflDstFantasyPoints(statLine: StatLine): number {
@@ -162,7 +179,20 @@ export function dkNflDstFantasyPoints(statLine: StatLine): number {
     + stat(statLine, ['defensiveTouchdowns', 'specialTeamsTouchdowns', 'dstTouchdowns', 'touchdowns', 'td']) * DK_SCORING.nfl.dstTouchdown
     + stat(statLine, ['safeties', 'safety']) * DK_SCORING.nfl.dstSafety
     + stat(statLine, ['blockedKicks', 'blocked_kicks', 'blocks']) * DK_SCORING.nfl.dstBlockedKick
+    + stat(statLine, ['twoPointReturns', 'two_point_returns', 'defensiveTwoPointReturns']) * DK_SCORING.nfl.dstTwoPointReturn
     + dstPointsAllowedBonus(stat(statLine, ['pointsAllowed', 'points_allowed', 'pa']));
+}
+
+// Field goals must be reported pre-bucketed by distance (fieldGoalsMade0to39,
+// fieldGoalsMade40to49, fieldGoalsMade50Plus) -- box-score feeds (e.g. ESPN's summary
+// endpoint) only expose aggregate makes/attempts with no per-kick distance, so a caller
+// without a play-by-play source cannot populate this precisely and must not guess a
+// distance distribution.
+export function dkNflKickerFantasyPoints(statLine: StatLine): number {
+  return stat(statLine, ['extraPointsMade', 'extra_points_made', 'xpMade']) * DK_SCORING.nfl.extraPoint
+    + stat(statLine, ['fieldGoalsMade0to39', 'field_goals_made_0_to_39']) * DK_SCORING.nfl.fieldGoal0to39
+    + stat(statLine, ['fieldGoalsMade40to49', 'field_goals_made_40_to_49']) * DK_SCORING.nfl.fieldGoal40to49
+    + stat(statLine, ['fieldGoalsMade50Plus', 'field_goals_made_50_plus']) * DK_SCORING.nfl.fieldGoal50Plus;
 }
 
 export function dstPointsAllowedBonus(pointsAllowed: number): number {

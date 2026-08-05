@@ -3093,6 +3093,7 @@ async function getCachedLast5Stats(playerId: string, sport: string): Promise<any
 function gameLogRole(position?: string): DkRole | undefined {
   const normalized = String(position ?? '').toUpperCase();
   if (['DST', 'DEF', 'D/ST'].includes(normalized)) return 'dst';
+  if (normalized === 'K') return 'kicker';
   if (['P', 'SP', 'RP'].includes(normalized)) return 'pitcher';
   return normalized ? 'hitter' : undefined;
 }
