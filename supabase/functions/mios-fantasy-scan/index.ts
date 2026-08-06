@@ -97,6 +97,7 @@ interface Player {
   opposing_probable_pitcher_name?: string;
   own_probable_starter?: boolean;
   game_id?: string;
+  tee_time?: string | null;
   minutes_projection?: number;
   depth_chart_order?: number;
   context_score?: number;
@@ -228,6 +229,7 @@ interface DraftKingsSalaryRow {
   position: string;
   salary: number;
   game_id?: string | null;
+  tee_time?: string | null;
   dk_fppg?: number;
   projected_points?: number;
   status?: string | null;
@@ -365,7 +367,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
+const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 // Supabase edge instances are ephemeral; these module-level caches are best-effort
 // per-instance only and are not a durable cross-request store.
@@ -853,6 +855,7 @@ function applyDraftKingsSalaries(players: Player[], salaries: DraftKingsSalaryRo
       image_url: player.image_url ?? salaryRow.image_url ?? undefined,
       team_logo_url: player.team_logo_url ?? salaryRow.team_logo_url ?? teamLogoFallbackUrl(sport, salaryRow.team ?? undefined),
       game_id: player.game_id ?? salaryRow.game_id ?? undefined,
+      tee_time: player.tee_time ?? salaryRow.tee_time ?? undefined,
       projected_points: player.projected_points,
       confirmed_starter: sport === 'mlb' && salaryRow.is_confirmed_starter ? true : player.confirmed_starter,
       own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(normalizePosition(salaryRow.position, sport))
@@ -886,6 +889,7 @@ function draftKingsSalaryRowToPlayer(row: DraftKingsSalaryRow, sport: string): P
     injury_note: row.status && row.status !== 'None' ? `DraftKings status: ${row.status}` : undefined,
     projection_source: 'position_baseline',
     projected_points: projected,
+    tee_time: row.tee_time ?? undefined,
     confirmed_starter: sport === 'mlb' && row.is_confirmed_starter ? true : undefined,
     own_probable_starter: sport === 'mlb' && /^(P|SP|RP)$/.test(position) && row.is_confirmed_starter ? true : undefined,
     news_note: sport === 'mlb' && row.is_confirmed_starter ? 'DraftKings confirmed starter' : undefined,

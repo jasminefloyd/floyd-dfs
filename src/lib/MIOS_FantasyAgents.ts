@@ -76,6 +76,7 @@ export interface Player {
   opposing_probable_pitcher_name?: string;
   own_probable_starter?: boolean;
   game_id?: string;
+  tee_time?: string | null;
   minutes_projection?: number;
   usage_rate?: number;
   pace_metric?: number;

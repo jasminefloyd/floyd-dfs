@@ -5,7 +5,8 @@
 // DK basketball rules define double/triple categories as points, rebounds, assists,
 // steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
 
-export type DkSport = 'nba' | 'wnba' | 'nfl' | 'mlb';
+export type DkSport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
+export type DkContestType = 'classic' | 'showdown';
 export type DkRole = 'hitter' | 'pitcher' | 'dst' | 'kicker';
 export type StatLine = Record<string, number>;
 
@@ -59,6 +60,34 @@ export const DK_SCORING = {
     fieldGoal0to39: 3,
     fieldGoal40to49: 4,
     fieldGoal50Plus: 5,
+  },
+  golf: {
+    classic: {
+      doubleEagleOrBetter: 13,
+      eagle: 8,
+      birdie: 3,
+      par: 0.5,
+      bogey: -0.5,
+      doubleBogeyOrWorse: -1,
+      birdieStreak: 3,
+      bogeyFreeRound: 3,
+      allRoundsUnder70: 5,
+      holeInOne: 5,
+    },
+    showdown: {
+      doubleEagleOrBetter: 16,
+      eagle: 11,
+      birdie: 5.75,
+      par: 1.5,
+      bogey: -1.8,
+      doubleBogeyOrWorse: -3.9,
+      birdieStreak: 5,
+      bogeyFreeRound: 5,
+      // Showdown Golf - Round 1 has no tournament-finish or rounds-under-70 bonus;
+      // it's a single round, so those concepts don't apply.
+      allRoundsUnder70: 0,
+      holeInOne: 5,
+    },
   },
   mlb: {
     single: 3,
@@ -250,9 +279,53 @@ function hasPitchingStats(statLine: StatLine): boolean {
     || stat(statLine, ['earnedRuns', 'earned_runs', 'er']) > 0;
 }
 
-export function dkFantasyPoints(statLine: StatLine, sport: DkSport, role?: DkRole): number {
+// DraftKings pays full finish-position points to every golfer tied at that position
+// (not split/averaged), so this is a plain lookup, not a per-stroke rate.
+export function golfFinishPositionBonus(place: number): number {
+  if (!Number.isFinite(place) || place < 1) return 0;
+  if (place === 1) return 30;
+  if (place === 2) return 20;
+  if (place === 3) return 18;
+  if (place === 4) return 16;
+  if (place === 5) return 14;
+  if (place === 6) return 12;
+  if (place === 7) return 10;
+  if (place === 8) return 9;
+  if (place === 9) return 8;
+  if (place === 10) return 7;
+  if (place <= 15) return 6;
+  if (place <= 20) return 5;
+  if (place <= 25) return 4;
+  if (place <= 30) return 3;
+  if (place <= 40) return 2;
+  if (place <= 50) return 1;
+  return 0;
+}
+
+// Golf's stat line is pre-aggregated hole/round counts (not a single game's raw box
+// score) because DK scores every hole across every round played, plus round-level and
+// tournament-level bonuses. contestType matters because Classic and Showdown - Round 1
+// use entirely different point values, not a captain-style multiplier.
+export function dkGolfFantasyPoints(statLine: StatLine, contestType: DkContestType = 'classic'): number {
+  const table = contestType === 'showdown' ? DK_SCORING.golf.showdown : DK_SCORING.golf.classic;
+  const perHole = stat(statLine, ['doubleEagleOrBetterHoles']) * table.doubleEagleOrBetter
+    + stat(statLine, ['eagleHoles']) * table.eagle
+    + stat(statLine, ['birdieHoles']) * table.birdie
+    + stat(statLine, ['parHoles']) * table.par
+    + stat(statLine, ['bogeyHoles']) * table.bogey
+    + stat(statLine, ['doubleBogeyOrWorseHoles']) * table.doubleBogeyOrWorse;
+  const bonuses = stat(statLine, ['birdieStreakBonusRounds']) * table.birdieStreak
+    + stat(statLine, ['bogeyFreeRounds']) * table.bogeyFreeRound
+    + stat(statLine, ['holesInOne']) * table.holeInOne
+    + stat(statLine, ['allRoundsUnder70Bonus']) * table.allRoundsUnder70;
+  const finishBonus = contestType === 'showdown' ? 0 : golfFinishPositionBonus(stat(statLine, ['finishPosition']));
+  return perHole + bonuses + finishBonus;
+}
+
+export function dkFantasyPoints(statLine: StatLine, sport: DkSport, role?: DkRole, contestType?: DkContestType): number {
   if (sport === 'nba' || sport === 'wnba') return dkBasketballFantasyPoints(statLine);
   if (sport === 'nfl') return dkNflFantasyPoints(statLine, role);
   if (sport === 'mlb') return dkMlbFantasyPoints(statLine, role);
+  if (sport === 'golf') return dkGolfFantasyPoints(statLine, contestType);
   return 0;
 }

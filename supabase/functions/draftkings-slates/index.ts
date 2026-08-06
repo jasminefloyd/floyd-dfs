@@ -86,7 +86,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
+const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const SLATE_LOOKAHEAD_HOURS = 48;
 const DRAFTKINGS_HEADERS = {
@@ -138,6 +138,7 @@ function draftKingsSportCode(sport: string): string | null {
     nba: 'NBA',
     nfl: 'NFL',
     mlb: 'MLB',
+    golf: 'GOLF',
   };
   return codes[sport] ?? null;
 }
@@ -306,8 +307,14 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
     is_confirmed_starter?: boolean;
     image_url?: string | null;
     team_logo_url?: string | null;
+    tee_time?: string | null;
+    starting_hole?: string | null;
   }>();
   const teamLogos = teamLogoMap(draftables);
+  // DraftKings' FPPG attribute id differs by sport; golf uses 795 ("FPPG"), everything
+  // else in this repo uses 90. Confirmed live against both a classic and showdown golf
+  // draftgroup's draftStats dictionary.
+  const fppgAttributeId = sport === 'golf' ? 795 : 90;
 
   for (const draftable of shouldUseStarterOnly ? starterDraftables : activeDraftables) {
     const playerName = draftable.displayName ?? `${draftable.firstName ?? ''} ${draftable.lastName ?? ''}`.trim();
@@ -317,7 +324,7 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
     const key = `${draftable.playerId ?? draftable.playerDkId ?? playerName}:${position}`;
     // DraftKings attribute 90 is retained as a labeled historical FPPG feature.
     // It is not a forward-looking projection and must not populate projected_points.
-    const dkFppg = Number(draftable.draftStatAttributes?.find((attr) => attr.id === 90)?.value);
+    const dkFppg = Number(draftable.draftStatAttributes?.find((attr) => attr.id === fppgAttributeId)?.value);
     const row = {
       player_id: draftable.playerId ? String(draftable.playerId) : draftable.playerDkId ? String(draftable.playerDkId) : null,
       player_name: playerName,
@@ -331,6 +338,10 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
       is_confirmed_starter: hasDraftKingsStarterSignal(draftable),
       image_url: draftable.playerImage160 || draftable.playerImage50 || draftable.altPlayerImage160 || draftable.altPlayerImage50 || null,
       team_logo_url: teamLogos.get(String(draftable.teamAbbreviation ?? '').toUpperCase()) ?? null,
+      ...(sport === 'golf' ? {
+        tee_time: golfPlayerGameAttribute(draftable, 102),
+        starting_hole: golfPlayerGameAttribute(draftable, 103),
+      } : {}),
     };
 
     const existing = byPlayerPosition.get(key);
@@ -338,6 +349,15 @@ function normalizeDraftKingsSalaries(draftables: DraftKingsDraftable[], sport: s
   }
 
   return [...byPlayerPosition.values()];
+}
+
+// DraftKings golf draftgroups carry each round's tee time / starting hole as
+// playerGameAttributes ids 102/104 (round 1/round 2 tee time) and 103/105 (round 1/round 2
+// starting hole) -- confirmed live against a real PGA classic draftgroup. Only round 1 is
+// captured for now since that's what the wave-correlation grouping needs.
+function golfPlayerGameAttribute(draftable: DraftKingsDraftable, attributeId: number): string | null {
+  const attribute = draftable.playerGameAttributes?.find((entry) => entry.id === attributeId);
+  return attribute?.value ?? null;
 }
 
 function teamLogoMap(draftables: DraftKingsDraftable[]): Map<string, string> {

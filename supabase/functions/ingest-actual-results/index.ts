@@ -5,8 +5,9 @@
 import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring.ts';
 import { solveOptimalLineups, type SolverPlayer, type SolverRosterSlot } from '../_shared/lineupSolver.ts';
 import { parseEspnAthleteStats } from './espnStatParsing.ts';
+import { buildGolfStatLine, rankWithTies, type GolfRoundResult } from './golfStatParsing.ts';
 
-type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb';
+type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
 interface SlatePlayer {
   contest_id: string | null;
@@ -79,6 +80,7 @@ const SPORT_ROUTE: Record<Sport, string> = {
   wnba: 'basketball/wnba',
   nfl: 'football/nfl',
   mlb: 'baseball/mlb',
+  golf: 'golf/pga',
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -304,8 +306,79 @@ async function fetchMlbActuals(contestDate: string): Promise<ActualPlayer[]> {
   return rows.filter((row) => row.player_name && Number.isFinite(row.actual_points));
 }
 
+// Golf tournaments run Thu-Sun, so unlike every other sport here there's no single
+// "yesterday's box score" to fetch -- a slate's contest_date is the tournament's start
+// date, and results only settle once the whole event (not just one round) is final. This
+// searches backward from contestDate for the PGA event covering it and returns nothing
+// (rather than a false "0 matched" result) until ESPN reports that event as complete.
+async function fetchGolfActuals(contestDate: string): Promise<ActualPlayer[]> {
+  const route = SPORT_ROUTE.golf;
+  const startDate = new Date(`${contestDate}T00:00:00Z`);
+  let event: any = null;
+  for (let offset = 0; offset <= 7 && !event; offset += 1) {
+    const searchDate = new Date(startDate);
+    searchDate.setUTCDate(searchDate.getUTCDate() - offset);
+    const events = await fetchEspnEvents(route, searchDate.toISOString().slice(0, 10));
+    const match = events.find((candidate: any) => {
+      const eventStart = candidate?.date ? new Date(candidate.date) : null;
+      if (!eventStart) return false;
+      const daysSinceStart = (startDate.getTime() - eventStart.getTime()) / (24 * 60 * 60 * 1000);
+      return daysSinceStart >= -1 && daysSinceStart <= 6;
+    });
+    if (match) event = match;
+  }
+  if (!event) return [];
+  if (!event?.status?.type?.completed) return [];
+
+  const competition = event.competitions?.[0];
+  const competitors = competition?.competitors ?? [];
+  const tournamentRoundCount = Number(competition?.period) || 0;
+  const scores: Array<{ id: string; score: number }> = competitors
+    .map((competitor: any) => ({ id: String(competitor.id ?? ''), score: Number(competitor.score) }))
+    .filter((entry: { id: string; score: number }) => entry.id && Number.isFinite(entry.score));
+  const ranks = rankWithTies(scores);
+
+  const rows: ActualPlayer[] = [];
+  for (const competitor of competitors) {
+    const id = String(competitor.id ?? '');
+    const playerName = String(competitor.athlete?.displayName ?? competitor.athlete?.fullName ?? '');
+    if (!playerName) continue;
+    const rounds: GolfRoundResult[] = (competitor.linescores ?? [])
+      .filter((round: any) => Array.isArray(round.linescores) && round.linescores.length > 0)
+      .map((round: any) => ({
+        totalStrokes: Number(round.value) || 0,
+        holes: round.linescores.map((holeLine: any) => ({
+          strokes: Number(holeLine.value) || 0,
+          relativeToPar: parseGolfRelativeToPar(holeLine?.scoreType?.displayValue),
+        })),
+      }));
+    if (!rounds.length) continue;
+    const finishPosition = ranks.get(id) ?? null;
+    const statLine = buildGolfStatLine(rounds, tournamentRoundCount, finishPosition);
+    // Known limitation: Classic and Showdown Golf use different point tables, but this
+    // pipeline (like every other sport here) stores one actual_points value per player
+    // per day. Stored here using Classic's table; a Showdown Golf slate's calibration
+    // data will be off by Showdown's higher point values until this is split per
+    // contest type.
+    rows.push({
+      player_name: playerName,
+      team: 'GOLF',
+      actual_points: Number(dkFantasyPoints(statLine, 'golf', undefined, 'classic').toFixed(2)),
+    });
+  }
+  return rows;
+}
+
+function parseGolfRelativeToPar(displayValue: unknown): number {
+  const text = String(displayValue ?? '').trim().toUpperCase();
+  if (text === 'E' || text === '') return 0;
+  const parsed = Number(text.replace('+', ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 async function fetchActuals(sport: Sport, contestDate: string): Promise<ActualPlayer[]> {
   if (sport === 'mlb') return fetchMlbActuals(contestDate);
+  if (sport === 'golf') return fetchGolfActuals(contestDate);
   return fetchEspnActuals(sport, contestDate);
 }
 

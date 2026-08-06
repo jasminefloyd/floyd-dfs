@@ -89,6 +89,14 @@ const DEFAULT_ROSTER_SLOTS: Record<string, SolverRosterSlot[]> = {
     { slot: 'OF2', eligible: ['OF'] },
     { slot: 'OF3', eligible: ['OF'] },
   ],
+  golf: [
+    { slot: 'G1', eligible: ['G'] },
+    { slot: 'G2', eligible: ['G'] },
+    { slot: 'G3', eligible: ['G'] },
+    { slot: 'G4', eligible: ['G'] },
+    { slot: 'G5', eligible: ['G'] },
+    { slot: 'G6', eligible: ['G'] },
+  ],
 };
 
 interface OrderedSlot {

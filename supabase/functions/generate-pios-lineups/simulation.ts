@@ -10,6 +10,7 @@ export interface SimPlayer {
   ownership_projection?: number;
   salary_multiplier?: number;
   roster_slot?: string;
+  golf_wave?: 'am' | 'pm';
   relationship_edges?: Array<{ related_player_id: string; direction: 'positive' | 'negative' | 'neutral'; strength: number; sample_size: number; validated: boolean }>;
 }
 
@@ -108,8 +109,28 @@ export function correlateOutcomes(
     applyNflCorrelation(outcomes, means, stdDevs, roster, gamePairs);
   } else if (sport === 'mlb') {
     applyMlbCorrelation(outcomes, means, roster, gamePairs);
+  } else if (sport === 'golf') {
+    applyGolfWaveCorrelation(outcomes, roster);
   }
   applyShrunkRelationshipCorrelation(outcomes, means, roster);
+}
+
+// Golf has no teams, so there's no team-pulse or game-pulse signal to correlate on.
+// The closest equivalent is the AM/PM tee-time wave: golfers in the same wave play in
+// the same weather/course-firmness window. This is a single shared multiplier applied to
+// every golfer in a wave at once (not a pairwise nudge), so it's inherently symmetric --
+// there's no ordering dependency to get wrong the way a pairwise adjustment would have.
+// Kept deliberately small: shared conditions are a much weaker signal than a real
+// team's shared play-by-play dependency (e.g. a QB-to-WR connection).
+function applyGolfWaveCorrelation(outcomes: Float64Array, roster: SimPlayer[]): void {
+  const wavePulses = new Map<string, number>();
+  roster.forEach((player, index) => {
+    const wave = player.golf_wave;
+    if (!wave) return;
+    if (!wavePulses.has(wave)) wavePulses.set(wave, randomNormal(0, 0.04));
+    const multiplier = 1 + (wavePulses.get(wave) ?? 0);
+    outcomes[index] = Math.max(0, outcomes[index] * multiplier);
+  });
 }
 
 function applyShrunkRelationshipCorrelation(outcomes: Float64Array, means: Float64Array, roster: SimPlayer[]): void {

@@ -32,7 +32,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
+const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 
 function jsonResponse(body: unknown, status = 200) {

@@ -1,4 +1,4 @@
-const SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
+const SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const CONTEST_TYPES = new Set(['showdown', 'classic']);
 const RISK_TOLERANCES = new Set(['conservative', 'balanced', 'aggressive']);
 const LINEUP_MODES = new Set(['max_fpts', 'balanced_ev', 'tournament', 'safe']);

@@ -595,6 +595,7 @@ function classicRosterSize(sport: string): number {
   if (sport === 'wnba') return 6;
   if (sport === 'nfl') return 9;
   if (sport === 'mlb') return 10;
+  if (sport === 'golf') return 6;
   return 8;
 }
 

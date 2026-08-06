@@ -46,6 +46,7 @@ interface ManifestPlayer {
   opposing_probable_pitcher_name?: string;
   own_probable_starter?: boolean;
   game_id?: string;
+  tee_time?: string | null;
   depth_chart_order?: number;
   ownership_projection?: number;
   cpt_ownership_projection?: number;
@@ -103,6 +104,8 @@ interface LineupPlayerDraft {
   opposing_probable_pitcher_name?: string;
   own_probable_starter?: boolean;
   game_id?: string;
+  tee_time?: string | null;
+  golf_wave?: 'am' | 'pm';
   depth_chart_order?: number;
   ownership_projection?: number;
   cpt_ownership_projection?: number;
@@ -300,7 +303,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb']);
+const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const VALID_RISK = new Set(['conservative', 'balanced', 'aggressive']);
 const VALID_LINEUP_MODES = new Set(['max_fpts', 'balanced_ev', 'tournament', 'safe']);
@@ -362,6 +365,15 @@ const ROSTER_SLOTS: Record<string, RosterSlot[]> = {
     { slot: 'OF1', eligible: ['OF'] },
     { slot: 'OF2', eligible: ['OF'] },
     { slot: 'OF3', eligible: ['OF'] },
+  ],
+  // DK Classic Golf: 6 golfers, one universal position (G), no positional distinction.
+  golf: [
+    { slot: 'G1', eligible: ['G'] },
+    { slot: 'G2', eligible: ['G'] },
+    { slot: 'G3', eligible: ['G'] },
+    { slot: 'G4', eligible: ['G'] },
+    { slot: 'G5', eligible: ['G'] },
+    { slot: 'G6', eligible: ['G'] },
   ],
 };
 
@@ -601,10 +613,12 @@ function validatePayload(payload: PiosRequest) {
   if (!Number.isInteger(maxEntriesPerUser) || maxEntriesPerUser < 1 || maxEntriesPerUser > 150) throw new Error('Max entries per user must be between 1 and 150');
   if (entryCount > maxEntriesPerUser) throw new Error('Entry count cannot exceed max entries per user');
   if (maxEntriesPerUser === 1 && entryCount > 1) throw new Error('Single-entry contests can only build one lineup');
-  if (payload.contestType === 'showdown' && (!Number.isInteger(minPerTeam) || minPerTeam < 1 || minPerTeam > 3)) {
+  // Golf has no teams, so the "players per team" constraint below doesn't apply --
+  // Showdown Golf's roster construction is the same team-less 6-golfer pool as Classic.
+  if (payload.contestType === 'showdown' && payload.sport !== 'golf' && (!Number.isInteger(minPerTeam) || minPerTeam < 1 || minPerTeam > 3)) {
     throw new Error('Showdown minimum players per team must be between 1 and 3');
   }
-  if (payload.contestType === 'showdown' && minPerTeam * 2 > showdownRosterSize(payload.sport, payload.slate)) {
+  if (payload.contestType === 'showdown' && payload.sport !== 'golf' && minPerTeam * 2 > showdownRosterSize(payload.sport, payload.slate)) {
     throw new Error('Minimum players per team is not possible for the showdown roster size');
   }
   const allowsNoShowdownSalaryFloor = payload.lineupMode === 'max_fpts';
@@ -640,7 +654,8 @@ function validatePayload(payload: PiosRequest) {
       .sort((a, b) => b - a)
       .slice(0, Math.max(rosterSize - lockedRoster.length, 0));
     const selectedBaseSalaries = [...lockedRoster.map((player) => Number(player.salary ?? 0)), ...remaining];
-    const optimisticCaptainPremium = Math.max(...selectedBaseSalaries, 0) * 0.5;
+    // Golf Showdown has no captain multiplier, so there's no premium to add here.
+    const optimisticCaptainPremium = payload.sport === 'golf' ? 0 : Math.max(...selectedBaseSalaries, 0) * 0.5;
     if (selectedBaseSalaries.reduce((sum, salary) => sum + salary, 0) + optimisticCaptainPremium < minSalaryUsed) {
       throw new Error('Minimum salary is unreachable with the locked players on this slate');
     }
@@ -693,7 +708,27 @@ function normalizeLineupPosition(raw: unknown, sport: string): string {
   return [...new Set(parts)].join('/') || 'UTIL';
 }
 
+// Golf has no teams to correlate on, so wave (AM/PM tee-time bank) is the closest
+// equivalent to "same team" for shared-conditions correlation: golfers in the same wave
+// face the same weather/course-firmness window. Computed once across the full field
+// (not per-lineup) so every golfer's wave assignment is consistent regardless of which
+// lineup they end up in.
+function assignGolfWaves(players: ManifestPlayer[]): Map<string, 'am' | 'pm'> {
+  const withTeeTimes = players
+    .map((player) => ({ id: player.id, teeTime: player.tee_time ? Date.parse(player.tee_time) : NaN }))
+    .filter((entry): entry is { id: string; teeTime: number } => Number.isFinite(entry.teeTime));
+  const waveById = new Map<string, 'am' | 'pm'>();
+  if (withTeeTimes.length < 2) return waveById;
+  const sorted = [...withTeeTimes].sort((a, b) => a.teeTime - b.teeTime);
+  const median = sorted[Math.floor(sorted.length / 2)].teeTime;
+  for (const entry of withTeeTimes) {
+    waveById.set(entry.id, entry.teeTime <= median ? 'am' : 'pm');
+  }
+  return waveById;
+}
+
 function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlayerDraft[] {
+  const golfWaveById = sport === 'golf' ? assignGolfWaves(players) : undefined;
   return players.map((player) => {
     const projectedPoints = player.projected_points ?? player.last_5_stats?.avg_fantasy_pts ?? 0;
     return {
@@ -732,6 +767,8 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       opposing_probable_pitcher_name: player.opposing_probable_pitcher_name,
       own_probable_starter: player.own_probable_starter,
       game_id: player.game_id,
+      tee_time: player.tee_time,
+      golf_wave: golfWaveById?.get(player.id),
       depth_chart_order: player.depth_chart_order,
       ownership_projection: normalizeOwnership(player.ownership_projection),
       cpt_ownership_projection: normalizeOwnership(player.cpt_ownership_projection),
@@ -810,7 +847,7 @@ function rosterDiagnostics(
     if (missingSlots.length) diagnostics.push(`Classic lineup generation could not fill required slot${missingSlots.length === 1 ? '' : 's'}: ${missingSlots.join(', ')}.`);
   }
 
-  if (contestType === 'showdown') {
+  if (contestType === 'showdown' && sport !== 'golf') {
     const teamCounts = [...validFieldPlayers.reduce<Map<string, number>>((counts, player) => {
       const team = String(player.team ?? '').toUpperCase();
       if (team) counts.set(team, (counts.get(team) ?? 0) + 1);
@@ -818,6 +855,11 @@ function rosterDiagnostics(
     }, new Map()).entries()].sort((a, b) => b[1] - a[1]);
     diagnostics.push(`Showdown team coverage: ${teamCounts.map(([team, count]) => `${team}:${count}`).join(', ') || 'no teams found'}.`);
     if (teamCounts.length < 2) diagnostics.push('Showdown lineup generation requires usable players from at least two teams.');
+  }
+  if (contestType === 'showdown' && sport === 'golf') {
+    const slots = ROSTER_SLOTS.golf ?? [];
+    const slotCounts = slots.map((slot) => `${slot.slot}:${validFieldPlayers.filter((player) => playerEligibleForSlot(player, slot)).length}`);
+    diagnostics.push(`Showdown Golf slot coverage: ${slotCounts.join(', ') || 'no configured slots for golf'}.`);
   }
 
   return diagnostics;
@@ -853,10 +895,15 @@ function generateLineups(
     .map((player) => withModeledShowdownOwnership(player, eligiblePlayers))
     .map((player) => applyContextualProjectionEngine(player, sport, rules))
     .sort((a, b) => playerValueScore(b, sport, rules) - playerValueScore(a, sport, rules));
-  const classicExact = contestType === 'classic'
+  // DK Showdown Golf has no captain/multiplier mechanic -- it's the same 6-slot, no-team
+  // roster construction as Classic Golf, just with different point values and a single
+  // round instead of the full tournament. Route it through the classic (no-captain) path
+  // instead of the captain-based showdown path every other sport uses.
+  const useClassicConstruction = contestType === 'classic' || sport === 'golf';
+  const classicExact = useClassicConstruction
     ? generateExactClassicCandidatePool(sortedPlayers, sport, rules)
     : undefined;
-  const candidates = contestType === 'showdown'
+  const candidates = contestType === 'showdown' && sport !== 'golf'
     ? generateExactShowdownLineups(sortedPlayers, rules, showdownRosterSize(sport, slate), lineupMode === 'max_fpts')
     : classicExact?.candidates ?? generateClassicLineups(sortedPlayers, sport, rules);
   const exactOptimalStatus = classicExact
@@ -874,7 +921,7 @@ function generateLineups(
   });
 
   const baseCandidates = candidates
-    .filter((lineup) => validateLineup(lineup, contestType))
+    .filter((lineup) => validateLineup(lineup, contestType, sport))
     .map((lineup) => enrichLineupConstruction(lineup, rules, sport));
   const strategyCandidates = baseCandidates.filter((lineup) => validateLineup(lineup, contestType, sport, rules));
   const antiCorrelationFiltered = lineupMode === 'max_fpts'
@@ -903,7 +950,7 @@ function generateLineups(
     ? simulationCandidates
     : runMonteCarloSimulations(simulationCandidates, sortedPlayers, riskTolerance, sport, contestType, rules, slate);
   const rankedLineups = rankedSource
-    .filter((lineup) => validateLineup(lineup, contestType))
+    .filter((lineup) => validateLineup(lineup, contestType, sport))
     .map((lineup) => ({
       ...lineup,
       confidence_score: calculateLineupConfidence(lineup),
@@ -958,12 +1005,17 @@ function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules
     deadlineMs: EXACT_SOLVER_DEADLINE_MS,
     maxSharedPlayers: rules.maxSharedPlayers,
   };
-  // DraftKings Classic rules require players from at least 2 different games for every
-  // sport (NBA/WNBA/NFL/MLB), not merely 2 different teams -- a lineup can have 2 teams
-  // and still be a single game (e.g. one team's hitters plus the opposing pitcher).
-  options.minDistinctGames = 2;
-  if (players.some((player) => !String(player.game_id ?? '').trim())) {
-    options.minDistinctTeams = 2;
+  if (sport !== 'golf') {
+    // DraftKings Classic rules require players from at least 2 different games for every
+    // team sport (NBA/WNBA/NFL/MLB), not merely 2 different teams -- a lineup can have 2
+    // teams and still be a single game (e.g. one team's hitters plus the opposing
+    // pitcher). Golf has one tournament/field for the whole player pool, so this
+    // constraint doesn't apply -- every golfer shares the same game_id, which would make
+    // the constraint impossible to satisfy rather than merely inapplicable.
+    options.minDistinctGames = 2;
+    if (players.some((player) => !String(player.game_id ?? '').trim())) {
+      options.minDistinctTeams = 2;
+    }
   }
   if (sport === 'mlb') {
     options.maxPerTeam = { max: 5, excludePositions: ['P', 'SP', 'RP'] };
@@ -980,7 +1032,7 @@ function generateExactClassicCandidatePool(
   const solverOptions = classicSolverOptions(sport, players, rules);
   const result = solveOptimalLineupsWithMeta(players, sport, exactTarget, solverOptions);
   const unfilteredBest = result.lineups[0] as DraftLineup | undefined;
-  const fallbackNote = players.some((player) => !String(player.game_id ?? '').trim())
+  const fallbackNote = sport !== 'golf' && players.some((player) => !String(player.game_id ?? '').trim())
     ? 'game IDs incomplete; enforced the DraftKings two-team fallback'
     : '';
   const exactNote = [
@@ -1550,10 +1602,13 @@ function validateLineup(lineup: DraftLineup, contestType: string, sport?: string
   if (new Set(lineup.players.map((player) => player.player_id)).size !== lineup.players.length) {
     violations.push('duplicate player selected');
   }
-  if (contestType === 'showdown' && uniqueTeams(lineup.players).length < 2) {
+  // Golf has no teams (every golfer shares the same placeholder team), so the
+  // both-teams and per-team requirements below don't apply -- DK's Showdown Golf rules
+  // have no such requirement, unlike every other sport's Showdown.
+  if (contestType === 'showdown' && sport !== 'golf' && uniqueTeams(lineup.players).length < 2) {
     violations.push('showdown lineups must include players from both teams');
   }
-  if (contestType === 'showdown' && rules?.minPerTeam) {
+  if (contestType === 'showdown' && sport !== 'golf' && rules?.minPerTeam) {
     const teamCounts = new Map<string, number>();
     for (const player of lineup.players) {
       const team = String(player.team ?? '').toUpperCase();
@@ -1624,7 +1679,9 @@ function hitters(lineup: DraftLineup): LineupPlayerDraft[] {
 function largestTeamStack(lineup: DraftLineup): { team: string; size: number } {
   const counts = hitters(lineup).reduce<Record<string, number>>((acc, player) => {
     const team = String(player.team ?? '').toUpperCase();
-    if (team) acc[team] = (acc[team] ?? 0) + 1;
+    // DraftKings reports every golfer's team as the literal placeholder "Golf" -- golf
+    // has no real teams, so that value must never be counted as a stack.
+    if (team && team !== 'GOLF') acc[team] = (acc[team] ?? 0) + 1;
     return acc;
   }, {});
   return Object.entries(counts).reduce((best, [team, size]) => size > best.size ? { team, size } : best, { team: '', size: 0 });
@@ -1702,6 +1759,20 @@ function wnbaGameEnvironmentScore(lineup: DraftLineup): number {
   const confirmedRotation = lineup.players.filter((player) => player.confirmed_starter === true).length;
   const uncertainRotation = lineup.players.filter((player) => player.confirmed_starter === false).length;
   return Number((largestGame * 0.8 + confirmedRotation * 0.35 - uncertainRotation * 0.65).toFixed(2));
+}
+
+// Golf has no teams, so its closest correlation signal is shared conditions: golfers in
+// the same AM/PM tee-time wave face the same weather and course-firmness window. This is
+// a much weaker signal than a real team stack (deliberately small weight) since it's
+// course-wide luck, not a play-by-play dependency like a QB-to-WR connection.
+function golfWaveCorrelationScore(lineup: DraftLineup): number {
+  const waveCounts = new Map<string, number>();
+  for (const player of lineup.players) {
+    if (!player.golf_wave) continue;
+    waveCounts.set(player.golf_wave, (waveCounts.get(player.golf_wave) ?? 0) + 1);
+  }
+  const largestWave = Math.max(...waveCounts.values(), 0);
+  return Number((largestWave * 0.6).toFixed(2));
 }
 
 function battingOrderAdjacencyScore(players: LineupPlayerDraft[]): number {
@@ -1812,7 +1883,9 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
       ? nflCorrelationScore(lineup, rules)
       : sport === 'wnba' || sport === 'nba'
         ? wnbaGameEnvironmentScore(lineup)
-        : 0;
+        : sport === 'golf'
+          ? golfWaveCorrelationScore(lineup)
+          : 0;
   const contextEdge = contextEdgeScore(lineup);
   const volatility = lineupVolatilityScore(lineup);
   const strategyNotes = [

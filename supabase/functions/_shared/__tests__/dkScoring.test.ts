@@ -1,4 +1,4 @@
-import { dkFantasyPoints } from '../dkScoring.ts';
+import { dkFantasyPoints, golfFinishPositionBonus } from '../dkScoring.ts';
 
 function assertEquals(actual: number, expected: number, label: string) {
   if (Math.abs(actual - expected) > 0.001) {
@@ -80,6 +80,48 @@ Deno.test('NFL DST points-allowed tier scores correctly', () => {
   }, 'nfl', 'dst');
 
   assertEquals(actual, 7, 'NFL DST');
+});
+
+Deno.test('golf Classic per-hole scoring with a bogey mixed in', () => {
+  const actual = dkFantasyPoints({
+    birdieHoles: 4,
+    parHoles: 12,
+    bogeyHoles: 2,
+  }, 'golf', undefined, 'classic');
+
+  assertEquals(actual, 17, 'golf Classic mixed round');
+});
+
+Deno.test('golf Classic bogey-free round and birdie-streak bonuses stack', () => {
+  const actual = dkFantasyPoints({
+    birdieHoles: 3,
+    parHoles: 15,
+    bogeyFreeRounds: 1,
+    birdieStreakBonusRounds: 1,
+  }, 'golf', undefined, 'classic');
+
+  assertEquals(actual, 22.5, 'golf Classic bogey-free + streak');
+});
+
+Deno.test('golf Classic and Showdown use different point tables for the same holes', () => {
+  const classic = dkFantasyPoints({ birdieHoles: 1 }, 'golf', undefined, 'classic');
+  const showdown = dkFantasyPoints({ birdieHoles: 1 }, 'golf', undefined, 'showdown');
+
+  assertEquals(classic, 3, 'golf Classic single birdie');
+  assertEquals(showdown, 5.75, 'golf Showdown single birdie');
+});
+
+Deno.test('golf Showdown ignores finish position (single round, no tournament placement)', () => {
+  const actual = dkFantasyPoints({ birdieHoles: 1, finishPosition: 1 }, 'golf', undefined, 'showdown');
+  assertEquals(actual, 5.75, 'golf Showdown ignores finishPosition');
+});
+
+Deno.test('golf finish-position bonus pays ties in full, not split', () => {
+  assertEquals(golfFinishPositionBonus(1), 30, '1st place');
+  assertEquals(golfFinishPositionBonus(3), 18, '3rd place');
+  assertEquals(golfFinishPositionBonus(11), 6, '11th-15th tier');
+  assertEquals(golfFinishPositionBonus(50), 1, '41st-50th tier');
+  assertEquals(golfFinishPositionBonus(51), 0, 'outside paid positions');
 });
 
 Deno.test('MLB 2-HR hitter line scores correctly', () => {

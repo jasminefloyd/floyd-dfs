@@ -5,7 +5,7 @@
 
 import { parseOwnershipRows, type OwnershipProjection } from './parser.ts';
 
-type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb';
+type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
 interface ScrapeRequest {
   sport?: Sport;
@@ -181,7 +181,7 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({})) as ScrapeRequest;
     const sport = String(body.sport ?? '').toLowerCase() as Sport;
-    if (!['nba', 'wnba', 'nfl', 'mlb'].includes(sport)) throw new Error('sport must be one of nba, wnba, nfl, mlb');
+    if (!['nba', 'wnba', 'nfl', 'mlb', 'golf'].includes(sport)) throw new Error('sport must be one of nba, wnba, nfl, mlb, golf');
     const contestDate = validateDate(body.contestDate ?? yesterdayDate());
 
     const { selected, attempts } = await scrapeOwnership(sport, contestDate);

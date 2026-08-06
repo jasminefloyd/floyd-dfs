@@ -106,6 +106,7 @@ export async function invokePiosLineupGeneration(
         opposing_probable_pitcher_name: player.opposing_probable_pitcher_name,
         own_probable_starter: player.own_probable_starter,
         game_id: player.game_id,
+        tee_time: player.tee_time,
         depth_chart_order: player.depth_chart_order,
         ownership_projection: player.ownership_projection,
         cpt_ownership_projection: player.cpt_ownership_projection,
