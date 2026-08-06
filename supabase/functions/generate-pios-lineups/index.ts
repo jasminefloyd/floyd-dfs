@@ -577,10 +577,11 @@ function persistGeneratedLineups(
 async function persistPiosIntelligence(players: LineupPlayerDraft[], sport: string): Promise<string | null> {
   if (!envSupabaseUrl() || !envSupabaseServiceRoleKey()) return 'PIOS intelligence persistence was skipped because Supabase service-role environment is not configured.';
   try {
+    const observedAt = new Date().toISOString();
     const relationships = players.flatMap((player) => (player.relationship_edges ?? []).map((edge) => ({
       sport, player_id: edge.player_id, related_player_id: edge.related_player_id, relationship_type: edge.type,
       direction: edge.direction, correlation: edge.strength, mean_lift: 0, sample_size: edge.sample_size,
-      source: edge.source, confidence: edge.validated ? 0.8 : 0.2,
+      source: edge.source, confidence: edge.validated ? 0.8 : 0.2, last_observed_at: observedAt,
     })));
     if (relationships.length) await callSupabaseRpc('fantasy_ai_upsert_pios_relationships', { p_rows: relationships.slice(0, 5000) });
     const news = players.flatMap((player) => (player.news_events ?? []).map((event) => ({
