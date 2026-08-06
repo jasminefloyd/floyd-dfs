@@ -1,5 +1,6 @@
 import { lineupSignature, solveOptimalLineupsWithMeta, type ExactSolverResult } from './classicSolver.ts';
 import { detectAntiCorrelation } from './antiCorrelation.ts';
+import { selectCaptainCandidates } from './captainSelection.ts';
 import { PIOS_WEIGHTS } from './weights.ts';
 import { calculateLineupConfidence as calculateSharedLineupConfidence } from '../_shared/confidence.ts';
 import {
@@ -1155,7 +1156,8 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
   const salaryCapShowdown = 50_000;
   const keepCount = exactLineupKeepCount(rules);
   const captainPool = new Set(rules.captainPool.map(normalizePlayerKey));
-  const captains = [...players]
+  const captainCandidates = selectCaptainCandidates(players, captainPool.size > 0);
+  const captains = [...captainCandidates]
     .filter((player) => !captainPool.size || captainPool.has(normalizePlayerKey(player.name)))
     .sort((a, b) => maximizePoints
       ? adjustedProjection(b) - adjustedProjection(a) || a.player_id.localeCompare(b.player_id)
