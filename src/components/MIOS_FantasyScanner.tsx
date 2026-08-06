@@ -520,16 +520,25 @@ function sportLogoFallback(sport: string): string | undefined {
 
 function slateMatchup(slate: DraftKingsSlate): { label: string; teams: SlateTeam[] } {
   const teams = slateTeams(slate);
-  if (teams.length >= 2) {
+  // Golf (and anything else with no real opposing teams) reports two identical
+  // placeholder "teams", which would otherwise render as a meaningless "Golf vs Golf"
+  // that can't distinguish one slate from another.
+  if (teams.length >= 2 && teamLabel(teams[0]) !== teamLabel(teams[1])) {
     return {
       label: `${teamLabel(teams[0])} vs ${teamLabel(teams[1])}`,
       teams,
     };
   }
   return {
-    label: slate.slate_name,
+    label: slateEventName(slate) ?? slate.slate_name,
     teams,
   };
+}
+
+function slateEventName(slate: DraftKingsSlate): string | null {
+  const data = slate.data as Record<string, any> | undefined;
+  const competition = Array.isArray(data?.competitions) ? data.competitions[0] : undefined;
+  return typeof competition?.name === 'string' && competition.name.trim() ? competition.name.trim() : null;
 }
 
 function slateTeams(slate: DraftKingsSlate): SlateTeam[] {

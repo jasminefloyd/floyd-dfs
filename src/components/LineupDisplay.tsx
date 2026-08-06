@@ -228,7 +228,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                         <PlayerPortrait player={player} />
                         <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-black text-[#0b1f3a] sm:text-base">
+                          <p className="line-clamp-2 break-words text-sm font-black text-[#0b1f3a] sm:text-base">
                             {player.roster_slot ? (
                               <span className="mr-2 rounded-sm bg-[#0b1f3a] px-1.5 py-0.5 text-[10px] font-black text-white">
                                 {player.roster_slot}
