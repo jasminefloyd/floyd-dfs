@@ -316,7 +316,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
       <div>
         <label className={`mb-2 ${labelClass}`}>Sport</label>
-        <div className="grid grid-cols-2 gap-2">
+        {/* An odd sport count (e.g. adding golf as the 5th) leaves the last button alone
+            in the left column with empty space beside it -- span it full width instead. */}
+        <div className="grid grid-cols-2 gap-2 [&>label:last-child:nth-child(odd)]:col-span-2">
           {SPORTS.map((s) => (
             <label
               key={s}

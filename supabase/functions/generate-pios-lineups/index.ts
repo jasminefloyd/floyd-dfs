@@ -1893,7 +1893,9 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
     stack.size ? `${stack.team} ${stack.size}-player primary stack` : '',
     stackQuality ? `${sport.toUpperCase()} correlation/rotation score ${stackQuality.toFixed(1)}` : '',
     contextEdge ? `Context edge ${contextEdge.toFixed(1)} from park/weather/news/role signals` : '',
-    antiCorrelationFlags.length ? `Anti-correlation: ${antiCorrelationFlags.join(', ')}` : '',
+    // Not repeated here as a chip -- the full detail already renders as its own
+    // highlighted warning (see LineupAlerts in LineupDisplay.tsx), so a summary chip
+    // here would just show the same text twice.
     lateSwapFlags.length ? `${lateSwapFlags.length} late-swap watch item${lateSwapFlags.length === 1 ? '' : 's'}` : '',
     `Strategy: ${rules.contestStrategy.replace(/_/g, ' ')}`,
   ].filter(Boolean);
