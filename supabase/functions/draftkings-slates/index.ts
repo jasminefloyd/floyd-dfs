@@ -426,11 +426,11 @@ function slateMatchesRequest(slate: DraftKingsSlate, sport: string, contestType:
   if (String(slate.sport).toLowerCase() !== sport) return false;
   if (String(slate.contest_type).toLowerCase() !== contestType) return false;
   if (contestType === 'showdown' && slate.game_ids.length > 1) return false;
-  if (contestType === 'showdown' && !showdownSlateHasFeasibleRoster(slate)) return false;
+  if (contestType === 'showdown' && !showdownSlateHasFeasibleRoster(slate, sport)) return false;
   return true;
 }
 
-function showdownSlateHasFeasibleRoster(slate: DraftKingsSlate): boolean {
+function showdownSlateHasFeasibleRoster(slate: DraftKingsSlate, sport: string): boolean {
   const data = slate.data as { salaries?: Array<{ player_id?: string | null; player_name?: string; team?: string | null; salary?: number }>; roster_size?: number } | undefined;
   const salaries = (data?.salaries ?? [])
     .map((row, index) => ({
@@ -441,6 +441,14 @@ function showdownSlateHasFeasibleRoster(slate: DraftKingsSlate): boolean {
     .filter((row) => row.team && Number.isFinite(row.salary) && row.salary > 0);
   const rosterSize = Number.isFinite(Number(data?.roster_size)) ? Number(data?.roster_size) : 6;
   if (salaries.length < rosterSize) return false;
+
+  if (sport === 'golf') {
+    // Golf Showdown has no captain multiplier and no teams to pair against -- just
+    // confirm enough golfers exist to fill the roster under the salary cap.
+    const cheapest = [...salaries].sort((a, b) => a.salary - b.salary).slice(0, rosterSize);
+    return cheapest.reduce((sum, row) => sum + row.salary, 0) <= 50_000;
+  }
+
   if (new Set(salaries.map((row) => row.team)).size < 2) return false;
 
   for (const captain of salaries) {
