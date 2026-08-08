@@ -3604,8 +3604,8 @@ function applyProjectionCalibration(players: Player[], calibration: ProjectionCa
     const projectionSource = player.projection_source ?? 'unknown';
     const cellKey = `${calibrationPositionGroup(player, sport)}:${calibrationSalaryTier(player)}:${projectionSource}`;
     const cellMultiplier = activeCells.get(cellKey);
-    if (cellMultiplier === undefined) return player;
-    const multiplier = cellMultiplier;
+    const multiplier = cellMultiplier ?? (sportWideMultiplier !== 1 ? sportWideMultiplier : undefined);
+    if (multiplier === undefined) return player;
     if (Math.abs(multiplier - 1) < 0.015) return player;
     appliedPlayerCount += 1;
     if (cellMultiplier !== undefined) v2AppliedPlayerCount += 1;
