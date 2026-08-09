@@ -12,6 +12,7 @@ import {
   scaleFinishRank,
 } from './simulation.ts';
 import { deriveFormMetrics, deriveNewsEvidence, deriveRelationships, deriveScenario, relationshipScore, type PiosFormMetrics, type PiosNewsEvidence, type PiosRelationship, type PiosScenario, type PiosHomeAway } from './intelligence.ts';
+import { wnbaMatchupScore, wnbaOwnershipLeverage } from './wnbaModel.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -53,6 +54,10 @@ interface ManifestPlayer {
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
+  minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
   usage_rate?: number;
   pace_metric?: number;
   context_score?: number;
@@ -112,6 +117,10 @@ interface LineupPlayerDraft {
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
+  minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
   usage_rate?: number;
   pace_metric?: number;
   stdev_fantasy_pts?: number;
@@ -551,6 +560,10 @@ function persistGeneratedLineups(
       roster_slot: player.roster_slot,
       projected_points: player.contextual_projection ?? player.projected_points ?? player.last_5_avg_pts ?? 0,
       projection_source: player.projection_source ?? 'unknown',
+      role_stability: player.role_stability,
+      minutes_volatility: player.minutes_volatility,
+      recent_fantasy_per_minute: player.recent_fantasy_per_minute,
+      minutes_trend: player.minutes_trend,
       confidence_score: player.confidence_score,
       form_metrics: player.form_metrics ?? null,
       news_evidence: player.news_evidence ?? null,
@@ -757,6 +770,10 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       bust_probability: positiveNumber(player.bust_probability),
       games_sample_size: positiveNumber(player.last_5_stats?.games_sample_size),
       minutes_stdev: positiveNumber(player.last_5_stats?.minutes_stdev),
+      role_stability: positiveNumber(player.role_stability ?? player.last_5_stats?.role_stability),
+      minutes_volatility: positiveNumber(player.minutes_volatility ?? player.last_5_stats?.minutes_volatility),
+      recent_fantasy_per_minute: positiveNumber(player.recent_fantasy_per_minute ?? player.last_5_stats?.recent_fantasy_per_minute),
+      minutes_trend: player.minutes_trend ?? player.last_5_stats?.minutes_trend,
       injury_status: player.injury_status ?? 'active',
       projected_points: projectedPoints,
       prop_projection: player.prop_projection,
@@ -1557,7 +1574,10 @@ function playerValueScore(player: LineupPlayerDraft, sport = '', rules?: LineupC
     : 0;
   const ownershipWeight = rules?.ownershipWeight ?? (rules?.contestStrategy === 'large_field_gpp' ? 1 : 0);
   const tournamentBoost = ownershipWeight > 0
-    ? (ceiling - projected) * weights.tournamentCeiling + (player.boom_probability ?? 0) * weights.tournamentBoom - ownership * weights.tournamentOwnership * ownershipWeight
+    ? (ceiling - projected) * weights.tournamentCeiling
+      + (player.boom_probability ?? 0) * weights.tournamentBoom
+      + (sport === 'wnba' ? wnbaOwnershipLeverage(player) * 0.08 : 0)
+      - ownership * weights.tournamentOwnership * ownershipWeight
     : 0;
   const cashBoost = rules?.contestStrategy === 'cash'
     ? floor * weights.cashFloor - (player.bust_probability ?? 0) * weights.cashBust
@@ -1761,7 +1781,8 @@ function wnbaGameEnvironmentScore(lineup: DraftLineup): number {
   const largestGame = Math.max(...byGame.values(), 0);
   const confirmedRotation = lineup.players.filter((player) => player.confirmed_starter === true).length;
   const uncertainRotation = lineup.players.filter((player) => player.confirmed_starter === false).length;
-  return Number((largestGame * 0.8 + confirmedRotation * 0.35 - uncertainRotation * 0.65).toFixed(2));
+  const matchup = wnbaMatchupScore(lineup.players);
+  return Number((largestGame * 0.8 + confirmedRotation * 0.35 - uncertainRotation * 0.65 + matchup).toFixed(2));
 }
 
 // Golf has no teams, so its closest correlation signal is shared conditions: golfers in

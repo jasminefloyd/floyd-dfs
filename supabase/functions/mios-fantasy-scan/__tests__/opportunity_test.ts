@@ -1,8 +1,27 @@
-import { positionMeanPpm, redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
+import { minutesAverage, positionMeanPpm, redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
 
 Deno.test('WNBA opportunity priors are sport-specific rather than an NBA scale factor', () => {
   if (positionMeanPpm('PG', 'wnba') !== 0.91) throw new Error('Expected the WNBA PG prior to be used');
   if (positionMeanPpm('PG', 'nba') !== 1.05) throw new Error('Expected the NBA PG prior to remain unchanged');
+});
+
+Deno.test('WNBA minutes use recency weighting while NBA retains the simple average', () => {
+  const player: OpportunityPlayer = {
+    id: 'recent-rotation-change',
+    name: 'Recent Rotation Change',
+    team: 'NYL',
+    position: 'PG',
+    injury_status: 'active',
+    last_5_stats: {
+      avg_fantasy_pts: 20,
+      minutes_avg: 20,
+      games: [{ minutes: 34 }, { minutes: 30 }, { minutes: 24 }, { minutes: 18 }, { minutes: 12 }],
+    },
+  };
+  const wnbaMinutes = minutesAverage(player, 'wnba');
+  const nbaMinutes = minutesAverage(player, 'nba');
+  if (wnbaMinutes !== 28) throw new Error(`Expected recency-weighted WNBA minutes of 28, got ${wnbaMinutes}`);
+  if (nbaMinutes !== 20) throw new Error(`Expected NBA to retain direct aggregate minutes of 20, got ${nbaMinutes}`);
 });
 
 Deno.test('redistributeMinutes sends 70 percent of out guard minutes to active guard teammates', () => {

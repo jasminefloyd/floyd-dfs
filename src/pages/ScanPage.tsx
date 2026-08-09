@@ -399,6 +399,11 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
       opposing_probable_pitcher_name: p.opposing_probable_pitcher_name,
       own_probable_starter: p.own_probable_starter,
       game_id: p.game_id,
+      minutes_projection: p.minutes_projection,
+      role_stability: p.role_stability,
+      minutes_volatility: p.minutes_volatility,
+      recent_fantasy_per_minute: p.recent_fantasy_per_minute,
+      ownership_projection: p.ownership_projection,
       game_context_tags: p.game_context_tags,
       news_note: p.news_note,
       news_evidence: p.news_evidence,
@@ -409,6 +414,9 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
         stdev_fantasy_pts: p.stdev_fantasy_pts,
         games_sample_size: p.games_sample_size,
         minutes_stdev: p.minutes_stdev,
+        role_stability: p.role_stability,
+        minutes_volatility: p.minutes_volatility,
+        recent_fantasy_per_minute: p.recent_fantasy_per_minute,
         trend: 'stable'
       }
     })),

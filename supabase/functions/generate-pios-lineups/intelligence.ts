@@ -130,7 +130,10 @@ export function deriveScenario(players: Array<{ implied_total?: number; spread?:
   const spreads = players.map((p) => Number(p.spread)).filter(Number.isFinite);
   const averageTotal = totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : null;
   const averageSpread = spreads.length ? spreads.reduce((a, b) => a + b, 0) / spreads.length : null;
-  if (averageTotal !== null && averageTotal >= (sport === 'mlb' ? 9 : sport === 'nfl' ? 47 : 225)) return { key: 'high_total', confidence: 0.62, evidence: [`implied total average ${averageTotal.toFixed(1)}`] };
+  // MIOS stores team-implied totals on each player, so WNBA compares against
+  // the existing WNBA team baseline (81), not the full-game total.
+  const highTotalThreshold = sport === 'mlb' ? 9 : sport === 'nfl' ? 47 : sport === 'wnba' ? 83 : 225;
+  if (averageTotal !== null && averageTotal >= highTotalThreshold) return { key: 'high_total', confidence: 0.62, evidence: [`implied total average ${averageTotal.toFixed(1)}`] };
   if (averageSpread !== null && Math.abs(averageSpread) >= 7) return { key: 'blowout_risk', confidence: 0.58, evidence: [`spread magnitude ${Math.abs(averageSpread).toFixed(1)}`] };
   if (averageSpread !== null && averageSpread > 3) return { key: 'favorite_control', confidence: 0.5, evidence: [`favorite spread ${averageSpread.toFixed(1)}`] };
   if (averageSpread !== null && averageSpread < -3) return { key: 'underdog_comeback', confidence: 0.42, evidence: [`underdog spread ${averageSpread.toFixed(1)}`] };

@@ -1,3 +1,5 @@
+import { deriveWnbaRoleMetrics } from './wnbaModel.ts';
+
 export type OpportunitySport = 'nba' | 'wnba';
 export type OpportunityInjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -13,6 +15,10 @@ export interface OpportunityPlayer {
   minutes_projection?: number;
   depth_chart_order?: number;
   context_score?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
+  minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
   news_note?: string;
   last_5_stats?: {
     avg_fantasy_pts: number;
@@ -85,15 +91,25 @@ function sharesPositionGroup(left: string, right: string): boolean {
   return [...leftGroups].some((group) => rightGroups.has(group));
 }
 
-export function minutesAverage(player: OpportunityPlayer): number | null {
+export function recencyWeightedAverage(values: number[]): number | null {
+  if (!values.length) return null;
+  const weights = [0.4, 0.25, 0.17, 0.11, 0.07];
+  const selected = values.slice(0, weights.length);
+  const totalWeight = selected.reduce((sum, _value, index) => sum + (weights[index] ?? 0), 0);
+  if (totalWeight <= 0) return null;
+  return selected.reduce((sum, value, index) => sum + value * (weights[index] ?? 0), 0) / totalWeight;
+}
+
+export function minutesAverage(player: OpportunityPlayer, sport?: OpportunitySport): number | null {
   const direct = Number(player.last_5_stats?.minutes_avg);
-  if (Number.isFinite(direct) && direct > 0) return direct;
 
   const games = player.last_5_stats?.games ?? [];
   const values = games.flatMap((game) => {
     const minutes = Number(game.minutes ?? game.avgMinutes);
     return Number.isFinite(minutes) && minutes > 0 ? [minutes] : [];
   });
+  if (sport === 'wnba' && values.length) return recencyWeightedAverage(values);
+  if (Number.isFinite(direct) && direct > 0) return direct;
   if (!values.length) return null;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
@@ -191,7 +207,7 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
   const preparedPlayers = players.map((player) => {
     const games = player.last_5_stats?.games ?? [];
     const realGames = games.length > 0 && !player.last_5_stats?.is_synthetic;
-    const avgMinutes = realGames ? minutesAverage(player) : null;
+    const avgMinutes = realGames ? minutesAverage(player, sport) : null;
     if (realGames && avgMinutes === null) missingMinutesCount += 1;
     return {
       ...player,
@@ -215,8 +231,9 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
     }
 
     const gamesPlayed = games.length;
-    const minutesAvg = Math.max(minutesAverage(player) ?? projectedMinutes, 1);
-    const ppm = avgFantasyPts / minutesAvg;
+    const minutesAvg = Math.max(minutesAverage(player, sport) ?? projectedMinutes, 1);
+    const roleMetrics = sport === 'wnba' ? deriveWnbaRoleMetrics(games) : null;
+    const ppm = roleMetrics?.recentFantasyPerMinute ?? avgFantasyPts / minutesAvg;
     const meanPpm = positionMeanPpm(player.position, sport);
     const ppmRegressed = ppm * (gamesPlayed / (gamesPlayed + 3)) + meanPpm * (3 / (gamesPlayed + 3));
     const opportunityProjection = projectedMinutes * ppmRegressed;
@@ -231,14 +248,23 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
     if (wasClamped) clampedCount += 1;
     projectedCount += 1;
 
+    const roleNote = roleMetrics?.roleStability !== null && roleMetrics?.roleStability !== undefined
+      ? `WNBA role stability ${Math.round(roleMetrics.roleStability * 100)}% (${roleMetrics.minutes_trend ?? 'unknown'} minutes)`
+      : '';
     return {
       ...player,
       projection_source: 'opportunity_blend',
       projected_points: Number(clampedProjection.toFixed(2)),
       model_adjusted_fantasy_pts: Number(clampedProjection.toFixed(2)),
-      news_note: wasClamped
-        ? appendNote(player.news_note, `opportunity projection clamped to ${Math.round(clampWidth * 100)}% move`)
-        : player.news_note,
+      role_stability: roleMetrics?.roleStability ?? player.role_stability,
+      minutes_volatility: roleMetrics?.minutesVolatility ?? player.minutes_volatility,
+      recent_fantasy_per_minute: roleMetrics?.recentFantasyPerMinute ?? player.recent_fantasy_per_minute,
+      minutes_trend: roleMetrics?.minutesTrend ?? player.minutes_trend,
+      news_note: [
+        player.news_note,
+        roleNote,
+        wasClamped ? `opportunity projection clamped to ${Math.round(clampWidth * 100)}% move` : '',
+      ].filter(Boolean).join(' | ') || undefined,
     };
   });
 

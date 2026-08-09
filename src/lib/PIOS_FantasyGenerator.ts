@@ -31,6 +31,9 @@ export interface LineupPlayerDraft {
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
   usage_rate?: number;
   pace_metric?: number;
   stdev_fantasy_pts?: number;

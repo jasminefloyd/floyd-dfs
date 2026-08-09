@@ -3,6 +3,7 @@ import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring
 import { mapWithConcurrency } from './enrichment.ts';
 import { computeOpportunityProjection } from './opportunity.ts';
 import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
+import { parseNflverseWeeklyStats } from './nflverse.ts';
 
 type SourceStatus = Record<string, 'ok' | 'partial' | 'unavailable'>;
 type ReadinessStatus = 'ready' | 'caution' | 'blocked';
@@ -99,6 +100,10 @@ interface Player {
   game_id?: string;
   tee_time?: string | null;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
+  minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
   depth_chart_order?: number;
   context_score?: number;
   news_score?: number;
@@ -111,6 +116,10 @@ interface Player {
     confidence: number;
     stdev_fantasy_pts?: number;
     minutes_avg?: number;
+    role_stability?: number;
+    minutes_volatility?: number;
+    recent_fantasy_per_minute?: number;
+    minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
     is_synthetic?: boolean;
     games: Last5Game[];
     source?: string;
@@ -379,6 +388,9 @@ const SCAN_LOOKAHEAD_HOURS = 48;
 const REDDIT_RSS_CACHE_MS = 15 * 60 * 1000;
 const redditRssCache = new Map<string, { items: RedditFeedItem[]; cachedAt: number }>();
 const redditRssInFlight = new Map<string, Promise<RedditFeedItem[]>>();
+const nflverseCsvCache = new Map<number, { csv: string | null; cachedAt: number }>();
+const nflverseCsvInFlight = new Map<number, Promise<string | null>>();
+const NFLVERSE_CACHE_MS = 60 * 60 * 1000;
 
 const SPORT_ROUTE: Record<string, { path: string; teamLimit: number }> = {
   nba: { path: 'basketball/nba', teamLimit: 30 },
@@ -3140,10 +3152,66 @@ async function cacheLast5Stats(playerId: string, sport: string, stats: any, posi
   });
 }
 
+async function fetchNflverseWeeklyCsv(season: number): Promise<string | null> {
+  const cached = nflverseCsvCache.get(season);
+  if (cached && Date.now() - cached.cachedAt < NFLVERSE_CACHE_MS) return cached.csv;
+  const inFlight = nflverseCsvInFlight.get(season);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const urls = [
+      `https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_${season}.csv`,
+      `https://github.com/nflverse/nflverse-data/releases/download/stats_player/player_stats_${season}.csv`,
+    ];
+    for (const [index, url] of urls.entries()) {
+      const response = await limitedFetch(url, `nflverse-player-stats-${season}-${index}`, {
+        headers: { Accept: 'text/csv, text/plain' },
+        timeoutMs: 15_000,
+        retries: 1,
+        dedupeMs: 500,
+      }).catch(() => null);
+      if (!response?.ok) continue;
+      const csv = await response.text();
+      if (!csv.includes('player_display_name') && !csv.includes('player_name')) continue;
+      nflverseCsvCache.set(season, { csv, cachedAt: Date.now() });
+      return csv;
+    }
+    nflverseCsvCache.set(season, { csv: null, cachedAt: Date.now() });
+    return null;
+  })().finally(() => nflverseCsvInFlight.delete(season));
+  nflverseCsvInFlight.set(season, request);
+  return request;
+}
+
+function nflverseSeasonCandidates(): number[] {
+  const currentYear = new Date().getUTCFullYear();
+  return [currentYear, currentYear - 1];
+}
+
+async function collectNflverseLast5Stats(player: Player): Promise<any | null> {
+  for (const season of nflverseSeasonCandidates()) {
+    const csv = await fetchNflverseWeeklyCsv(season);
+    if (!csv) continue;
+    const stats = parseNflverseWeeklyStats(csv, player, new Date().toISOString());
+    if (stats?.games_data?.length) {
+      await cacheLast5Stats(player.id, 'nfl', stats, player.position);
+      return stats;
+    }
+  }
+  return null;
+}
+
 async function collectLast5Stats(player: Player, sport: string): Promise<any> {
   const cached = await getCachedLast5Stats(player.id, sport);
   if (cached?.games_data?.length) return cached;
   if (sport === 'mlb') return await collectMlbStatsApiLast5Stats(player);
+  if (sport === 'nfl') {
+    const nflverse = await collectNflverseLast5Stats(player).catch((error) => {
+      console.error(`nflverse last-5 error for ${player.name}:`, error);
+      return null;
+    });
+    if (nflverse?.games_data?.length) return nflverse;
+  }
   if (!player.espn_id) {
     return await collectBalldontlieLast5Stats(player, sport);
   }
@@ -3373,6 +3441,10 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
         trend: 'stable',
         confidence: Math.max(stats.confidence_score ?? 0.7, player.last_5_stats?.confidence ?? 0.62),
         minutes_avg: minutesAvg,
+        role_stability: player.role_stability,
+        minutes_volatility: player.minutes_volatility,
+        recent_fantasy_per_minute: player.recent_fantasy_per_minute,
+        minutes_trend: player.minutes_trend,
         games,
         source: stats.source ?? 'last5_stats',
         last_updated_at: stats.last_updated_at,
@@ -3392,6 +3464,10 @@ function applyLast5Stats(player: Player, stats: any, sport: string): Player {
       trend: 'stable',
       confidence: stats.confidence_score ?? 0.7,
       minutes_avg: minutesAvg,
+      role_stability: player.role_stability,
+      minutes_volatility: player.minutes_volatility,
+      recent_fantasy_per_minute: player.recent_fantasy_per_minute,
+      minutes_trend: player.minutes_trend,
       games,
       source: stats.source ?? 'last5_stats',
       last_updated_at: stats.last_updated_at,
@@ -3825,6 +3901,7 @@ function applyTrustMetadata(
 function providerForSource(source: string): string {
   if (source.startsWith('draftkings')) return 'DraftKings';
   if (source.startsWith('rotowire')) return 'Rotowire';
+  if (source.startsWith('nflverse')) return 'nflverse';
   if (source.startsWith('espn')) return 'ESPN';
   if (source.includes('odds') || source.includes('props')) return 'Odds provider/cache';
   if (source.includes('statcast')) return 'Baseball Savant';
@@ -4177,7 +4254,23 @@ async function orchestrateMiosFantasyScan(
     sourceStatus.outcome_distributions = 'ok';
     warnings.push(`Calculated outcome distributions for ${distributions.rows.length} players${typeof persistedDistributions === 'number' ? ` and persisted ${persistedDistributions}` : ''}. Quantiles are empirical when last-5 volatility exists and sport-prior modeled otherwise.`);
   }
-  sourceStatus.espn_last5 = statAndSentiment.some((item) => item.stats?.games_data?.length) ? 'partial' : 'unavailable';
+  const recentStatsCount = statAndSentiment.filter((item) => item.stats?.games_data?.length).length;
+  const nflverseStatsCount = statAndSentiment.filter((item) => item.stats?.source === 'nflverse_player_stats').length;
+  sourceStatus.espn_last5 = recentStatsCount ? 'partial' : 'unavailable';
+  if (sport === 'nfl') {
+    sourceStatus.nflverse_last5 = nflverseStatsCount === enrichmentRoster.length
+      ? 'ok'
+      : nflverseStatsCount
+        ? 'partial'
+        : 'unavailable';
+    if (nflverseStatsCount) {
+      warnings.push(`Applied free nflverse weekly player stats to ${nflverseStatsCount} of ${enrichmentRoster.length} enriched NFL players; unmatched players used the verified ESPN fallback when available.`);
+    } else {
+      warnings.push('Free nflverse weekly player stats were unavailable or did not match this NFL slate; verified ESPN game logs were used as fallback when available.');
+    }
+  } else {
+    delete sourceStatus.nflverse_last5;
+  }
   sourceStatus.projections = playerRoster.some((player) => typeof player.projected_points === 'number' && player.projected_points > 0)
     ? 'ok'
     : sourceStatus.espn_last5 === 'unavailable' ? 'partial' : 'ok';
@@ -4240,11 +4333,15 @@ async function orchestrateMiosFantasyScan(
     ownership_projections: { matched: ownershipApplied.matchedPlayers, total: playerRoster.length },
     draftkings_salaries: { matched: playerRoster.length, total: effectiveSalaryRows.length },
     espn_last5: { matched: enrichmentRoster.length, total: playerRoster.length },
+    ...(sport === 'nfl' ? { nflverse_last5: { matched: nflverseStatsCount, total: enrichmentRoster.length } } : {}),
   }, {
     draftkings_salaries: effectiveSalaryRows[0]?.updated_at ?? effectiveSalaryRows[0]?.imported_at,
     ownership_projections: ownershipObservedAt,
     rotowire_confirmed_lineups: confirmedLineupObservedAt,
     espn_last5: playerRoster.find((player) => player.last_5_stats?.last_updated_at)?.last_5_stats?.last_updated_at,
+    ...(sport === 'nfl' && nflverseStatsCount ? {
+      nflverse_last5: statAndSentiment.find((item) => item.stats?.source === 'nflverse_player_stats')?.stats?.last_updated_at,
+    } : {}),
     projection_calibration: new Date().toISOString(),
   });
   const readiness = buildReadiness(sourceStatus, warnings, playerRoster, ownershipCoverage);

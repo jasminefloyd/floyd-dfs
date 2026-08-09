@@ -29,6 +29,11 @@ export interface LineupPlayer {
   own_probable_starter?: boolean;
   game_id?: string;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
+  minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
+  ownership_projection?: number;
   context_score?: number;
   contextual_projection?: number;
   floor_projection?: number;
@@ -48,6 +53,9 @@ export interface LineupPlayer {
     minutes_stdev?: number;
     trend?: 'up' | 'down' | 'stable';
     minutes_avg?: number;
+    role_stability?: number;
+    minutes_volatility?: number;
+    recent_fantasy_per_minute?: number;
     is_synthetic?: boolean;
   };
 }
@@ -223,11 +231,13 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     return (
                       <div
                         key={idx}
-                        className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3"
+                        className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-3 rounded-md border border-slate-200 bg-slate-50 p-3 sm:flex sm:items-center"
                       >
-                        <PlayerPortrait player={player} />
-                        <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
-                        <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 sm:contents">
+                          <PlayerPortrait player={player} />
+                          <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
+                        </div>
+                        <div className="min-w-0 self-center">
                           <p className="line-clamp-2 break-words text-sm font-black text-[#0b1f3a] sm:text-base">
                             {player.roster_slot ? (
                               <span className="mr-2 rounded-sm bg-[#0b1f3a] px-1.5 py-0.5 text-[10px] font-black text-white">
@@ -236,11 +246,11 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                             ) : null}
                             {player.name || player.full_name}
                           </p>
-                          <p className="truncate text-[12px] font-medium text-slate-500">
+                          <p className="break-words text-[12px] font-medium text-slate-500">
                             {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}{player.home_away && player.home_away !== 'unknown' ? ` • ${player.home_away}` : ''}
                           </p>
                           {player.news_note ? (
-                            <p className="mt-1 max-h-8 overflow-hidden text-[11px] text-slate-500">
+                            <p className="mt-1 line-clamp-3 break-words text-[11px] leading-4 text-slate-500">
                               {player.news_note}
                             </p>
                           ) : null}
@@ -248,9 +258,16 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                             <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-amber-700">Unconfirmed news signal</p>
                           ) : null}
                         </div>
-                        <div className="shrink-0 text-right">
-                          <p className="font-black text-[#0b1f3a]">{formatSalary(player.salary)}</p>
-                          <p className="max-w-[118px] text-[12px] font-medium text-slate-500 sm:max-w-[130px]">
+                        <div className="col-span-2 grid grid-cols-2 gap-2 border-t border-slate-200 pt-2 text-left sm:col-span-1 sm:ml-auto sm:block sm:border-t-0 sm:pt-0 sm:text-right">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Salary</p>
+                            <p className="font-black text-[#0b1f3a]">{formatSalary(player.salary)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Projection</p>
+                            <p className="font-black text-[#0b1f3a]">{player.contextual_projection?.toFixed(1) ?? '—'} pts</p>
+                          </div>
+                          <p className="col-span-2 text-[11px] font-medium leading-4 text-slate-500 sm:max-w-[160px]">
                             {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
                             {player.last_5_stats?.stdev_fantasy_pts ? ` • σ ${player.last_5_stats.stdev_fantasy_pts.toFixed(1)}` : ''}
                             {player.salary_multiplier && player.salary_multiplier > 1
@@ -258,8 +275,15 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                               : ''}
                             {player.salary_source === 'estimated' ? ' • est. salary' : ''}
                           </p>
+                          {(player.minutes_projection !== undefined || player.role_stability !== undefined || player.ownership_projection !== undefined) ? (
+                            <div className="col-span-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] font-bold uppercase tracking-wide text-slate-400 sm:justify-end">
+                              {player.minutes_projection !== undefined ? <span>{player.minutes_projection.toFixed(1)} min</span> : null}
+                              {player.role_stability !== undefined ? <span>Role {Math.round(player.role_stability * 100)}%</span> : null}
+                              {player.ownership_projection !== undefined ? <span>Own {(player.ownership_projection * 100).toFixed(1)}%</span> : null}
+                            </div>
+                          ) : null}
                           {player.form_metrics?.sample_size ? (
-                            <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                            <p className="col-span-2 mt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400 sm:col-span-1">
                               Form {player.form_metrics.trend} · {player.form_metrics.sample_size} games{player.form_metrics.is_synthetic ? ' · fallback' : ''}
                             </p>
                           ) : null}

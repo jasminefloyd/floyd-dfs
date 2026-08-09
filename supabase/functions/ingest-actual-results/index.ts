@@ -6,6 +6,7 @@ import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring
 import { solveOptimalLineups, type SolverPlayer, type SolverRosterSlot } from '../_shared/lineupSolver.ts';
 import { parseEspnAthleteStats } from './espnStatParsing.ts';
 import { buildGolfStatLine, rankWithTies, type GolfRoundResult } from './golfStatParsing.ts';
+import { summarizeWnbaBacktest, type WnbaBacktestBucket } from '../generate-pios-lineups/wnbaModel.ts';
 
 type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
@@ -58,6 +59,9 @@ interface GeneratedLineupRow {
     roster_slot?: string | null;
     projected_points?: number | null;
     projection_source?: string | null;
+    role_stability?: number | null;
+    minutes_volatility?: number | null;
+    recent_fantasy_per_minute?: number | null;
   }>;
   projected_points: number;
   salary_used: number;
@@ -574,19 +578,26 @@ async function scoreGeneratedLineups(
   slatePlayers: SlatePlayer[],
   actualRows: ProjectionResultRow[],
   lineups?: GeneratedLineupRow[],
-) {
+) : Promise<{ scored: number; missing_players: number; wnba_backtest: WnbaBacktestBucket[] }> {
   const targetLineups = lineups ?? await getUnscoredLineupsForDate(sport, contestDate);
-  if (!targetLineups.length) return { scored: 0, missing_players: 0 };
+  if (!targetLineups.length) return { scored: 0, missing_players: 0, wnba_backtest: [] };
 
   const actualByNameTeam = buildActualMap(actualRows);
   const optimalCache = new Map<string, number>();
   let scored = 0;
   let missingPlayers = 0;
   const piosEvaluations: Array<Record<string, unknown>> = [];
+  const wnbaRows = sport === 'wnba' ? [] as Array<Record<string, unknown>> : null;
 
   for (const lineup of targetLineups) {
     const { actual, missingPlayers: missingForLineup } = lineupActualPoints(lineup, actualByNameTeam);
     missingPlayers += missingForLineup;
+    if (wnbaRows) {
+      for (const player of lineup.players) {
+        const actualPlayer = actualByNameTeam.get(actualKey(String(player.player_name ?? ''), player.team));
+        if (actualPlayer !== undefined) wnbaRows.push({ ...player, actual_points: actualPlayer });
+      }
+    }
     const cacheKey = `${lineup.contest_type}:${lineup.contest_id ?? ''}`;
     const optimal = optimalCache.get(cacheKey) ?? optimalActualPoints(
       slatePlayers,
@@ -623,7 +634,7 @@ async function scoreGeneratedLineups(
     });
   }
 
-  return { scored, missing_players: missingPlayers };
+  return { scored, missing_players: missingPlayers, wnba_backtest: wnbaRows ? summarizeWnbaBacktest(wnbaRows) : [] };
 }
 
 async function ingestSport(sport: Sport, contestDate: string) {
@@ -636,7 +647,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
   ]);
   const slatePlayers = mergeSlatePlayersForResults(storedSlatePlayers ?? [], slatePlayersFromGeneratedLineups(generatedLineups));
   if (!slatePlayers.length) {
-    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, unmatched_names: [] };
+    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, wnba_backtest: [], unmatched_names: [] };
   }
 
   const actuals = await fetchActuals(sport, contestDate);
@@ -651,7 +662,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
     : 0;
   const scoreboard = rows.length
     ? await scoreGeneratedLineups(sport, contestDate, slatePlayers, rows as ProjectionResultRow[], generatedLineups)
-    : { scored: 0, missing_players: 0 };
+    : { scored: 0, missing_players: 0, wnba_backtest: [] };
   const snapshotsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_mios_snapshots', {
     p_sport: sport,
     p_contest_date: contestDate,
@@ -667,6 +678,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
     upserted,
     lineups_scored: scoreboard.scored,
     lineup_missing_players: scoreboard.missing_players,
+    wnba_backtest: scoreboard.wnba_backtest,
     snapshots_evaluated: snapshotsEvaluated,
     pios_relationships_evaluated: piosRelationshipsEvaluated,
     unmatched_names: matched.unmatched.slice(0, 40),

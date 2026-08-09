@@ -78,6 +78,9 @@ export interface Player {
   game_id?: string;
   tee_time?: string | null;
   minutes_projection?: number;
+  role_stability?: number;
+  minutes_volatility?: number;
+  recent_fantasy_per_minute?: number;
   usage_rate?: number;
   pace_metric?: number;
   depth_chart_order?: number;
