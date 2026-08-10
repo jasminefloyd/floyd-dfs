@@ -237,7 +237,11 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
     const meanPpm = positionMeanPpm(player.position, sport);
     const ppmRegressed = ppm * (gamesPlayed / (gamesPlayed + 3)) + meanPpm * (3 / (gamesPlayed + 3));
     const opportunityProjection = projectedMinutes * ppmRegressed;
-    const opportunityWeight = player.projection_source === 'props_blend' ? 0.3 : 0.5;
+    // WNBA's opportunity projection already uses the same recent games to derive
+    // both projected minutes and role-adjusted FPPM. Blending it back into the
+    // same last-five total would count that sample twice. NBA retains the prior
+    // blend until it has an equivalent role model.
+    const opportunityWeight = sport === 'wnba' ? 1 : player.projection_source === 'props_blend' ? 0.3 : 0.5;
     const rawBlended = opportunityProjection * opportunityWeight + baseProjection * (1 - opportunityWeight);
     const confirmedCascade = /\bout\)/i.test(player.news_note ?? '') || /\bprojected \(.+ out\)/i.test(player.news_note ?? '');
     const clampWidth = confirmedCascade ? 0.55 : player.injury_status === 'questionable' ? 0.22 : 0.35;

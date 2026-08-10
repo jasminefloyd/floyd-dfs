@@ -1,4 +1,4 @@
-import { minutesAverage, positionMeanPpm, redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
+import { computeOpportunityProjection, minutesAverage, positionMeanPpm, redistributeMinutes, type OpportunityPlayer } from '../opportunity.ts';
 
 Deno.test('WNBA opportunity priors are sport-specific rather than an NBA scale factor', () => {
   if (positionMeanPpm('PG', 'wnba') !== 0.91) throw new Error('Expected the WNBA PG prior to be used');
@@ -73,5 +73,25 @@ Deno.test('redistributeMinutes sends 70 percent of out guard minutes to active g
   }
   if (result.cascadeBoostCount !== 2) {
     throw new Error(`Expected 2 boosted players, got ${result.cascadeBoostCount}`);
+  }
+});
+
+Deno.test('WNBA opportunity projection does not blend the same last-five sample twice', () => {
+  const result = computeOpportunityProjection([{
+    id: 'wnba-role-player',
+    name: 'WNBA Role Player',
+    team: 'NYL',
+    position: 'PG',
+    injury_status: 'active',
+    projected_points: 30,
+    projection_source: 'last_5',
+    last_5_stats: {
+      avg_fantasy_pts: 30,
+      games: Array.from({ length: 5 }, () => ({ minutes: 30, fantasy_points: 30 })),
+    },
+  }], 'wnba');
+  const player = result.players[0];
+  if (player.projected_points !== 28.31) {
+    throw new Error(`Expected direct minutes-rate projection of 28.31, got ${player.projected_points}`);
   }
 });

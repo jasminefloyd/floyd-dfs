@@ -710,8 +710,8 @@ function normalizePositionPart(raw: unknown, sport: string): string {
     if (position === 'DESIGNATED HITTER') return 'UTIL';
   }
   if (sport === 'nfl' && position === 'D/ST') return 'DST';
-  if ((sport === 'nba' || sport === 'wnba') && position === 'G-F') return 'SG';
-  if ((sport === 'nba' || sport === 'wnba') && position === 'F-C') return 'PF';
+  if ((sport === 'nba' || sport === 'wnba') && position === 'G-F') return 'SG/SF';
+  if ((sport === 'nba' || sport === 'wnba') && position === 'F-C') return 'PF/C';
   return position;
 }
 
@@ -733,11 +733,16 @@ function rawPositionValue(raw: Record<string, any>): unknown {
 }
 
 function baselineProjection(position: string, sport: string): number {
-  return POSITION_BASELINES[sport]?.[position] ?? 8;
+  const baselines = POSITION_BASELINES[sport] ?? {};
+  const values = String(position ?? '')
+    .split('/')
+    .map((part) => baselines[part])
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 8;
 }
 
 function estimatedSalary(projectedPoints: number, position: string, sport: string): number {
-  const positionPremium = ['QB', 'P', 'SP', 'C'].includes(position) ? 800 : 0;
+  const positionPremium = String(position ?? '').split('/').some((part) => ['QB', 'P', 'SP', 'C'].includes(part)) ? 800 : 0;
   const sportPremium = sport === 'nfl' ? 2500 : 3000;
   const salary = sportPremium + positionPremium + Math.round(projectedPoints * 145);
   return Math.max(3000, Math.min(12000, Math.round(salary / 100) * 100));
