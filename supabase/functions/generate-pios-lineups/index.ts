@@ -8,11 +8,14 @@ import {
   generateFieldLineups,
   indexFieldLineups,
   sampleLognormalOutcome,
+  sampleWnbaOutcome,
   scoreIndexedEntries,
   scaleFinishRank,
 } from './simulation.ts';
 import { deriveFormMetrics, deriveNewsEvidence, deriveRelationships, deriveScenario, relationshipScore, type PiosFormMetrics, type PiosNewsEvidence, type PiosRelationship, type PiosScenario, type PiosHomeAway } from './intelligence.ts';
 import { wnbaMatchupScore, wnbaOwnershipLeverage } from './wnbaModel.ts';
+import type { WnbaOutcomeScenario } from './wnbaScenarios.ts';
+import { buildMlbProxyDistribution } from './mlbModel.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -81,6 +84,7 @@ interface ManifestPlayer {
   field_provenance?: Record<string, { source?: string; observed_at?: string | null; is_modeled?: boolean; is_fallback?: boolean }>;
   confidence_breakdown?: Record<string, number | string>;
   projection_trace?: { model_version?: string; stages?: Array<{ name: string; projection: number | null; delta: number }> };
+  wnba_scenarios?: WnbaOutcomeScenario[];
 }
 
 interface LineupPlayerDraft {
@@ -148,6 +152,7 @@ interface LineupPlayerDraft {
   news_evidence?: PiosNewsEvidence;
   news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
   relationship_edges?: PiosRelationship[];
+  wnba_scenarios?: WnbaOutcomeScenario[];
 }
 
 interface LineupConstructionRules {
@@ -155,6 +160,7 @@ interface LineupConstructionRules {
   contestStrategy: string;
   maxPlayerExposure: number;
   maxTeamExposure: number;
+  maxGameExposure: number;
   minPrimaryStack: number;
   diversifyLineups: boolean;
   lateSwapMode: boolean;
@@ -214,6 +220,7 @@ interface DraftLineup {
   scenario_key?: PiosScenario['key'];
   scenario_confidence?: number;
   relationship_score?: number;
+  candidate_score?: number;
   evidence_summary?: string[];
   constraint_violations: string[];
 }
@@ -560,6 +567,12 @@ function persistGeneratedLineups(
       roster_slot: player.roster_slot,
       projected_points: player.contextual_projection ?? player.projected_points ?? player.last_5_avg_pts ?? 0,
       projection_source: player.projection_source ?? 'unknown',
+      ownership_projection: player.ownership_projection ?? null,
+      confirmed_starter: player.confirmed_starter ?? null,
+      own_probable_starter: player.own_probable_starter ?? null,
+      batting_order: player.batting_order ?? null,
+      field_provenance: player.field_provenance ?? null,
+      projection_trace: player.projection_trace ?? null,
       role_stability: player.role_stability,
       minutes_volatility: player.minutes_volatility,
       recent_fantasy_per_minute: player.recent_fantasy_per_minute,
@@ -803,6 +816,7 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       form_metrics: deriveFormMetrics(player.last_5_stats, sport, player.position),
       news_evidence: deriveNewsEvidence(player.news_score, player.news_note, player.last_5_stats?.last_updated_at, player.news_events),
       home_away: player.home_away ?? 'unknown',
+      wnba_scenarios: player.wnba_scenarios,
     };
   });
 }
@@ -1038,6 +1052,11 @@ function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules
   }
   if (sport === 'mlb') {
     options.maxPerTeam = { max: 5, excludePositions: ['P', 'SP', 'RP'] };
+    const pitchers = players.filter((player) => isPitcher(player));
+    const hitters = players.filter((player) => !isPitcher(player) && String(player.opponent_team ?? '').trim());
+    options.incompatiblePairs = pitchers.flatMap((pitcher) => hitters
+      .filter((hitter) => normalizeTeam(hitter.opponent_team) === normalizeTeam(pitcher.team))
+      .map((hitter) => [pitcher.player_id, hitter.player_id] as [string, string]));
   }
   return options;
 }
@@ -1068,12 +1087,44 @@ function generateExactClassicCandidatePool(
     exactLineups = exactLineups.slice(0, 24);
   }
 
-  const dfsLineups = generateClassicLineups(players, sport, rules);
+  const dfsLineups = sport === 'wnba'
+    ? interleaveLineupPools([
+      generateClassicLineups(players, sport, rules, 'projection'),
+      generateClassicLineups(players, sport, rules, 'ceiling'),
+      generateClassicLineups(players, sport, rules, 'leverage'),
+      generateClassicLineups(players, sport, rules, 'low_duplication'),
+    ])
+    : sport === 'mlb' && rules.contestStrategy !== 'cash'
+      ? interleaveLineupPools([
+        generateClassicLineups(players, sport, rules, 'projection'),
+        generateClassicLineups(players, sport, rules, 'ceiling'),
+        generateClassicLineups(players, sport, rules, 'leverage'),
+        generateClassicLineups(players, sport, rules, 'low_duplication'),
+      ])
+    : generateClassicLineups(players, sport, rules);
   return {
     candidates: dedupeLineups([...exactLineups, ...dfsLineups]).slice(0, MAX_CANDIDATE_LINEUPS),
     unfilteredBest,
     result,
   };
+}
+
+function interleaveLineupPools(pools: DraftLineup[][]): DraftLineup[] {
+  const output: DraftLineup[] = [];
+  const seen = new Set<string>();
+  const maxLength = Math.max(...pools.map((pool) => pool.length), 0);
+  for (let index = 0; index < maxLength; index += 1) {
+    for (const pool of pools) {
+      const lineup = pool[index];
+      if (!lineup) continue;
+      const signature = lineupSignature(lineup);
+      if (seen.has(signature)) continue;
+      seen.add(signature);
+      output.push(lineup);
+      if (output.length >= MAX_CANDIDATE_LINEUPS) return output;
+    }
+  }
+  return output;
 }
 
 function exactOptimalValidationStatus(
@@ -1157,9 +1208,9 @@ function preSimulationLineupScore(lineup: DraftLineup, rules: LineupConstruction
     - (lineup.late_swap_flags?.length ?? 0) * 0.25;
 }
 
-function insertTopLineup(lineups: DraftLineup[], lineup: DraftLineup, maxLineups: number) {
+function insertTopLineup(lineups: DraftLineup[], lineup: DraftLineup, maxLineups: number, sortKey: 'projected_points' | 'candidate_score' = 'projected_points') {
   lineups.push(lineup);
-  lineups.sort((a, b) => b.projected_points - a.projected_points);
+  lineups.sort((a, b) => Number(b[sortKey] ?? b.projected_points) - Number(a[sortKey] ?? a.projected_points));
   if (lineups.length > maxLineups) lineups.pop();
 }
 
@@ -1306,7 +1357,25 @@ function showdownRosterSizeWarnings(contestType: string, slate?: DraftKingsSlate
     : ['Showdown roster size was not verified from the imported slate; defaulted to 6 roster spots.'];
 }
 
-function generateClassicLineups(players: LineupPlayerDraft[], sport: string, rules: LineupConstructionRules): DraftLineup[] {
+type ClassicCandidateObjective = 'projection' | 'ceiling' | 'leverage' | 'low_duplication';
+
+function classicCandidateScore(player: LineupPlayerDraft, sport: string, rules: LineupConstructionRules, objective: ClassicCandidateObjective): number {
+  const projection = adjustedProjection(player);
+  const ceiling = player.ceiling_projection ?? projection;
+  const ownership = Math.max(player.ownership_projection ?? 0.12, 0.01);
+  const value = projection / Math.max(player.salary, 1) * 10_000;
+  if (objective === 'ceiling') return ceiling + (player.boom_probability ?? 0) * 10;
+  if (objective === 'leverage') return ceiling / Math.sqrt(ownership) + value * 0.15;
+  if (objective === 'low_duplication') return projection / Math.sqrt(ownership) + value * 0.2;
+  return playerValueScore(player, sport, rules);
+}
+
+function generateClassicLineups(
+  players: LineupPlayerDraft[],
+  sport: string,
+  rules: LineupConstructionRules,
+  objective: ClassicCandidateObjective = 'projection',
+): DraftLineup[] {
   const slots = ROSTER_SLOTS[sport];
   if (!slots) return [];
 
@@ -1316,7 +1385,7 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string, rul
   const maxIterations = sport === 'mlb' ? 35_000 : 45_000;
   const candidateLists = slots.map((slotDef) => players
     .filter((player) => playerEligibleForSlot(player, slotDef))
-    .sort((a, b) => playerValueScore(b, sport, rules) - playerValueScore(a, sport, rules))
+    .sort((a, b) => classicCandidateScore(b, sport, rules, objective) - classicCandidateScore(a, sport, rules, objective))
     .slice(0, sport === 'mlb' ? 18 : 20));
 
   function search(slotIndex: number, selected: LineupPlayerDraft[], usedIds: Set<string>, salaryUsed: number) {
@@ -1332,8 +1401,9 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string, rul
         projected_points: calculateProjectedPoints(selected),
         salary_used: salaryUsed,
         confidence_score: 0,
+        candidate_score: selected.reduce((sum, player) => sum + classicCandidateScore(player, sport, rules, objective), 0),
         constraint_violations: [],
-      }, MAX_CANDIDATE_LINEUPS);
+      }, MAX_CANDIDATE_LINEUPS, 'candidate_score');
       return;
     }
 
@@ -1352,7 +1422,7 @@ function generateClassicLineups(players: LineupPlayerDraft[], sport: string, rul
   }
 
   search(0, [], new Set<string>(), 0);
-  return lineups;
+  return lineups.map(({ candidate_score: _candidateScore, ...lineup }) => lineup);
 }
 
 // Deprecated prose fallback for one release. Prefer player.run_factor.
@@ -2093,7 +2163,9 @@ function runMonteCarloSimulations(
     mean: player.projected_points || player.last_5_avg_pts || 0,
     // MLB hitter fantasy outcomes are more right-tailed than pitcher outcomes; 1.15
     // is a documented skew boost before lognormal parameterization.
-    stdDev: playerStdDev(player) * (sport === 'mlb' && !isPitcher(player) ? 1.15 : 1),
+    stdDev: sport === 'mlb'
+      ? buildMlbProxyDistribution(player).stdev
+      : playerStdDev(player) * (sport === 'mlb' && !isPitcher(player) ? 1.15 : 1),
   }));
   const playerIndex = new Map(indexedRoster.map((entry) => [entry.player.player_id, entry.index]));
   const means = new Float64Array(indexedRoster.map((entry) => entry.mean));
@@ -2131,7 +2203,9 @@ function runMonteCarloSimulations(
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     const outcomes = new Float64Array(indexedRoster.length);
     for (const entry of indexedRoster) {
-      outcomes[entry.index] = sampleLognormalOutcome(entry.mean, entry.stdDev);
+      outcomes[entry.index] = sport === 'wnba'
+        ? sampleWnbaOutcome(entry.mean, entry.stdDev, entry.player.wnba_scenarios)
+        : sampleLognormalOutcome(entry.mean, entry.stdDev);
     }
     correlateOutcomes(outcomes, means, stdDevs, roster, sport, gamePairs, contestType);
 
@@ -2260,6 +2334,7 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
       requestId,
       maxPlayerExposure: 1,
       maxTeamExposure: 1,
+      maxGameExposure: 1,
       minPrimaryStack: 0,
       diversifyLineups: false,
       lateSwapMode: payload.lateSwapMode ?? true,
@@ -2297,6 +2372,7 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     requestId,
     maxPlayerExposure: clampNumber(payload.maxPlayerExposure, 0.2, 1, defaults.maxPlayerExposure),
     maxTeamExposure: clampNumber(payload.maxTeamExposure, 0.2, 1, defaults.maxTeamExposure),
+    maxGameExposure: payload.sport === 'wnba' ? clampNumber(payload.maxTeamExposure, 0.2, 1, defaults.maxTeamExposure) : 1,
     minPrimaryStack: Math.round(clampNumber(payload.minPrimaryStack, 0, 5, defaults.minPrimaryStack)),
     diversifyLineups: payload.diversifyLineups ?? defaults.diversifyLineups,
     lateSwapMode: payload.lateSwapMode ?? defaults.lateSwapMode,
@@ -2353,6 +2429,7 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
   const selected: DraftLineup[] = [];
   const playerCounts = new Map<string, number>();
   const teamCountsAcrossLineups = new Map<string, number>();
+  const gameCountsAcrossLineups = new Map<string, number>();
   const captainCounts = new Map<string, number>();
   const remaining = [...lineups];
 
@@ -2367,6 +2444,7 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
       const nextIndex = selected.length + 1;
       const maxPlayerUses = Math.max(1, Math.ceil(targetCount * rules.maxPlayerExposure));
       const maxTeamUses = Math.max(1, Math.ceil(targetCount * rules.maxTeamExposure));
+      const maxGameUses = Math.max(1, Math.ceil(targetCount * rules.maxGameExposure));
       const maxCaptainUses = Math.max(1, Math.ceil(targetCount * rules.maxCaptainExposure));
       const captain = lineup.players.find((player) => player.roster_slot === 'CPT');
       const duplicateEstimate = expectedDuplicates(lineup, rules);
@@ -2385,6 +2463,9 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
       const stackTeam = lineup.primary_stack_team;
       if (stackTeam && (teamCountsAcrossLineups.get(stackTeam) ?? 0) >= maxTeamUses) {
         exposureFlags.push(`${stackTeam} stack exposure cap`);
+      }
+      for (const gameId of lineupGameIds(lineup)) {
+        if ((gameCountsAcrossLineups.get(gameId) ?? 0) >= maxGameUses) exposureFlags.push(`${gameId} game exposure cap`);
       }
       const pairwiseFlag = pairwisePortfolioFlag(lineup, selected, rules);
       if (pairwiseFlag) exposureFlags.push(pairwiseFlag);
@@ -2410,6 +2491,9 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
       playerCounts.set(player.player_id, (playerCounts.get(player.player_id) ?? 0) + 1);
     }
     const selectedStackTeam = selectedLineup.primary_stack_team;
+    for (const gameId of lineupGameIds(selectedLineup)) {
+      gameCountsAcrossLineups.set(gameId, (gameCountsAcrossLineups.get(gameId) ?? 0) + 1);
+    }
     const selectedCaptain = selectedLineup.players.find((player) => player.roster_slot === 'CPT');
     if (selectedStackTeam) teamCountsAcrossLineups.set(selectedStackTeam, (teamCountsAcrossLineups.get(selectedStackTeam) ?? 0) + 1);
     if (selectedCaptain) captainCounts.set(selectedCaptain.player_id, (captainCounts.get(selectedCaptain.player_id) ?? 0) + 1);
@@ -2422,6 +2506,10 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
     optimizer_rank: index + 1,
     portfolio_correlation_flags: portfolioFlags,
   }));
+}
+
+function lineupGameIds(lineup: DraftLineup): string[] {
+  return [...new Set(lineup.players.map((player) => String(player.game_id ?? '').trim()).filter(Boolean))];
 }
 
 function lineupPlayerIds(lineup: DraftLineup): Set<string> {
@@ -2489,6 +2577,11 @@ function portfolioCorrelationFlags(lineups: DraftLineup[], rules: LineupConstruc
   const scenarioCounts = new Map<string, number>();
   for (const lineup of lineups) if (lineup.scenario_key) scenarioCounts.set(lineup.scenario_key, (scenarioCounts.get(lineup.scenario_key) ?? 0) + 1);
   for (const [scenario, count] of [...scenarioCounts.entries()].filter(([, count]) => count > 1)) flags.push(`${count} lineups share the ${scenario.replace(/_/g, ' ')} scenario`);
+  const gameCounts = new Map<string, number>();
+  for (const lineup of lineups) for (const gameId of lineupGameIds(lineup)) gameCounts.set(gameId, (gameCounts.get(gameId) ?? 0) + 1);
+  for (const [gameId, count] of [...gameCounts.entries()].filter(([, count]) => count > Math.max(1, Math.ceil(lineups.length * rules.maxGameExposure)))) {
+    flags.push(`${count} lineups use game ${gameId}`);
+  }
   const maxShared = Math.max(...lineups.flatMap((lineup, index) => lineups.slice(index + 1).map((other) => sharedPlayerCount(lineup, other))), 0);
   if (maxShared > Math.max(1, (lineups[0]?.players.length ?? 6) - 2)) flags.push(`Most similar pair shares ${maxShared} players`);
   return flags;
@@ -2595,6 +2688,20 @@ Deno.serve(async (req) => {
     const tournamentNeedsOwnership = payload.lineupMode !== 'safe' && payload.lineupMode !== 'max_fpts';
     if (tournamentNeedsOwnership && ownershipCoverage < 0.6) {
       throw new Error(`Tournament generation blocked: ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; refresh public ownership projections before generating leverage-based lineups.`);
+    }
+    if (payload.sport === 'mlb' && tournamentNeedsOwnership) {
+      const confirmedHitters = draftPlayers.filter((player) => !isPitcher(player)
+        && player.confirmed_starter === true
+        && Number.isInteger(player.batting_order)
+        && Number(player.batting_order) >= 1
+        && Number(player.batting_order) <= 9);
+      const probablePitchers = draftPlayers.filter((player) => isPitcher(player) && player.own_probable_starter === true);
+      if (!hasMlbHitterStarterContext(draftPlayers) || confirmedHitters.length < 9) {
+        throw new Error('MLB tournament generation blocked: confirmed batting orders are not available for a complete hitter context. Re-run after lineups post.');
+      }
+      if (probablePitchers.length < 2) {
+        throw new Error('MLB tournament generation blocked: fewer than two confirmed probable starting pitchers are available.');
+      }
     }
     const startedAt = Date.now();
     const lineups = generateLineups(

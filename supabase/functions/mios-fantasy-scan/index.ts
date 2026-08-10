@@ -3558,7 +3558,7 @@ function prioritizedEnrichmentRoster(players: Player[], sport: string): Enrichme
   // second game-log request. Keep live scans bounded so a large classic slate
   // does not exhaust the Edge Function compute budget. Pre-lock ingestion and
   // cached rows still provide coverage for players outside this priority set.
-  const cap = sport === 'mlb' ? 16 : 80;
+  const cap = 80;
   const studCap = sport === 'mlb' ? 12 : 30;
   const bucketByPlayerId = new Map<string, EnrichmentBucket>();
   const selected: Player[] = [];
@@ -3947,7 +3947,7 @@ function buildSourceHealth(
   }));
 }
 
-function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: Player[], ownershipCoverage: number): Readiness {
+function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: Player[], ownershipCoverage: number, sport?: string): Readiness {
   const hardBlocks: string[] = [];
   const cautions: string[] = [];
   if (!roster.length) hardBlocks.push('No eligible roster players were collected.');
@@ -3957,6 +3957,20 @@ function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: 
   if (ownershipCoverage < 0.7) cautions.push(`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage estimates are less reliable.`);
   if (sourceStatus.rotowire_confirmed_lineups === 'unavailable') cautions.push('Confirmed lineup data is unavailable; starter certainty is reduced.');
   if (sourceStatus.projection_calibration !== 'ok') cautions.push('No qualifying projection calibration was applied.');
+  if (sport === 'mlb') {
+    const confirmedHitters = roster.filter((player) => !/^(P|SP|RP)$/i.test(String(player.position ?? ''))
+      && player.confirmed_starter === true
+      && Number.isInteger(player.batting_order)
+      && Number(player.batting_order) >= 1
+      && Number(player.batting_order) <= 9);
+    const probablePitchers = roster.filter((player) => /^(P|SP|RP)$/i.test(String(player.position ?? '')) && player.own_probable_starter === true);
+    if (sourceStatus.mlb_confirmed_lineups !== 'ok' || confirmedHitters.length < 9) {
+      hardBlocks.push('MLB tournament eligibility requires a complete confirmed batting-order context.');
+    }
+    if (probablePitchers.length < 2) {
+      hardBlocks.push('MLB tournament eligibility requires at least two confirmed probable starting pitchers.');
+    }
+  }
   for (const warning of warnings) {
     if (/timed out|failed|unavailable/i.test(warning) && !cautions.includes(warning)) cautions.push(warning);
   }
@@ -4081,8 +4095,8 @@ async function orchestrateMiosFantasyScan(
   const largeMlbSlate = sport === 'mlb' && effectiveSalaryRows.length > 40;
   const [fallbackOddsContext, rawMlbFreeContexts, statcastQuality, confirmedLineups] = await Promise.all([
     hasFreeOddsContext(slate) ? Promise.resolve([]) : collectOddsApiContext(sport, slate),
-    sport === 'mlb' && !largeMlbSlate ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
-    sport === 'mlb' && !largeMlbSlate ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
+    sport === 'mlb' ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
+    sport === 'mlb' ? collectStatcastQuality() : Promise.resolve(new Map<string, StatcastQuality>()),
     ['nba', 'wnba', 'nfl', 'mlb'].includes(sport) ? collectConfirmedLineups(sport, contestDate) : Promise.resolve([]),
   ]);
   const mlbFreeContexts = sport === 'mlb' ? mergeRotowireMlbLineups(rawMlbFreeContexts, confirmedLineups) : rawMlbFreeContexts;
@@ -4094,7 +4108,7 @@ async function orchestrateMiosFantasyScan(
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = vegasContext.some((context) => context.over_under || context.spread) ? 'ok' : 'unavailable';
   if (sport === 'mlb') {
-    if (largeMlbSlate) warnings.push('Large MLB slate detected; live Statcast, weather, probable-pitcher, and lineup context calls were skipped to protect Edge Function compute limits. Cached/preloaded context remains eligible.');
+    if (largeMlbSlate) warnings.push('Large MLB slate detected; public Stats API, weather, confirmed-lineup, and Statcast collection was run across the expanded slate.');
     sourceStatus.mlb_statsapi_context = mlbFreeContexts.length ? 'ok' : 'unavailable';
     sourceStatus.nws_weather = mlbFreeContexts.some((context) => context.weather_note && context.weather_note !== 'roof/indoor park') ? 'partial' : 'unavailable';
     sourceStatus.mlb_confirmed_lineups = mlbFreeContexts.some((context) => Object.keys(context.batting_orders ?? {}).some((team) => Object.keys(context.batting_orders?.[team] ?? {}).length >= 8))
@@ -4349,7 +4363,7 @@ async function orchestrateMiosFantasyScan(
     } : {}),
     projection_calibration: new Date().toISOString(),
   });
-  const readiness = buildReadiness(sourceStatus, warnings, playerRoster, ownershipCoverage);
+  const readiness = buildReadiness(sourceStatus, warnings, playerRoster, ownershipCoverage, sport);
 
   const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({
     player_id: item.player_id,

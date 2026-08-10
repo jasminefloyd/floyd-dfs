@@ -77,6 +77,7 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
               entryFee: Number(formData.get('entryFee')),
               finishRank: Number(formData.get('finishRank')),
               payout: Number(formData.get('payout')),
+              cashLine: formData.get('cashLine') ? Number(formData.get('cashLine')) : undefined,
               entryCount: lineups.length || undefined,
               actualDuplicates: formData.get('actualDuplicates') ? Number(formData.get('actualDuplicates')) : undefined,
             });
@@ -102,12 +103,13 @@ export function CalibrationDashboard({ manifest, lineups, calibration, calibrati
             {savingResult ? 'Saving...' : 'Save Result'}
           </button>
         </div>
-        <div className="mt-3 grid gap-2 sm:grid-cols-6">
+        <div className="mt-3 grid gap-2 sm:grid-cols-7">
           <ResultInput name="optimizerRank" label="Rank" min={1} defaultValue={1} />
           <ResultInput name="fieldSize" label="Field" min={2} />
           <ResultInput name="entryFee" label="Fee" min={0} step="0.01" />
           <ResultInput name="finishRank" label="Finish" min={1} />
           <ResultInput name="payout" label="Payout" min={0} step="0.01" />
+          <ResultInput name="cashLine" label="Cash line" min={1} required={false} />
           <ResultInput name="actualDuplicates" label="Dupes" min={0} required={false} />
         </div>
         {resultStatus ? <p className="mt-2 text-xs font-bold text-slate-700">{resultStatus}</p> : null}

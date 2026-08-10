@@ -43,6 +43,7 @@ export interface SolverOptions {
   minDistinctGames?: number;
   maxSharedPlayers?: number;
   maxPerTeam?: { max: number; excludePositions?: string[] };
+  incompatiblePairs?: Array<[string, string]>;
 }
 
 const DEFAULT_SALARY_CAP = 50_000;
@@ -170,6 +171,10 @@ function satisfiesDistinctConstraints(players: SolverPlayer[], options: SolverOp
       if (count > max) return false;
       counts.set(team, count);
     }
+  }
+  if (options.incompatiblePairs?.length) {
+    const selected = new Set(players.map((player) => player.player_id));
+    if (options.incompatiblePairs.some(([first, second]) => selected.has(first) && selected.has(second))) return false;
   }
   return true;
 }

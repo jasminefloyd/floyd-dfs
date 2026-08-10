@@ -1,3 +1,6 @@
+import { selectWnbaScenario, type WnbaOutcomeScenario } from './wnbaScenarios.ts';
+import { mlbProxyFieldWeight } from './mlbModel.ts';
+
 export interface SimPlayer {
   name: string;
   team: string;
@@ -12,6 +15,7 @@ export interface SimPlayer {
   roster_slot?: string;
   golf_wave?: 'am' | 'pm';
   relationship_edges?: Array<{ related_player_id: string; direction: 'positive' | 'negative' | 'neutral'; strength: number; sample_size: number; validated: boolean }>;
+  wnba_scenarios?: WnbaOutcomeScenario[];
 }
 
 export interface SimRosterSlot {
@@ -57,6 +61,17 @@ export function sampleLognormalOutcome(mean: number, stdDev: number): number {
   const sigma = Math.sqrt(sigmaSquared);
   const mu = Math.log(mean) - sigmaSquared / 2;
   return Math.exp(randomNormal(mu, sigma));
+}
+
+export function sampleWnbaOutcome(mean: number, stdDev: number, scenarios: WnbaOutcomeScenario[] = [], randomValue = Math.random()): number {
+  const scenario = selectWnbaScenario(scenarios, randomValue);
+  if (!scenario) return sampleLognormalOutcome(mean, stdDev);
+  if (scenario.state === 'inactive') return 0;
+  const minutesMultiplier = scenario.minutes_multiplier ?? 1;
+  const productionMultiplier = scenario.production_multiplier ?? 1;
+  const scenarioMean = mean * minutesMultiplier * productionMultiplier;
+  const scenarioStdDev = stdDev * (scenario.state === 'limited' ? 1.1 : 1);
+  return sampleLognormalOutcome(scenarioMean, scenarioStdDev);
 }
 
 export function adjustedProjection(player: SimPlayer): number {
@@ -294,19 +309,22 @@ export function generateFieldLineups(
   const randomTarget = fieldSize - chalkTarget - leverageTarget;
   const retryCap = fieldSize * 100;
   let attempts = 0;
+  const fieldWeight = (mode: 'chalk' | 'random' | 'leverage', fallback: (player: SimPlayer) => number) => (
+    sport === 'mlb' ? (player: SimPlayer) => mlbProxyFieldWeight(player, mode) : fallback
+  );
   while (field.length < chalkTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8);
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('chalk', (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8));
     if (lineup) field.push(lineup);
   }
   while (field.length < chalkTarget + randomTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15);
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('random', (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15));
     if (lineup) field.push(lineup);
   }
   while (field.length < fieldSize && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01));
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('leverage', (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01)));
     if (lineup) field.push(lineup);
   }
   return field;

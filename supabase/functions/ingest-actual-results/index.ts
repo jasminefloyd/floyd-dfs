@@ -7,6 +7,12 @@ import { solveOptimalLineups, type SolverPlayer, type SolverRosterSlot } from '.
 import { parseEspnAthleteStats } from './espnStatParsing.ts';
 import { buildGolfStatLine, rankWithTies, type GolfRoundResult } from './golfStatParsing.ts';
 import { summarizeWnbaBacktest, type WnbaBacktestBucket } from '../generate-pios-lineups/wnbaModel.ts';
+import {
+  buildMlbForensicScorecard,
+  type MlbForensicLineupRow,
+  type MlbForensicPlayerRow,
+  type MlbForensicScorecard,
+} from '../generate-pios-lineups/mlbForensic.ts';
 
 type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
@@ -49,7 +55,26 @@ interface GeneratedLineupRow {
   contest_id: string | null;
   lineup_mode: string;
   contest_strategy: string;
-  config?: { scenarioKey?: string; scenarioConfidence?: number; relationshipScore?: number } | null;
+  field_size?: number | null;
+  entry_fee?: number | null;
+  finish_rank?: number | null;
+  cash_line?: number | null;
+  payout?: number | null;
+  actual_duplicates?: number | null;
+  expected_duplicates?: number | null;
+  entry_count?: number | null;
+  payout_shape?: string | null;
+  ownership_weight?: number | null;
+  weights_version?: string | null;
+  config?: {
+    scenarioKey?: string;
+    scenarioConfidence?: number;
+    relationshipScore?: number;
+    rankScore?: number;
+    simulationEv?: number;
+    topNRate?: number;
+    expectedPayout?: number;
+  } | null;
   players: Array<{
     player_id?: string | null;
     player_name?: string | null;
@@ -59,6 +84,13 @@ interface GeneratedLineupRow {
     roster_slot?: string | null;
     projected_points?: number | null;
     projection_source?: string | null;
+    ownership_projection?: number | null;
+    actual_ownership?: number | null;
+    confirmed_starter?: boolean | null;
+    own_probable_starter?: boolean | null;
+    batting_order?: number | null;
+    field_provenance?: Record<string, unknown> | null;
+    projection_trace?: Record<string, unknown> | null;
     role_stability?: number | null;
     minutes_volatility?: number | null;
     recent_fantasy_per_minute?: number | null;
@@ -428,7 +460,7 @@ function matchActualsToSlate(slatePlayers: SlatePlayer[], actuals: ActualPlayer[
       actual_points: actual.actual_points,
       source: 'auto_boxscore',
       projection_source: player.projection_source ?? 'unknown',
-    });
+      });
   }
   return { rows, unmatched };
 }
@@ -578,9 +610,19 @@ async function scoreGeneratedLineups(
   slatePlayers: SlatePlayer[],
   actualRows: ProjectionResultRow[],
   lineups?: GeneratedLineupRow[],
-) : Promise<{ scored: number; missing_players: number; wnba_backtest: WnbaBacktestBucket[] }> {
+) : Promise<{
+  scored: number;
+  missing_players: number;
+  wnba_backtest: WnbaBacktestBucket[];
+  mlb_forensic?: MlbForensicScorecard;
+}> {
   const targetLineups = lineups ?? await getUnscoredLineupsForDate(sport, contestDate);
-  if (!targetLineups.length) return { scored: 0, missing_players: 0, wnba_backtest: [] };
+  if (!targetLineups.length) return {
+    scored: 0,
+    missing_players: 0,
+    wnba_backtest: [],
+    mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined,
+  };
 
   const actualByNameTeam = buildActualMap(actualRows);
   const optimalCache = new Map<string, number>();
@@ -588,6 +630,7 @@ async function scoreGeneratedLineups(
   let missingPlayers = 0;
   const piosEvaluations: Array<Record<string, unknown>> = [];
   const wnbaRows = sport === 'wnba' ? [] as Array<Record<string, unknown>> : null;
+  const forensicLineups: MlbForensicLineupRow[] = [];
 
   for (const lineup of targetLineups) {
     const { actual, missingPlayers: missingForLineup } = lineupActualPoints(lineup, actualByNameTeam);
@@ -607,6 +650,44 @@ async function scoreGeneratedLineups(
       lineup.contest_id,
     );
     optimalCache.set(cacheKey, optimal);
+    if (sport === 'mlb') {
+      forensicLineups.push({
+        contest_date: contestDate,
+        contest_type: lineup.contest_type,
+        contest_id: lineup.contest_id,
+        contest_strategy: lineup.contest_strategy,
+        lineup_mode: lineup.lineup_mode,
+        field_size: lineup.field_size,
+        entry_fee: lineup.entry_fee,
+        finish_rank: lineup.finish_rank,
+        cash_line: lineup.cash_line,
+        payout: lineup.payout,
+        actual_duplicates: lineup.actual_duplicates,
+        expected_duplicates: lineup.expected_duplicates,
+        rank_score: typeof lineup.config?.rankScore === 'number' ? lineup.config.rankScore : null,
+        simulation_ev: typeof lineup.config?.simulationEv === 'number' ? lineup.config.simulationEv : null,
+        top_n_rate: typeof lineup.config?.topNRate === 'number' ? lineup.config.topNRate : null,
+        expected_payout: typeof lineup.config?.expectedPayout === 'number' ? lineup.config.expectedPayout : null,
+        projected_points: lineup.projected_points,
+        actual_points: actual,
+        optimal_points: optimal,
+        pct_of_optimal: optimal > 0 ? actual / optimal : null,
+        optimizer_rank: lineup.optimizer_rank,
+        players: lineup.players.map((player) => ({
+          player_id: player.player_id,
+          player_name: player.player_name,
+          team: player.team,
+          position: player.position,
+          projected_points: player.projected_points,
+          actual_points: actualByNameTeam.get(actualKey(String(player.player_name ?? ''), player.team)) ?? null,
+          projection_source: player.projection_source,
+          ownership_projection: player.ownership_projection,
+          actual_ownership: player.actual_ownership,
+          confirmed_starter: player.confirmed_starter,
+          batting_order: player.batting_order,
+        })),
+      });
+    }
     await callSupabaseRpc('fantasy_ai_score_generated_lineup', {
       p_id: lineup.id,
       p_actual: actual,
@@ -634,7 +715,57 @@ async function scoreGeneratedLineups(
     });
   }
 
-  return { scored, missing_players: missingPlayers, wnba_backtest: wnbaRows ? summarizeWnbaBacktest(wnbaRows) : [] };
+  const forensicPlayers: MlbForensicPlayerRow[] = sport === 'mlb'
+    ? actualRows.map((row) => ({
+      contest_date: contestDate,
+      contest_type: row.contest_type,
+      contest_id: row.contest_id,
+      player_id: row.player_id,
+      player_name: row.player_name,
+      team: row.team,
+      position: row.position,
+      projected_points: row.projected_points,
+      actual_points: row.actual_points,
+      projection_source: row.projection_source,
+    }))
+    : [];
+
+  const mlbForensic = sport === 'mlb'
+    ? buildMlbForensicScorecard(forensicPlayers, forensicLineups)
+    : undefined;
+  if (mlbForensic) {
+    const contestGroups = new Map<string, MlbForensicLineupRow[]>();
+    for (const lineup of forensicLineups) {
+      const key = `${lineup.contest_type}:${lineup.contest_id ?? ''}`;
+      contestGroups.set(key, [...(contestGroups.get(key) ?? []), lineup]);
+    }
+    for (const contestRows of contestGroups.values()) {
+      const contestPlayers = forensicPlayers.filter((player) => (
+        player.contest_type === contestRows[0]?.contest_type
+        && (player.contest_id ?? '') === (contestRows[0]?.contest_id ?? '')
+      ));
+      const contestScorecard = buildMlbForensicScorecard(contestPlayers, contestRows);
+      await callSupabaseRpc('fantasy_ai_upsert_mlb_forensic_report', {
+        p_report: {
+          contest_date: contestDate,
+          contest_type: contestRows[0]?.contest_type ?? 'unknown',
+          contest_id: contestRows[0]?.contest_id ?? null,
+          scorecard: contestScorecard,
+          lineups: contestRows,
+          coverage: contestScorecard.coverage,
+        },
+      }).catch((error) => {
+        console.error('MLB forensic report persistence failed:', error);
+      });
+    }
+  }
+
+  return {
+    scored,
+    missing_players: missingPlayers,
+    wnba_backtest: wnbaRows ? summarizeWnbaBacktest(wnbaRows) : [],
+    mlb_forensic: mlbForensic,
+  };
 }
 
 async function ingestSport(sport: Sport, contestDate: string) {
@@ -647,7 +778,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
   ]);
   const slatePlayers = mergeSlatePlayersForResults(storedSlatePlayers ?? [], slatePlayersFromGeneratedLineups(generatedLineups));
   if (!slatePlayers.length) {
-    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, wnba_backtest: [], unmatched_names: [] };
+    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined, unmatched_names: [] };
   }
 
   const actuals = await fetchActuals(sport, contestDate);
@@ -662,7 +793,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
     : 0;
   const scoreboard = rows.length
     ? await scoreGeneratedLineups(sport, contestDate, slatePlayers, rows as ProjectionResultRow[], generatedLineups)
-    : { scored: 0, missing_players: 0, wnba_backtest: [] };
+    : { scored: 0, missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined };
   const snapshotsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_mios_snapshots', {
     p_sport: sport,
     p_contest_date: contestDate,
@@ -679,6 +810,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
     lineups_scored: scoreboard.scored,
     lineup_missing_players: scoreboard.missing_players,
     wnba_backtest: scoreboard.wnba_backtest,
+    mlb_forensic: scoreboard.mlb_forensic,
     snapshots_evaluated: snapshotsEvaluated,
     pios_relationships_evaluated: piosRelationshipsEvaluated,
     unmatched_names: matched.unmatched.slice(0, 40),

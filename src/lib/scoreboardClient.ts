@@ -28,6 +28,7 @@ export interface ContestResultInput {
   entryFee: number;
   finishRank: number;
   payout: number;
+  cashLine?: number;
   entryCount?: number;
   actualDuplicates?: number;
 }
@@ -53,6 +54,7 @@ export async function recordContestResult(input: ContestResultInput): Promise<nu
     p_entry_fee: input.entryFee,
     p_finish_rank: input.finishRank,
     p_payout: input.payout,
+    p_cash_line: input.cashLine ?? null,
     p_entry_count: input.entryCount ?? null,
     p_actual_duplicates: input.actualDuplicates ?? null,
   });
