@@ -11,6 +11,7 @@ export interface ReplayLineupOutcome {
   payout?: number;
   entry_fee?: number;
   player_ids?: string[];
+  top_20_cutoff?: number;
 }
 
 export interface ReplayScorecard {
@@ -23,6 +24,7 @@ export interface ReplayScorecard {
   lineup_roi: number | null;
   lineup_hit_rate: number | null;
   duplication_rate: number | null;
+  top_20_rate: number | null;
 }
 
 function average(values: number[]): number | null {
@@ -58,6 +60,7 @@ export function evaluateReplay(
   const totalPayouts = paidLineups.reduce((sum, row) => sum + Number(row.payout ?? 0), 0);
   const signatures = lineups.map((lineup) => [...(lineup.player_ids ?? [])].sort().join('|')).filter(Boolean);
   const uniqueSignatures = new Set(signatures);
+  const top20Eligible = lineups.filter((lineup) => Number.isFinite(lineup.top_20_cutoff));
   const hitRate = paidLineups.length
     ? paidLineups.filter((row) => Number(row.payout ?? 0) > 0).length / paidLineups.length
     : null;
@@ -74,5 +77,8 @@ export function evaluateReplay(
     lineup_roi: totalFees ? Number(((totalPayouts - totalFees) / totalFees).toFixed(4)) : null,
     lineup_hit_rate: hitRate === null ? null : Number(hitRate.toFixed(4)),
     duplication_rate: signatures.length ? Number((1 - uniqueSignatures.size / signatures.length).toFixed(4)) : null,
+    top_20_rate: top20Eligible.length
+      ? Number((top20Eligible.filter((lineup) => lineup.actual_points >= Number(lineup.top_20_cutoff)).length / top20Eligible.length).toFixed(4))
+      : null,
   };
 }

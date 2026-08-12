@@ -22,6 +22,8 @@ interface ActualRow {
   recorded_at?: string | null;
 }
 
+interface ContestLineRow { cash_line?: number | null; top_20_cutoff?: number | null; entry_fee?: number | null; payout?: number | null; }
+
 interface ReplayRequest {
   snapshotId: string;
   config?: Record<string, unknown>;
@@ -98,6 +100,10 @@ Deno.serve(async (req) => {
       p_contest_id: snapshot.contest_id,
     });
     if (!actuals.length) throw new Error('Replay requires settled player actuals for this snapshot.');
+    const contestRows = await rpc<ContestLineRow[]>('fantasy_ai_get_wnba_replay_contest_result', {
+      p_contest_date: snapshot.contest_date, p_contest_type: snapshot.contest_type, p_contest_id: snapshot.contest_id,
+    });
+    const contest = contestRows[0] ?? {};
     const actualByPlayer = new Map(actuals.map((row) => [playerKey(row.player_name, row.team), Number(row.actual_points)]));
     const config = { ...request.config, simulationSeed: Number(request.config?.simulationSeed ?? stableSeed(snapshot.id)) };
     const replayPayload = replayPayloadFromManifest({
@@ -130,8 +136,11 @@ Deno.serve(async (req) => {
         projected_points: Number(lineup.projected_points),
         actual_points: points.every((point) => Number.isFinite(point)) ? points.reduce((sum, point) => sum + Number(point), 0) : NaN,
         player_ids: lineup.players.map((player) => String(player.player_id ?? player.name ?? '')).filter(Boolean),
+        top_20_cutoff: contest.top_20_cutoff ?? null,
+        entry_fee: contest.entry_fee ?? null,
+        payout: contest.payout ?? null,
       };
-    }).filter((lineup): lineup is { projected_points: number; actual_points: number; player_ids: string[] } => Number.isFinite(lineup.projected_points) && Number.isFinite(lineup.actual_points));
+    }).filter((lineup): lineup is { projected_points: number; actual_points: number; player_ids: string[]; top_20_cutoff: number | null; entry_fee: number | null; payout: number | null } => Number.isFinite(lineup.projected_points) && Number.isFinite(lineup.actual_points));
     const scorecard = evaluateReplay(playerOutcomes, lineupOutcomes);
     const replayId = await rpc<string>('fantasy_ai_insert_wnba_replay_run', {
       p_snapshot_id: snapshot.id,

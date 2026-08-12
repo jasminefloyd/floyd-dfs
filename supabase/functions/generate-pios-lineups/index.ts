@@ -18,6 +18,7 @@ import { wnbaMatchupScore, wnbaOwnershipLeverage } from './wnbaModel.ts';
 import type { WnbaOutcomeScenario } from './wnbaScenarios.ts';
 import { buildMlbProxyDistribution } from './mlbModel.ts';
 import { sampleWnbaJointOutcomes, type WnbaJointPlayer } from './wnbaJointSimulation.ts';
+import { contestObjective, duplicateAdjustedPayout, objectiveScore, simulationUncertainty, type ContestObjective } from './contestObjective.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -212,9 +213,13 @@ interface DraftLineup {
   top_decile_rate?: number;
   top_n_rate?: number;
   expected_payout?: number;
+  gross_expected_payout?: number;
   leverage_score?: number;
   ownership_sum?: number;
   expected_duplicates?: number;
+  duplicate_adjusted_expected_payout?: number;
+  objective_version?: ContestObjective;
+  simulation_uncertainty?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   optimizer_rank?: number;
   rank_score?: number;
@@ -542,6 +547,7 @@ function persistGeneratedLineups(
     max_entries_per_user: rules.maxEntriesPerUser,
     entry_count: rules.entryCount,
     expected_duplicates: lineup.expected_duplicates ?? null,
+    duplicate_adjusted_expected_payout: lineup.duplicate_adjusted_expected_payout ?? null,
     weights_version: PIOS_WEIGHTS.weights_version,
     payout_shape: rules.payoutShape,
     ownership_weight: rules.ownershipWeight,
@@ -573,6 +579,9 @@ function persistGeneratedLineups(
       forceUniqueCaptains: rules.forceUniqueCaptains,
       minSalaryUsed: rules.minSalaryUsed,
       maxDuplication: rules.maxDuplication,
+      objectiveVersion: lineup.objective_version ?? null,
+      duplicateAdjustedExpectedPayout: lineup.duplicate_adjusted_expected_payout ?? null,
+      simulationUncertainty: lineup.simulation_uncertainty ?? null,
       simulationIterations: rules.simulationIterations,
       fieldSimulationSize: rules.fieldSimulationSize,
       simulationSeed: rules.simulationSeed,
@@ -1367,7 +1376,8 @@ function captainLeverageScore(player: LineupPlayerDraft): number {
 }
 
 function showdownLeverageLineupScore(lineup: DraftLineup): number {
-  return lineup.projected_points / Math.max(lineupOwnershipProduct(lineup), 0.000001);
+  const ownershipProduct = lineupOwnershipProduct(lineup);
+  return ownershipProduct === undefined ? Number.NEGATIVE_INFINITY : lineup.projected_points / Math.max(ownershipProduct, 0.000001);
 }
 
 function bestRemainingProjection(players: LineupPlayerDraft[], startIndex: number, needed: number): number {
@@ -2082,17 +2092,23 @@ function withModeledShowdownOwnership(player: LineupPlayerDraft, roster: LineupP
   };
 }
 
-function lineupOwnershipProduct(lineup: DraftLineup): number {
-  return lineup.players.reduce((product, player) => {
+function lineupOwnershipProduct(lineup: DraftLineup): number | undefined {
+  let product = 1;
+  for (const player of lineup.players) {
     const slotOwnership = player.roster_slot === 'CPT'
-      ? player.cpt_ownership_projection ?? player.ownership_projection ?? 0.08
-      : player.flex_ownership_projection ?? player.ownership_projection ?? 0.12;
-    return product * clampNumber(slotOwnership, 0.001, 0.99, 0.1);
-  }, 1);
+      ? player.cpt_ownership_projection ?? player.ownership_projection
+      : player.flex_ownership_projection ?? player.ownership_projection;
+    // Tournament lineups with incomplete ownership are explicitly unavailable for
+    // duplication-based ranking; a made-up default would fabricate leverage.
+    if (slotOwnership === undefined) return undefined;
+    product *= clampNumber(slotOwnership, 0.001, 0.99, slotOwnership);
+  }
+  return product;
 }
 
-function expectedDuplicates(lineup: DraftLineup, rules: LineupConstructionRules): number {
-  return Number((lineupOwnershipProduct(lineup) * rules.fieldSize).toFixed(2));
+function expectedDuplicates(lineup: DraftLineup, rules: LineupConstructionRules): number | undefined {
+  const product = lineupOwnershipProduct(lineup);
+  return product === undefined ? undefined : Number((product * rules.fieldSize).toFixed(2));
 }
 
 function normalizeNewsScore(value: unknown): number | undefined {
@@ -2228,12 +2244,14 @@ function runMonteCarloSimulations(
   const wins = new Map<DraftLineup, number>();
   const topDeciles = new Map<DraftLineup, number>();
   const topNs = new Map<DraftLineup, number>();
+  const grossExpectedPayouts = new Map<DraftLineup, number>();
   const expectedPayouts = new Map<DraftLineup, number>();
   for (const lineup of lineups) {
     samples.set(lineup, []);
     wins.set(lineup, 0);
     topDeciles.set(lineup, 0);
     topNs.set(lineup, 0);
+    grossExpectedPayouts.set(lineup, 0);
     expectedPayouts.set(lineup, 0);
   }
 
@@ -2266,18 +2284,27 @@ function runMonteCarloSimulations(
         topDeciles.set(lineup, (topDeciles.get(lineup) ?? 0) + 1);
       }
       if (finishRank <= trueTopN) topNs.set(lineup, (topNs.get(lineup) ?? 0) + 1);
-      expectedPayouts.set(lineup, (expectedPayouts.get(lineup) ?? 0) + payoutUnitsForFinish(finishRank, rules.fieldSize, rules.payoutShape));
+      const grossPrize = payoutUnitsForFinish(finishRank, rules.fieldSize, rules.payoutShape);
+      const duplicates = expectedDuplicates(lineup, rules);
+      // Until an authorized full contest export is available, distribute a tied
+      // prize over the modeled expected number of matching entries.
+      const splitPrize = duplicates === undefined ? 0 : duplicateAdjustedPayout(grossPrize, duplicates);
+      grossExpectedPayouts.set(lineup, (grossExpectedPayouts.get(lineup) ?? 0) + grossPrize);
+      expectedPayouts.set(lineup, (expectedPayouts.get(lineup) ?? 0) + splitPrize);
     }
   }
 
   return lineups.map((lineup) => {
     const outcomes = samples.get(lineup) ?? [];
-    const ownershipSum = lineup.players.reduce((sum, player) => sum + (player.ownership_projection ?? 0.12), 0);
+    const ownershipSum = lineup.players.reduce((sum, player) => sum + (player.ownership_projection ?? 0), 0);
     const ev = outcomes.reduce((sum, value) => sum + value, 0) / Math.max(outcomes.length, 1);
     const winRate = (wins.get(lineup) ?? 0) / iterations;
     const topDecileRate = (topDeciles.get(lineup) ?? 0) / iterations;
     const topNRate = (topNs.get(lineup) ?? 0) / iterations;
+    const grossExpectedPayout = (grossExpectedPayouts.get(lineup) ?? 0) / iterations;
     const expectedPayout = (expectedPayouts.get(lineup) ?? 0) / iterations;
+    const expectedDuplicateCount = expectedDuplicates(lineup, rules);
+    const uncertainty = simulationUncertainty(topNRate, iterations);
     return {
       ...lineup,
       simulation_ev: Number(ev.toFixed(2)),
@@ -2288,7 +2315,11 @@ function runMonteCarloSimulations(
       top_10_rate: Number(topDecileRate.toFixed(4)),
       top_decile_rate: Number(topDecileRate.toFixed(4)),
       top_n_rate: Number(topNRate.toFixed(4)),
-      expected_payout: Number(expectedPayout.toFixed(4)),
+      expected_payout: Number(grossExpectedPayout.toFixed(4)),
+      gross_expected_payout: Number(grossExpectedPayout.toFixed(4)),
+      expected_duplicates: expectedDuplicateCount,
+      duplicate_adjusted_expected_payout: expectedDuplicateCount === undefined ? undefined : Number(expectedPayout.toFixed(4)),
+      simulation_uncertainty: Number(uncertainty.toFixed(5)),
       ownership_sum: Number(ownershipSum.toFixed(4)),
       leverage_score: Number(((topDecileRate * 100) - ownershipSum * 10).toFixed(2)),
     };
@@ -2636,6 +2667,11 @@ function portfolioCorrelationFlags(lineups: DraftLineup[], rules: LineupConstruc
 }
 
 function lineupRankScore(lineup: DraftLineup, riskTolerance: string, lineupMode: string, rules: LineupConstructionRules): number {
+  const objective = contestObjective(rules.contestStrategy, lineupMode, lineup.players.some((player) => player.roster_slot === 'CPT'));
+  lineup.objective_version = objective;
+  const calibratedScore = objectiveScore({ objective, projected: lineup.projected_points, floor: lineup.floor_score ?? 0, confidence: lineup.confidence_score ?? 0, topNRate: lineup.top_n_rate ?? 0, winRate: lineup.win_rate ?? 0, expectedPayout: lineup.expected_payout ?? 0, expectedDuplicates: lineup.expected_duplicates ?? 0, duplicateAdjustedExpectedPayout: lineup.duplicate_adjusted_expected_payout, uncertainty: lineup.simulation_uncertainty ?? 0 });
+  if (objective !== 'cash_floor_v1' && objective !== 'projection_max_v1' && lineup.expected_duplicates === undefined) return Number.NEGATIVE_INFINITY;
+  if (objective !== 'projection_max_v1') return calibratedScore;
   const weights = PIOS_WEIGHTS.lineupRank;
   const ev = lineup.simulation_ev ?? lineup.projected_points;
   const ceiling = lineup.ceiling_score ?? lineup.projected_points;

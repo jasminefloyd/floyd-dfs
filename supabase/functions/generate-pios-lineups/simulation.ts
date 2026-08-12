@@ -330,19 +330,22 @@ export function generateFieldLineups(
   const fieldWeight = (mode: 'chalk' | 'random' | 'leverage', fallback: (player: SimPlayer) => number) => (
     sport === 'mlb' ? (player: SimPlayer) => mlbProxyFieldWeight(player, mode) : fallback
   );
+  // WNBA tournament fields may only consume supplied ownership. Missing values
+  // get negligible selection weight rather than a synthetic ownership default.
+  const ownership = (player: SimPlayer) => player.ownership_projection ?? (sport === 'wnba' ? 0 : 0.08);
   while (field.length < chalkTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('chalk', (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8), random);
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('chalk', (player) => adjustedProjection(player) + ownership(player) * 8), random);
     if (lineup) field.push(lineup);
   }
   while (field.length < chalkTarget + randomTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('random', (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15), random);
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('random', (player) => Math.max(ownership(player), 0.0001) ** 1.15), random);
     if (lineup) field.push(lineup);
   }
   while (field.length < fieldSize && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('leverage', (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01)), random);
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('leverage', (player) => adjustedProjection(player) / Math.max(ownership(player), 0.0001)), random);
     if (lineup) field.push(lineup);
   }
   return field;

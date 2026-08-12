@@ -222,30 +222,32 @@ Phase 2 implementation is complete and its current evidence is explicitly explor
 
 ## Phase 6 — Ownership, field, and duplication model
 
+Implementation status: deployed ownership-import and scorecard contracts, valid-field simulation, duplicate-aware prize splitting, and duplicate-adjusted output persistence are complete. The unchecked training, calibration, and acceptance items below require authorized observed ownership/full-field exports and settled historical contests; they must remain evidence-gated rather than being marked complete by code alone.
+
 ### 6.1 Build ownership projections
 
-- [ ] Store observed ownership by player, slate, contest type, contest size, and lock time when authorized data is available.
+- [x] Store observed ownership by player, slate, contest type, contest size, and lock time when authorized data is available.
 - [ ] Train WNBA ownership predictions separately from player median projections.
 - [ ] Include salary, position, projection rank, value, injury/news state, team/game context, contest type, and slate size.
 - [ ] Train separate ownership models for Classic and Showdown, including captain ownership for Showdown.
-- [ ] Measure ownership MAE, calibration, rank correlation, and error for high-owned plays.
-- [ ] Mark ownership as unavailable rather than substituting a generic default in tournament ranking.
+- [x] Measure ownership MAE, calibration, rank correlation, and error for high-owned plays.
+- [x] Mark ownership as unavailable rather than substituting a generic default in tournament ranking.
 
 ### 6.2 Generate a calibrated contest field
 
-- [ ] Generate only valid DraftKings lineups with correct salary, positional, game, and contest-specific constraints.
+- [x] Generate only valid DraftKings lineups with correct salary, positional, game, and contest-specific constraints.
 - [ ] Fit field salary usage, ownership sum, player exposures, game concentration, and construction archetypes to observed contests.
 - [ ] Fit the field separately by contest size, entry limit, payout shape, and Classic/Showdown.
-- [ ] Support observed contest lineups or authorized contest CSVs as a calibration target.
+- [x] Support observed contest lineups or authorized contest CSVs as a calibration target.
 - [ ] Use a sufficiently large offline field and simulation count for the actual contest size; do not map a 240-lineup proxy directly onto a multi-thousand-entry contest without validation.
-- [ ] Track field-model error by player exposure and lineup archetype.
+- [x] Track field-model error by player exposure and lineup archetype.
 
 ### 6.3 Model duplication and payout correctly
 
-- [ ] Estimate full-lineup duplication from roster construction, ownership interactions, salary usage, and contest type.
+- [x] Estimate full-lineup duplication from roster construction, ownership interactions, salary usage, and contest type.
 - [ ] Validate duplication estimates against actual duplicate counts.
-- [ ] Split simulated prizes among tied/duplicated lineups according to contest payout rules.
-- [ ] Include duplicate-adjusted expected payout and ROI in ranking outputs.
+- [x] Split simulated prizes among tied/duplicated lineups according to contest payout rules.
+- [x] Include duplicate-adjusted expected payout and ROI in ranking outputs.
 
 ### Phase 6 acceptance gate
 
@@ -257,30 +259,32 @@ Phase 2 implementation is complete and its current evidence is explicitly explor
 
 ## Phase 7 — Contest-aware lineup and portfolio optimization
 
+Implementation status: deployed contest-objective versioning, simulated-outcome ranking, uncertainty reporting, and joint portfolio controls are complete. The acceptance items remain held-out-data gates.
+
 ### 7.1 Define explicit contest objectives
 
-- [ ] Define cash objective: high median/floor, low bust probability, and reliability.
-- [ ] Define single-entry/three-max objective: duplicate-adjusted expected ROI and top-20 probability.
-- [ ] Define large-field objective: probability that at least one portfolio lineup reaches top 20, plus duplicate-adjusted ROI.
-- [ ] Define Showdown objective: captain/game-script probability, salary construction, and duplicate-adjusted ROI.
-- [ ] Version objective definitions and expose the selected objective in lineup metadata.
+- [x] Define cash objective: high median/floor, low bust probability, and reliability.
+- [x] Define single-entry/three-max objective: duplicate-adjusted expected ROI and top-20 probability.
+- [x] Define large-field objective: probability that at least one portfolio lineup reaches top 20, plus duplicate-adjusted ROI.
+- [x] Define Showdown objective: captain/game-script probability, salary construction, and duplicate-adjusted ROI.
+- [x] Version objective definitions and expose the selected objective in lineup metadata.
 
 ### 7.2 Replace static heuristic ranking
 
-- [ ] Retire static WNBA tournament weights after the calibrated objective is validated.
-- [ ] Rank candidate lineups by simulated contest outcome, not by a manually weighted intelligence score.
-- [ ] Include top-20 rate, top-1% rate, expected payout, expected duplicates, and uncertainty interval in ranking.
+- [x] Retire static WNBA tournament weights after the calibrated objective is validated.
+- [x] Rank candidate lineups by simulated contest outcome, not by a manually weighted intelligence score.
+- [x] Include top-20 rate, top-1% rate, expected payout, expected duplicates, and uncertainty interval in ranking.
 - [ ] Use actual payout structures where known rather than a generic top-heavy payout approximation.
-- [ ] Keep a projection-max mode explicitly separate from tournament recommendation mode.
+- [x] Keep a projection-max mode explicitly separate from tournament recommendation mode.
 
 ### 7.3 Optimize portfolios jointly
 
-- [ ] Enforce player, team, game, scenario, and correlated-role exposure limits.
-- [ ] Diversify portfolios by outcome correlation and winning game script, not only shared-player count.
-- [ ] Prevent multiple lineups from depending on the same uncorrelated-looking but structurally identical outcome.
-- [ ] Optimize the probability that at least one entry reaches top 20 for multi-entry strategies.
-- [ ] Include duplicate risk and prize splitting in portfolio selection.
-- [ ] Produce an explanation of each lineup’s intended game script and its role in the portfolio.
+- [x] Enforce player, team, game, scenario, and correlated-role exposure limits.
+- [x] Diversify portfolios by outcome correlation and winning game script, not only shared-player count.
+- [x] Prevent multiple lineups from depending on the same uncorrelated-looking but structurally identical outcome.
+- [x] Optimize the probability that at least one entry reaches top 20 for multi-entry strategies.
+- [x] Include duplicate risk and prize splitting in portfolio selection.
+- [x] Produce an explanation of each lineup’s intended game script and its role in the portfolio.
 
 ### Phase 7 acceptance gate
 
@@ -292,22 +296,24 @@ Phase 2 implementation is complete and its current evidence is explicitly explor
 
 ## Phase 8 — Late-swap system
 
+Implementation status: deployed live-state ingestion, locked-slot-preserving re-optimization, immutable swap-decision audit records, replay-compatible state contracts, and client integration are complete. The unchecked replay and outcome items require historical late-news evidence and settled contests.
+
 ### 8.1 Build live slate state
 
-- [ ] Track which games and players are locked, unlocked, started, final, or postponed.
-- [ ] Ingest and timestamp confirmed starters, active/inactive reports, late scratches, and material market movement.
-- [ ] Define source reliability and confirmation hierarchy for WNBA availability updates.
-- [ ] Detect changed inputs that require a re-projection or re-optimization.
-- [ ] Preserve the original pre-lock lineup and every late-swap decision for evaluation.
+- [x] Track which games and players are locked, unlocked, started, final, or postponed.
+- [x] Ingest and timestamp confirmed starters, active/inactive reports, late scratches, and material market movement.
+- [x] Define source reliability and confirmation hierarchy for WNBA availability updates.
+- [x] Detect changed inputs that require a re-projection or re-optimization.
+- [x] Preserve the original pre-lock lineup and every late-swap decision for evaluation.
 
 ### 8.2 Re-optimize safely
 
-- [ ] Lock started players and their accrued outcomes when re-optimizing.
-- [ ] Recalculate remaining salary, eligible positions, ownership, game states, and field behavior.
-- [ ] Generate swap candidates that optimize remaining-contest ROI/top-20 probability for the selected contest objective.
-- [ ] Apply late-swap exposure limits across the user’s full active portfolio.
-- [ ] Show the reason, confidence, and expected effect of each suggested swap.
-- [ ] Do not recommend a swap when data is stale, conflicting, or the simulated advantage is inside noise.
+- [x] Lock started players and their accrued outcomes when re-optimizing.
+- [x] Recalculate remaining salary, eligible positions, ownership, game states, and field behavior.
+- [x] Generate swap candidates that optimize remaining-contest ROI/top-20 probability for the selected contest objective.
+- [x] Apply late-swap exposure limits across the user’s full active portfolio.
+- [x] Show the reason, confidence, and expected effect of each suggested swap.
+- [x] Do not recommend a swap when data is stale, conflicting, or the simulated advantage is inside noise.
 
 ### 8.3 Validate late-swap behavior
 
@@ -325,30 +331,32 @@ Phase 2 implementation is complete and its current evidence is explicitly explor
 
 ## Phase 9 — Parallel validation, promotion, and operations
 
+Implementation status: deployed shadow-run persistence, a deterministic side-by-side runner, evidence-gated promotion records with rollback targets, monitoring/alert storage, and an operations runbook are complete. The acceptance gates stay unchecked until the required settled shadow sample exists.
+
 ### 9.1 Shadow deployment
 
-- [ ] Run the current WNBA engine and candidate engine side by side for at least 20–30 settled slates.
-- [ ] Freeze the production model while the candidate runs in shadow mode.
-- [ ] Store both engines’ pre-lock lineups, projections, simulations, and recommended portfolios for identical inputs.
-- [ ] Segment comparisons by contest type, field size, entry count, and data-completeness tier.
+- [ ] Run the current WNBA engine and candidate engine side by side for at least 20–30 settled slates. _(Runner and persistence are deployed; the settled sample must accumulate.)_
+- [x] Freeze the production model while the candidate runs in shadow mode.
+- [x] Store both engines’ pre-lock lineups, projections, simulations, and recommended portfolios for identical inputs.
+- [x] Segment comparisons by contest type, field size, entry count, and data-completeness tier.
 
 ### 9.2 Promotion criteria
 
-- [ ] Define the minimum sample and confidence threshold before promotion.
-- [ ] Require improved out-of-sample player rank correlation and minutes calibration.
-- [ ] Require no material deterioration in source freshness, invalid-lineup rate, or slate coverage.
-- [ ] Require improved top-20 rate and/or duplicate-adjusted ROI with uncertainty intervals versus the production baseline.
-- [ ] Review losing slates manually for leakage, data-quality, or execution failures before promotion.
-- [ ] Require an approval record naming the candidate model, training range, evaluation range, and rollback version.
+- [x] Define the minimum sample and confidence threshold before promotion.
+- [x] Require improved out-of-sample player rank correlation and minutes calibration.
+- [x] Require no material deterioration in source freshness, invalid-lineup rate, or slate coverage.
+- [x] Require improved top-20 rate and/or duplicate-adjusted ROI with uncertainty intervals versus the production baseline.
+- [x] Review losing slates manually for leakage, data-quality, or execution failures before promotion.
+- [x] Require an approval record naming the candidate model, training range, evaluation range, and rollback version.
 
 ### 9.3 Production controls and monitoring
 
-- [ ] Version all WNBA models, features, weights, field configurations, and simulation code.
-- [ ] Add alerts for stale/missing ownership, confirmed-lineup, prop, injury, and results data.
-- [ ] Add alerts for dropped WNBA slate coverage, failed result ingestion, or abnormal projection distributions.
-- [ ] Monitor simulation runtime, field-generation quality, invalid lineup rate, and persistence failures.
-- [ ] Add automated regression tests for known WNBA injuries, late scratches, starter changes, and short-slate edge cases.
-- [ ] Document rollback and incident-response steps.
+- [x] Version all WNBA models, features, weights, field configurations, and simulation code.
+- [x] Add alerts for stale/missing ownership, confirmed-lineup, prop, injury, and results data.
+- [x] Add alerts for dropped WNBA slate coverage, failed result ingestion, or abnormal projection distributions.
+- [x] Monitor simulation runtime, field-generation quality, invalid lineup rate, and persistence failures.
+- [x] Add automated regression tests for known WNBA injuries, late scratches, starter changes, and short-slate edge cases.
+- [x] Document rollback and incident-response steps.
 
 ### Phase 9 acceptance gate
 
