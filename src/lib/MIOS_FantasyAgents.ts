@@ -78,6 +78,41 @@ export interface Player {
   game_id?: string;
   tee_time?: string | null;
   minutes_projection?: number;
+  minutes_distribution?: {
+    p10: number | null;
+    p25: number | null;
+    p50: number | null;
+    p75: number | null;
+    p90: number | null;
+    standardDeviation: number | null;
+    didNotPlayProbability: number | null;
+    sampleSize: number;
+    drivers: string[];
+  };
+  wnba_role_prior?: {
+    sampleSize: number;
+    historicalMinutes: number | null;
+    historicalMinutesStddev: number | null;
+    replacementMinutesGain: number | null;
+    didNotPlayProbability: number | null;
+    cohort: 'starter' | 'stable_bench' | 'volatile_bench' | 'returning' | 'elevated' | 'unknown';
+  };
+  role_counterfactual?: string[];
+  wnba_component_projection?: {
+    points: number;
+    rebounds: number;
+    assists: number;
+    steals: number;
+    blocks: number;
+    turnovers: number;
+    threes: number;
+    fantasyPoints: number;
+    fantasyStdDev: number;
+    sampleSize: number;
+    source: 'role_filtered_history' | 'position_hierarchical_prior';
+    blendVersion: 'wnba-components-v1';
+  };
+  candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
   recent_fantasy_per_minute?: number;

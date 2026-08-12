@@ -1,4 +1,4 @@
-import { deriveWnbaRoleMetrics } from './wnbaModel.ts';
+import { deriveWnbaMinutesDistribution, deriveWnbaRoleMetrics, type WnbaMinutesDistribution, type WnbaRolePrior } from './wnbaModel.ts';
 
 export type OpportunitySport = 'nba' | 'wnba';
 export type OpportunityInjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
@@ -13,6 +13,12 @@ export interface OpportunityPlayer {
   projected_points?: number;
   model_adjusted_fantasy_pts?: number;
   minutes_projection?: number;
+  minutes_distribution?: WnbaMinutesDistribution;
+  confirmed_starter?: boolean;
+  rest_days?: number;
+  spread?: number;
+  wnba_role_prior?: WnbaRolePrior;
+  role_counterfactual?: string[];
   depth_chart_order?: number;
   context_score?: number;
   role_stability?: number;
@@ -127,7 +133,7 @@ export function positionMeanPpm(position: string, sport: OpportunitySport): numb
   return mean;
 }
 
-export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): {
+export function redistributeMinutes<T extends OpportunityPlayer>(players: T[], sport: OpportunitySport = 'nba'): {
   players: T[];
   cascadeBoostCount: number;
 } {
@@ -145,7 +151,19 @@ export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): 
     ));
 
     for (const outPlayer of injured) {
-      const minutesToRedistribute = (outPlayer.minutes_projection ?? 0) * 0.7;
+      // WNBA replacement minutes are drawn from settled, player-specific role
+      // priors when available. The conservative 55% fallback is explicit and
+      // exists only until the feature store has enough comparable absences.
+      const historicalGains = teamPlayers
+        .filter((candidate) => candidate.id !== outPlayer.id && candidate.injury_status === 'active')
+        .map((candidate) => Number(candidate.wnba_role_prior?.replacementMinutesGain))
+        .filter(Number.isFinite);
+      const recoveryRate = sport === 'wnba'
+        ? Math.min(0.95, Math.max(0.35, historicalGains.length
+          ? historicalGains.reduce((sum, value) => sum + value, 0) / historicalGains.length / Math.max(outPlayer.minutes_projection ?? 1, 1)
+          : 0.55))
+        : 0.7;
+      const minutesToRedistribute = (outPlayer.minutes_projection ?? 0) * recoveryRate;
       if (minutesToRedistribute <= 0) continue;
 
       const candidates = teamPlayers.filter((candidate) => (
@@ -160,7 +178,9 @@ export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): 
         const minutesWeight = Math.max(candidate.minutes_projection ?? 0, 1);
         const depth = Number(candidate.depth_chart_order);
         const depthWeight = Number.isFinite(depth) && depth > 0 ? 1 / depth : 1;
-        return { candidate, weight: minutesWeight * depthWeight };
+        const learnedGain = Math.max(0, Number(candidate.wnba_role_prior?.replacementMinutesGain) || 0);
+        const starterWeight = candidate.confirmed_starter === true ? 1.15 : candidate.confirmed_starter === false ? 0.8 : 1;
+        return { candidate, weight: (minutesWeight + learnedGain * 2) * depthWeight * starterWeight };
       });
       const totalWeight = weights.reduce((sum, item) => sum + item.weight, 0);
       if (totalWeight <= 0) continue;
@@ -172,7 +192,7 @@ export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): 
         if (added <= 0) continue;
         const existing = addedByPlayer.get(candidate.id) ?? { minutes: 0, notes: [] };
         existing.minutes += added;
-        existing.notes.push(`+${added.toFixed(1)} min projected (${outPlayer.name} out)`);
+        existing.notes.push(`+${added.toFixed(1)} min projected (${outPlayer.name} out; ${Math.round(recoveryRate * 100)}% recovery)`);
         addedByPlayer.set(candidate.id, existing);
         candidate.minutes_projection = currentMinutes + added;
       }
@@ -193,6 +213,7 @@ export function redistributeMinutes<T extends OpportunityPlayer>(players: T[]): 
       minutes_projection: projectedMinutes,
       context_score: Number(((player.context_score ?? 0) + (added.minutes / 36) * 0.5).toFixed(3)),
       news_note: appendNote(player.news_note, added.notes.join('; ')),
+      role_counterfactual: [...(player.role_counterfactual ?? []), ...added.notes],
     };
   });
 
@@ -215,19 +236,32 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
     };
   });
 
-  const redistributed = redistributeMinutes(preparedPlayers);
+  const redistributed = redistributeMinutes(preparedPlayers, sport);
   let projectedCount = 0;
   let clampedCount = 0;
 
   const projectedPlayers = redistributed.players.map((player) => {
     const games = player.last_5_stats?.games ?? [];
-    if (!games.length || player.last_5_stats?.is_synthetic) return player;
-    if (player.injury_status === 'out' || player.injury_status === 'doubtful') return player;
+    const projectedMinutes = Number(player.minutes_projection);
+    // Shadow-only Phase 3 output. It is deliberately not used in the projection
+    // calculation below until it has been calibrated against settled WNBA slates.
+    const minutesDistribution = sport === 'wnba' && games.length && !player.last_5_stats?.is_synthetic
+      ? deriveWnbaMinutesDistribution(games, {
+        confirmedStarter: player.confirmed_starter,
+        injuryStatus: player.injury_status,
+        depthChartOrder: player.depth_chart_order,
+        projectedMinutes,
+        historicalPrior: player.wnba_role_prior,
+        restDays: player.rest_days,
+        spread: player.spread,
+      })
+      : undefined;
+    if (!games.length || player.last_5_stats?.is_synthetic) return { ...player, minutes_distribution: minutesDistribution };
+    if (player.injury_status === 'out' || player.injury_status === 'doubtful') return { ...player, minutes_distribution: minutesDistribution };
     const baseProjection = Number(player.projected_points);
     const avgFantasyPts = Number(player.last_5_stats?.avg_fantasy_pts);
-    const projectedMinutes = Number(player.minutes_projection);
     if (!Number.isFinite(baseProjection) || baseProjection <= 0 || !Number.isFinite(avgFantasyPts) || !Number.isFinite(projectedMinutes)) {
-      return player;
+      return { ...player, minutes_distribution: minutesDistribution };
     }
 
     const gamesPlayed = games.length;
@@ -260,6 +294,7 @@ export function computeOpportunityProjection<T extends OpportunityPlayer>(
       projection_source: 'opportunity_blend',
       projected_points: Number(clampedProjection.toFixed(2)),
       model_adjusted_fantasy_pts: Number(clampedProjection.toFixed(2)),
+      minutes_distribution: minutesDistribution,
       role_stability: roleMetrics?.roleStability ?? player.role_stability,
       minutes_volatility: roleMetrics?.minutesVolatility ?? player.minutes_volatility,
       recent_fantasy_per_minute: roleMetrics?.recentFantasyPerMinute ?? player.recent_fantasy_per_minute,

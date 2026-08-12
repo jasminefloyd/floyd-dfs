@@ -7,6 +7,7 @@ import {
   correlateOutcomes,
   generateFieldLineups,
   indexFieldLineups,
+  seededRandom,
   sampleLognormalOutcome,
   sampleWnbaOutcome,
   scoreIndexedEntries,
@@ -16,6 +17,7 @@ import { deriveFormMetrics, deriveNewsEvidence, deriveRelationships, deriveScena
 import { wnbaMatchupScore, wnbaOwnershipLeverage } from './wnbaModel.ts';
 import type { WnbaOutcomeScenario } from './wnbaScenarios.ts';
 import { buildMlbProxyDistribution } from './mlbModel.ts';
+import { sampleWnbaJointOutcomes, type WnbaJointPlayer } from './wnbaJointSimulation.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -57,6 +59,11 @@ interface ManifestPlayer {
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
   minutes_projection?: number;
+  minutes_distribution?: { p10: number | null; p25: number | null; p50: number | null; p75: number | null; p90: number | null; standardDeviation: number | null; didNotPlayProbability: number | null; sampleSize: number; drivers: string[] };
+  wnba_role_prior?: { sampleSize: number; historicalMinutes: number | null; historicalMinutesStddev: number | null; replacementMinutesGain: number | null; didNotPlayProbability: number | null; cohort: string };
+  role_counterfactual?: string[];
+  wnba_component_projection?: { points: number; rebounds: number; assists: number; steals: number; blocks: number; turnovers: number; threes: number; fantasyPoints: number; fantasyStdDev: number; sampleSize: number; source: string; blendVersion: string };
+  candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
   recent_fantasy_per_minute?: number;
@@ -121,6 +128,11 @@ interface LineupPlayerDraft {
   cpt_ownership_projection?: number;
   flex_ownership_projection?: number;
   minutes_projection?: number;
+  minutes_distribution?: ManifestPlayer['minutes_distribution'];
+  wnba_role_prior?: ManifestPlayer['wnba_role_prior'];
+  role_counterfactual?: string[];
+  wnba_component_projection?: ManifestPlayer['wnba_component_projection'];
+  candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
   recent_fantasy_per_minute?: number;
@@ -181,6 +193,7 @@ interface LineupConstructionRules {
   simulationIterations: number;
   fieldSimulationSize: number;
   showDiagnostics: boolean;
+  simulationSeed: number;
   nflStackMinimum: number;
   nflBringbackMinimum: number;
 }
@@ -228,6 +241,7 @@ interface DraftLineup {
 interface PiosRequest {
   requestId?: string;
   manifestId?: string;
+  snapshotId?: string;
   sport: string;
   contestType: string;
   contestDate?: string;
@@ -260,6 +274,8 @@ interface PiosRequest {
   maxSharedPlayers?: number;
   simulationIterations?: number;
   fieldSimulationSize?: number;
+  simulationSeed?: number;
+  replayMode?: boolean;
   showDiagnostics?: boolean;
   userId?: string;
   historical_relationships?: Array<{ player_id: string; related_player_id: string; relationship_type?: PiosRelationship['type']; direction: PiosRelationship['direction']; correlation?: number; mean_lift?: number; sample_size?: number; source?: string; confidence?: number }>;
@@ -508,6 +524,8 @@ function persistGeneratedLineups(
     return 'Generated lineup persistence was skipped because Supabase service-role environment is not configured.';
   }
 
+  const generatedAt = new Date().toISOString();
+  const officialLockTime = payload.slate?.start_time ?? null;
   const rows = lineups.map((lineup, index) => ({
     user_id: userId,
     sport: payload.sport,
@@ -518,6 +536,9 @@ function persistGeneratedLineups(
     contest_strategy: rules.contestStrategy,
     field_size: rules.fieldSize,
     entry_fee: null,
+    scan_snapshot_id: payload.snapshotId ?? null,
+    generation_request_id: rules.requestId,
+    generated_at: generatedAt,
     max_entries_per_user: rules.maxEntriesPerUser,
     entry_count: rules.entryCount,
     expected_duplicates: lineup.expected_duplicates ?? null,
@@ -526,6 +547,11 @@ function persistGeneratedLineups(
     ownership_weight: rules.ownershipWeight,
     config: {
       manifestId: payload.manifestId ?? null,
+      scanSnapshotId: payload.snapshotId ?? null,
+      generationRequestId: rules.requestId,
+      requestTimeUtc: generatedAt,
+      generationTimeUtc: generatedAt,
+      officialLockTimeUtc: officialLockTime,
       riskTolerance: payload.riskTolerance,
       lineupMode: payload.lineupMode,
       contestStrategy: rules.contestStrategy,
@@ -549,6 +575,7 @@ function persistGeneratedLineups(
       maxDuplication: rules.maxDuplication,
       simulationIterations: rules.simulationIterations,
       fieldSimulationSize: rules.fieldSimulationSize,
+      simulationSeed: rules.simulationSeed,
       showDiagnostics: rules.showDiagnostics,
       weightsVersion: PIOS_WEIGHTS.weights_version,
       scoringVersion: 'dk-scoring-v1',
@@ -575,6 +602,11 @@ function persistGeneratedLineups(
       projection_trace: player.projection_trace ?? null,
       role_stability: player.role_stability,
       minutes_volatility: player.minutes_volatility,
+      minutes_projection: player.minutes_projection,
+      minutes_distribution: player.minutes_distribution ?? null,
+      role_counterfactual: player.role_counterfactual ?? [],
+      wnba_component_projection: player.wnba_component_projection ?? null,
+      candidate_fantasy_projection: player.candidate_fantasy_projection ?? null,
       recent_fantasy_per_minute: player.recent_fantasy_per_minute,
       minutes_trend: player.minutes_trend,
       confidence_score: player.confidence_score,
@@ -587,6 +619,7 @@ function persistGeneratedLineups(
     optimizer_rank: lineup.optimizer_rank ?? index + 1,
   }));
 
+  if (payload.replayMode) return null;
   const promise = callSupabaseRpc<number>('fantasy_ai_insert_generated_lineups', { p_rows: rows })
     .catch((error) => {
       console.error('Generated lineup persistence failed', error);
@@ -806,6 +839,11 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       cpt_ownership_projection: normalizeOwnership(player.cpt_ownership_projection),
       flex_ownership_projection: normalizeOwnership(player.flex_ownership_projection),
       minutes_projection: positiveNumber(player.minutes_projection),
+      minutes_distribution: player.minutes_distribution,
+      wnba_role_prior: player.wnba_role_prior,
+      role_counterfactual: player.role_counterfactual,
+      wnba_component_projection: player.wnba_component_projection,
+      candidate_fantasy_projection: player.candidate_fantasy_projection,
       usage_rate: positiveNumber(player.usage_rate),
       pace_metric: positiveNumber(player.pace_metric),
       context_score: normalizeContextScore(player.context_score),
@@ -2172,8 +2210,9 @@ function runMonteCarloSimulations(
   const stdDevs = new Float64Array(indexedRoster.map((entry) => entry.stdDev));
   const gamePairs = deriveGamePairs(slate, roster, contestType);
   const fieldSize = Math.min(rules.fieldSize, rules.fieldSimulationSize, MAX_FIELD_LINEUP_CAP);
+  const random = seededRandom(rules.simulationSeed);
   const fieldLineups = indexFieldLineups(
-    generateFieldLineups(roster, sport, contestType, fieldSize, ROSTER_SLOTS),
+    generateFieldLineups(roster, sport, contestType, fieldSize, ROSTER_SLOTS, random),
     playerIndex,
   );
   const lineupIndexes = new Map(lineups.map((lineup) => [
@@ -2201,13 +2240,13 @@ function runMonteCarloSimulations(
   const iterations = rules.simulationIterations;
   const trueTopN = trueTopNForPayout(rules.fieldSize, rules.payoutShape);
   for (let iteration = 0; iteration < iterations; iteration += 1) {
-    const outcomes = new Float64Array(indexedRoster.length);
-    for (const entry of indexedRoster) {
-      outcomes[entry.index] = sport === 'wnba'
-        ? sampleWnbaOutcome(entry.mean, entry.stdDev, entry.player.wnba_scenarios)
-        : sampleLognormalOutcome(entry.mean, entry.stdDev);
-    }
-    correlateOutcomes(outcomes, means, stdDevs, roster, sport, gamePairs, contestType);
+    const jointWnbaEnabled = Deno.env.get('WNBA_JOINT_SIMULATION_ENABLED') === 'true';
+    const outcomes = sport === 'wnba' && jointWnbaEnabled
+      ? sampleWnbaJointOutcomes(roster as WnbaJointPlayer[], gamePairs, random).outcomes
+      : new Float64Array(indexedRoster.map((entry) => sport === 'wnba'
+        ? sampleWnbaOutcome(entry.mean, entry.stdDev, entry.player.wnba_scenarios, random)
+        : sampleLognormalOutcome(entry.mean, entry.stdDev, random)));
+    if (sport !== 'wnba' || !jointWnbaEnabled) correlateOutcomes(outcomes, means, stdDevs, roster, sport, gamePairs, contestType, random);
 
     const fieldScores = fieldLineups.map((fieldLineup) => {
       return scoreIndexedEntries(outcomes, fieldLineup.entries);
@@ -2327,6 +2366,7 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
   const maxDuplication = Math.round(clampNumber(payload.maxDuplication, 1, 500, payoutShape === 'winner_take_all' ? 5 : 25));
   const simulationIterations = resourceBudgetedSimulationIterations(payload, entryCount);
   const fieldSimulationSize = Math.min(resourceBudgetedFieldSimulationSize(payload, fieldSize, entryCount), fieldSize, MAX_FIELD_LINEUP_CAP);
+  const simulationSeed = normalizedSimulationSeed(payload.simulationSeed);
   const showDiagnostics = Boolean(payload.showDiagnostics ?? false);
   if (lineupMode === 'max_fpts') {
     return {
@@ -2355,6 +2395,7 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
       simulationIterations: 0,
       fieldSimulationSize,
       showDiagnostics,
+      simulationSeed,
       nflStackMinimum: 0,
       nflBringbackMinimum: 0,
     };
@@ -2393,9 +2434,16 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     simulationIterations,
     fieldSimulationSize,
     showDiagnostics,
+    simulationSeed,
     nflStackMinimum: contestStrategy === 'large_field_gpp' ? 2 : 1,
     nflBringbackMinimum: contestStrategy === 'large_field_gpp' ? 1 : 0,
   };
+}
+
+function normalizedSimulationSeed(value: unknown): number {
+  const parsed = Number(value);
+  if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 0xFFFF_FFFF) return parsed;
+  return crypto.getRandomValues(new Uint32Array(1))[0];
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
@@ -2688,6 +2736,16 @@ Deno.serve(async (req) => {
     const tournamentNeedsOwnership = payload.lineupMode !== 'safe' && payload.lineupMode !== 'max_fpts';
     if (tournamentNeedsOwnership && ownershipCoverage < 0.6) {
       throw new Error(`Tournament generation blocked: ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; refresh public ownership projections before generating leverage-based lineups.`);
+    }
+    if (payload.sport === 'wnba' && tournamentNeedsOwnership) {
+      const highUncertainty = draftPlayers.filter((player) => {
+        const distribution = player.minutes_distribution;
+        return distribution?.p10 !== null && distribution?.p90 !== null
+          && distribution.p90 - distribution.p10 >= 16 && (player.minutes_projection ?? 0) >= 18;
+      });
+      const unresolvedStarters = draftPlayers.filter((player) => player.confirmed_starter === undefined && (player.minutes_projection ?? 0) >= 20);
+      if (unresolvedStarters.length >= 4) throw new Error('WNBA tournament generation blocked: confirmed starter context is incomplete for too many material-minute players. Re-run after lineups post.');
+      if (highUncertainty.length >= 6) throw new Error('WNBA tournament generation blocked: too many material-minute players have wide, uncalibrated role distributions. Re-run after role certainty improves.');
     }
     if (payload.sport === 'mlb' && tournamentNeedsOwnership) {
       const confirmedHitters = draftPlayers.filter((player) => !isPitcher(player)

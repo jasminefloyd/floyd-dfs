@@ -4,6 +4,9 @@ import { mapWithConcurrency } from './enrichment.ts';
 import { computeOpportunityProjection } from './opportunity.ts';
 import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
 import { parseNflverseWeeklyStats } from './nflverse.ts';
+import type { WnbaMinutesDistribution } from './wnbaModel.ts';
+import type { WnbaRolePrior } from './wnbaModel.ts';
+import { deriveWnbaComponentProjection, type WnbaComponentProjection } from './wnbaProduction.ts';
 
 type SourceStatus = Record<string, 'ok' | 'partial' | 'unavailable'>;
 type ReadinessStatus = 'ready' | 'caution' | 'blocked';
@@ -100,6 +103,11 @@ interface Player {
   game_id?: string;
   tee_time?: string | null;
   minutes_projection?: number;
+  minutes_distribution?: WnbaMinutesDistribution;
+  wnba_role_prior?: WnbaRolePrior;
+  role_counterfactual?: string[];
+  wnba_component_projection?: WnbaComponentProjection;
+  candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
   recent_fantasy_per_minute?: number;
@@ -339,6 +347,16 @@ interface ConfirmedLineupRow {
   scraped_at: string;
 }
 
+interface WnbaRolePriorRow {
+  player_id: string;
+  sample_size: number;
+  historical_minutes: number | null;
+  historical_minutes_stddev: number | null;
+  replacement_minutes_gain: number | null;
+  did_not_play_probability: number | null;
+  cohort: WnbaRolePrior['cohort'];
+}
+
 interface MlbGameContext {
   game_id: string;
   home_team: string;
@@ -493,6 +511,26 @@ async function callSupabaseRpc<T>(
   if (response.status === 204) return null;
   const text = await response.text();
   return text ? (JSON.parse(text) as T) : null;
+}
+
+async function attachWnbaRolePriors(players: Player[]): Promise<{ players: Player[]; matched: number }> {
+  const playerIds = [...new Set(players.map((player) => player.id).filter(Boolean))];
+  if (!playerIds.length) return { players, matched: 0 };
+  const rows = await callSupabaseRpc<WnbaRolePriorRow[]>('fantasy_ai_get_wnba_role_priors', {
+    p_player_ids: playerIds,
+  }, { serviceRole: true, allowMissingServiceRole: true }).catch(() => null);
+  const priors = new Map((rows ?? []).map((row) => [row.player_id, {
+    sampleSize: Number(row.sample_size) || 0,
+    historicalMinutes: Number.isFinite(Number(row.historical_minutes)) ? Number(row.historical_minutes) : null,
+    historicalMinutesStddev: Number.isFinite(Number(row.historical_minutes_stddev)) ? Number(row.historical_minutes_stddev) : null,
+    replacementMinutesGain: Number.isFinite(Number(row.replacement_minutes_gain)) ? Number(row.replacement_minutes_gain) : null,
+    didNotPlayProbability: Number.isFinite(Number(row.did_not_play_probability)) ? Number(row.did_not_play_probability) : null,
+    cohort: row.cohort ?? 'unknown',
+  } satisfies WnbaRolePrior]));
+  return {
+    players: players.map((player) => ({ ...player, wnba_role_prior: priors.get(player.id) })),
+    matched: priors.size,
+  };
 }
 
 async function limitedFetch(url: string, service: string, options: RequestInit & {
@@ -3496,23 +3534,36 @@ function deriveOutcomeDistributions(
   gameId?: string,
 ) {
   const rows = players.map((player) => {
-    const projection = projectedPointsForPriority(player);
+    const componentProjection = sport === 'wnba'
+      ? deriveWnbaComponentProjection(player.last_5_stats?.games ?? [], {
+        position: player.position,
+        projectedMinutes: player.minutes_projection,
+        roleStability: player.role_stability,
+      })
+      : undefined;
+    const projection = componentProjection?.fantasyPoints ?? projectedPointsForPriority(player);
     const observedStdev = Number(player.stdev_fantasy_pts ?? player.last_5_stats?.stdev_fantasy_pts);
     const sampleSize = Number(player.last_5_stats?.games.length ?? 0);
-    const stdev = Number.isFinite(observedStdev) && observedStdev > 0
+    const stdev = componentProjection?.fantasyStdDev ?? (Number.isFinite(observedStdev) && observedStdev > 0
       ? observedStdev
-      : Math.max(projection * (sport === 'mlb' ? 0.55 : 0.35), 1.5);
-    const source = Number.isFinite(observedStdev) && observedStdev > 0
+      : Math.max(projection * (sport === 'mlb' ? 0.55 : 0.35), 1.5));
+    const source = componentProjection?.source ?? (Number.isFinite(observedStdev) && observedStdev > 0
       ? 'last5_empirical'
-      : 'derived_sport_prior';
-    const quantile = (z: number) => Number(Math.max(0, projection + z * stdev).toFixed(2));
-    const boomProbability = Number(Math.min(0.85, Math.max(0.01, 1 / (1 + Math.exp((projection * 1.5 - (projection + stdev)) / Math.max(stdev, 1))))).toFixed(3));
-    const bustProbability = Number(Math.min(0.95, Math.max(0.01, 1 / (1 + Math.exp((projection * 0.5 - projection) / Math.max(stdev, 1))))).toFixed(3));
+      : 'derived_sport_prior');
+    const candidateProjection = sport === 'wnba'
+      ? Number((projectedPointsForPriority(player) * 0.55 + projection * 0.45).toFixed(2))
+      : projection;
+    const finalProjection = sport === 'wnba' ? projectedPointsForPriority(player) : candidateProjection;
+    const quantile = (z: number) => Number(Math.max(0, finalProjection + z * stdev).toFixed(2));
+    const boomProbability = Number(Math.min(0.85, Math.max(0.01, 1 / (1 + Math.exp((finalProjection * 1.5 - (finalProjection + stdev)) / Math.max(stdev, 1))))).toFixed(3));
+    const bustProbability = Number(Math.min(0.95, Math.max(0.01, 1 / (1 + Math.exp((finalProjection * 0.5 - finalProjection) / Math.max(stdev, 1))))).toFixed(3));
     return {
       ...player,
+      wnba_component_projection: componentProjection,
+      candidate_fantasy_projection: sport === 'wnba' ? candidateProjection : undefined,
       p10_projection: quantile(NORMAL_QUANTILES.p10),
       p25_projection: quantile(NORMAL_QUANTILES.p25),
-      p50_projection: Number(projection.toFixed(2)),
+      p50_projection: finalProjection,
       p75_projection: quantile(NORMAL_QUANTILES.p75),
       p90_projection: quantile(NORMAL_QUANTILES.p90),
       p95_projection: quantile(NORMAL_QUANTILES.p95),
@@ -3533,7 +3584,7 @@ function deriveOutcomeDistributions(
         sample_size: sampleSize,
         p10: quantile(NORMAL_QUANTILES.p10),
         p25: quantile(NORMAL_QUANTILES.p25),
-        p50: Number(projection.toFixed(2)),
+        p50: finalProjection,
         p75: quantile(NORMAL_QUANTILES.p75),
         p90: quantile(NORMAL_QUANTILES.p90),
         p95: quantile(NORMAL_QUANTILES.p95),
@@ -3541,6 +3592,9 @@ function deriveOutcomeDistributions(
         boom_probability: boomProbability,
         bust_probability: bustProbability,
         source,
+        component_projection: componentProjection,
+        candidate_fantasy_projection: sport === 'wnba' ? candidateProjection : undefined,
+        blend_version: componentProjection?.blendVersion ?? 'generic-distribution-v1',
       },
     };
   });
@@ -3871,6 +3925,8 @@ function applyTrustMetadata(
       player.prop_projection !== undefined ? 'player_props' : '',
       player.news_score !== undefined ? 'news_context' : '',
       player.minutes_projection !== undefined ? 'opportunity_model' : '',
+      player.minutes_distribution ? 'wnba_minutes_distribution' : '',
+      player.wnba_role_prior ? 'wnba_role_prior' : '',
       player.implied_total !== undefined ? 'vegas_context' : '',
       sourceStatus.mlb_statsapi_context ? 'mlb_game_context' : '',
       sourceStatus.baseball_savant_statcast ? 'statcast_quality' : '',
@@ -3957,6 +4013,15 @@ function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: 
   if (ownershipCoverage < 0.7) cautions.push(`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage estimates are less reliable.`);
   if (sourceStatus.rotowire_confirmed_lineups === 'unavailable') cautions.push('Confirmed lineup data is unavailable; starter certainty is reduced.');
   if (sourceStatus.projection_calibration !== 'ok') cautions.push('No qualifying projection calibration was applied.');
+  if (sport === 'wnba') {
+    const wideMinutes = roster.filter((player) => {
+      const distribution = player.minutes_distribution;
+      return distribution?.p10 !== null && distribution?.p90 !== null && distribution.p90 - distribution.p10 >= 14;
+    });
+    const uncertainStarters = roster.filter((player) => player.confirmed_starter === undefined && (player.minutes_projection ?? 0) >= 20);
+    if (wideMinutes.length) cautions.push(`${wideMinutes.length} WNBA player${wideMinutes.length === 1 ? '' : 's'} has a wide minutes distribution; tournament exposure should be limited until role certainty improves.`);
+    if (uncertainStarters.length >= 4) cautions.push('WNBA starter context is materially incomplete; tournament recommendations are downgraded until lineups are verified.');
+  }
   if (sport === 'mlb') {
     const confirmedHitters = roster.filter((player) => !/^(P|SP|RP)$/i.test(String(player.position ?? ''))
       && player.confirmed_starter === true
@@ -3978,7 +4043,8 @@ function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: 
   return {
     status,
     eligible_for_lineups: hardBlocks.length === 0,
-    eligible_for_tournament: hardBlocks.length === 0 && ownershipCoverage >= 0.7 && sourceStatus.rotowire_confirmed_lineups !== 'unavailable',
+    eligible_for_tournament: hardBlocks.length === 0 && ownershipCoverage >= 0.7 && sourceStatus.rotowire_confirmed_lineups !== 'unavailable'
+      && !(sport === 'wnba' && roster.filter((player) => player.confirmed_starter === undefined && (player.minutes_projection ?? 0) >= 20).length >= 4),
     hard_blocks: hardBlocks,
     cautions: cautions.slice(0, 12),
   };
@@ -4052,6 +4118,8 @@ function provenanceRows(manifest: MiosManifest) {
     if (player.confirmed_starter !== undefined || player.own_probable_starter !== undefined) {
       rows.push({ field_name: 'lineup_status', field_value: { confirmed_starter: player.confirmed_starter, own_probable_starter: player.own_probable_starter }, source: 'confirmed_lineups', stage: 'lineup_context', is_modeled: false });
     }
+    if (player.minutes_distribution) rows.push({ field_name: 'minutes_distribution', field_value: player.minutes_distribution, source: 'wnba_minutes_model', stage: 'minutes_distribution', is_modeled: true });
+    if (player.role_counterfactual?.length) rows.push({ field_name: 'role_counterfactual', field_value: player.role_counterfactual, source: 'wnba_role_model', stage: 'injury_replacement', is_modeled: true });
     return rows.map((row) => ({
       player_id: player.id,
       player_name: player.name,
@@ -4128,6 +4196,12 @@ async function orchestrateMiosFantasyScan(
   if (!playerRoster.length) warnings.push('No roster players were collected; lineups cannot be generated.');
   if (playerRoster.length < effectiveSalaryRows.length) {
     warnings.push('Some DraftKings salary rows could not be matched to roster metadata and were omitted.');
+  }
+  if (sport === 'wnba') {
+    const rolePriors = await attachWnbaRolePriors(playerRoster);
+    playerRoster = rolePriors.players;
+    sourceStatus.wnba_role_priors = rolePriors.matched ? (rolePriors.matched === playerRoster.length ? 'ok' : 'partial') : 'unavailable';
+    if (rolePriors.matched) warnings.push(`Applied settled WNBA role priors to ${rolePriors.matched} of ${playerRoster.length} slate players.`);
   }
   const baseProjectionByPlayerId = new Map(
     playerRoster.map((player) => [player.id, typeof player.projected_points === 'number' ? player.projected_points : null]),

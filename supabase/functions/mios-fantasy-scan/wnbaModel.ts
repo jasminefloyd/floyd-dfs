@@ -8,6 +8,27 @@ export interface WnbaRoleMetrics {
   sampleSize: number;
 }
 
+export interface WnbaMinutesDistribution {
+  p10: number | null;
+  p25: number | null;
+  p50: number | null;
+  p75: number | null;
+  p90: number | null;
+  standardDeviation: number | null;
+  didNotPlayProbability: number | null;
+  sampleSize: number;
+  drivers: string[];
+}
+
+export interface WnbaRolePrior {
+  sampleSize: number;
+  historicalMinutes: number | null;
+  historicalMinutesStddev: number | null;
+  replacementMinutesGain: number | null;
+  didNotPlayProbability: number | null;
+  cohort: 'starter' | 'stable_bench' | 'volatile_bench' | 'returning' | 'elevated' | 'unknown';
+}
+
 function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -62,4 +83,43 @@ export function deriveWnbaRoleMetrics(games: Array<Record<string, unknown>>): Wn
     roleStability: stability === null ? null : Number(stability.toFixed(3)),
     sampleSize: rows.length,
   };
+}
+
+export function deriveWnbaMinutesDistribution(
+  games: Array<Record<string, unknown>>,
+  options: {
+    confirmedStarter?: boolean;
+    injuryStatus?: string;
+    depthChartOrder?: number;
+    projectedMinutes?: number;
+    historicalPrior?: WnbaRolePrior;
+    restDays?: number;
+    spread?: number;
+  } = {},
+): WnbaMinutesDistribution {
+  const observedMinutes = games.map((game) => Number(game.minutes ?? game.avgMinutes)).filter(finite);
+  const minutes = observedMinutes.filter((value) => value > 0);
+  const role = deriveWnbaRoleMetrics(games);
+  const center = Number.isFinite(options.projectedMinutes)
+    ? Number(options.projectedMinutes)
+    : role.weightedMinutes ?? options.historicalPrior?.historicalMinutes ?? null;
+  const observedDnpRate = observedMinutes.length ? observedMinutes.filter((value) => value <= 0).length / observedMinutes.length : null;
+  const didNotPlayProbability = Number.isFinite(Number(options.historicalPrior?.didNotPlayProbability))
+    ? Number(options.historicalPrior?.didNotPlayProbability)
+    : observedDnpRate;
+  if (center === null || !Number.isFinite(center) || center <= 0) return { p10: null, p25: null, p50: null, p75: null, p90: null, standardDeviation: null, didNotPlayProbability, sampleSize: minutes.length, drivers: ['minutes history unavailable'] };
+  const observedMean = average(minutes) ?? center;
+  const observedVariance = minutes.length > 1 ? minutes.reduce((sum, value) => sum + (value - observedMean) ** 2, 0) / minutes.length : 0;
+  let standardDeviation = Math.max(Math.sqrt(observedVariance), Number(options.historicalPrior?.historicalMinutesStddev) || 0, center * 0.09, 2.5);
+  const drivers = [`${minutes.length}-game minutes sample`];
+  if ((options.historicalPrior?.sampleSize ?? 0) >= 8) drivers.push(`${options.historicalPrior?.sampleSize}-game historical role prior`);
+  if (options.confirmedStarter === true) { standardDeviation *= 0.9; drivers.push('confirmed starter reduces role uncertainty'); }
+  else if (options.confirmedStarter === false) { standardDeviation *= 1.2; drivers.push('non-starter role increases uncertainty'); }
+  if (['questionable', 'day_to_day'].includes(String(options.injuryStatus))) { standardDeviation *= 1.25; drivers.push('injury status increases uncertainty'); }
+  if (Number.isFinite(options.depthChartOrder) && Number(options.depthChartOrder) >= 4) { standardDeviation *= 1.1; drivers.push('deep rotation role increases uncertainty'); }
+  if (Number.isFinite(options.restDays) && Number(options.restDays) === 0) { standardDeviation *= 1.08; drivers.push('back-to-back increases rotation uncertainty'); }
+  if (Math.abs(Number(options.spread)) >= 10) { standardDeviation *= 1.12; drivers.push('large spread increases blowout uncertainty'); }
+  const bounded = (z: number) => Number(Math.min(40, Math.max(0, center + z * standardDeviation)).toFixed(2));
+  if ((didNotPlayProbability ?? 0) > 0) drivers.push(`separate DNP probability ${(didNotPlayProbability! * 100).toFixed(0)}%`);
+  return { p10: bounded(-1.2816), p25: bounded(-0.6745), p50: Number(center.toFixed(2)), p75: bounded(0.6745), p90: bounded(1.2816), standardDeviation: Number(standardDeviation.toFixed(2)), didNotPlayProbability, sampleSize: minutes.length, drivers };
 }

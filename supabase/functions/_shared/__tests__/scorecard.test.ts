@@ -1,4 +1,5 @@
 import { assertEquals } from '../testAssert.ts';
+import { assertReplayTimestampSafety } from '../eval/replay.ts';
 import { evaluateReplay, spearmanRankCorrelation } from '../eval/scorecard.ts';
 
 Deno.test('scorecard computes rank correlation from pre-lock projections and actuals', () => {
@@ -20,4 +21,14 @@ Deno.test('scorecard reports ROI, hit rate, and duplicate lineups', () => {
   assertEquals(result.lineup_roi, 0.5);
   assertEquals(result.lineup_hit_rate, 0.5);
   assertEquals(result.duplication_rate, 0.5);
+});
+
+Deno.test('replay rejects inputs observed after lock', () => {
+  let rejected = false;
+  try {
+    assertReplayTimestampSafety({ lock_time: '2026-08-10T23:00:00Z', observed_at: '2026-08-10T23:00:01Z' });
+  } catch {
+    rejected = true;
+  }
+  assertEquals(rejected, true);
 });

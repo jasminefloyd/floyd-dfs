@@ -2,12 +2,14 @@ import {
   correlateOutcomes,
   generateFieldLineups,
   randomNormal,
+  seededRandom,
   sampleLognormalOutcome,
   scoreIndexedEntries,
   scaleFinishRank,
   type SimPlayer,
   type SimRosterSlot,
 } from '../simulation.ts';
+import { sampleWnbaJointOutcomes } from '../wnbaJointSimulation.ts';
 
 function assert(condition: boolean, message: string) {
   if (!condition) throw new Error(message);
@@ -34,6 +36,14 @@ Deno.test('lognormal sampler matches target mean and standard deviation', () => 
   const sampleStdDev = stdDev(samples);
   assert(Math.abs(sampleMean - 25) / 25 < 0.03, `mean ${sampleMean} outside 3% target`);
   assert(Math.abs(sampleStdDev - 10) / 10 < 0.1, `sd ${sampleStdDev} outside 10% target`);
+});
+
+Deno.test('seeded random source produces reproducible outcomes', () => {
+  const first = seededRandom(42);
+  const second = seededRandom(42);
+  const firstSamples = Array.from({ length: 6 }, () => sampleLognormalOutcome(25, 10, first));
+  const secondSamples = Array.from({ length: 6 }, () => sampleLognormalOutcome(25, 10, second));
+  assert(JSON.stringify(firstSamples) === JSON.stringify(secondSamples), 'same seed should replay identical outcomes');
 });
 
 Deno.test('NFL QB boom lifts same-team WR outcomes', () => {
@@ -134,4 +144,16 @@ Deno.test('simulated Showdown field obeys two-team legality without a salary flo
     assert(new Set(lineup.players.map((player) => player.playerId)).size === 6, 'Showdown field lineups must have six unique players');
     assert(new Set(lineup.players.map((player) => roster.find((candidate) => candidate.player_id === player.playerId)?.team)).size >= 2, 'Showdown field lineups must use two teams');
   }
+});
+
+Deno.test('joint WNBA sampler is seeded, enforces inactive outcomes, and couples team minutes', () => {
+  const roster: SimPlayer[] = [
+    { player_id: 'a', name: 'A', team: 'AAA', position: 'PG', salary: 7000, projected_points: 30, minutes_projection: 32, confirmed_starter: true, wnba_scenarios: [{ state: 'active', probability: 1 }], wnba_component_projection: { points: 16, rebounds: 4, assists: 6, steals: 1, blocks: 0, turnovers: 2, threes: 2 } },
+    { player_id: 'b', name: 'B', team: 'AAA', position: 'C', salary: 7000, projected_points: 25, minutes_projection: 28, wnba_scenarios: [{ state: 'inactive', probability: 1 }], wnba_component_projection: { points: 12, rebounds: 8, assists: 2, steals: 1, blocks: 2, turnovers: 2, threes: 0 } },
+    { player_id: 'c', name: 'C', team: 'BBB', position: 'PG', salary: 7000, projected_points: 28, minutes_projection: 30, wnba_scenarios: [{ state: 'active', probability: 1 }], wnba_component_projection: { points: 15, rebounds: 4, assists: 5, steals: 1, blocks: 0, turnovers: 2, threes: 2 } },
+  ];
+  const first = sampleWnbaJointOutcomes(roster as any, [['AAA', 'BBB']], seededRandom(77));
+  const second = sampleWnbaJointOutcomes(roster as any, [['AAA', 'BBB']], seededRandom(77));
+  assert(JSON.stringify([...first.outcomes]) === JSON.stringify([...second.outcomes]), 'joint sampler must be deterministic for a seed');
+  assert(first.outcomes[1] === 0, 'inactive player must score zero in joint sampler');
 });

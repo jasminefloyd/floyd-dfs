@@ -26,6 +26,6 @@ Deno.test('WNBA scenario selection is deterministic for a supplied random value'
 });
 
 Deno.test('WNBA inactive scenario produces zero fantasy points', () => {
-  const outcome = sampleWnbaOutcome(30, 8, [{ state: 'inactive', probability: 1 }], 0.5);
+  const outcome = sampleWnbaOutcome(30, 8, [{ state: 'inactive', probability: 1 }], () => 0.5);
   assert(outcome === 0, 'inactive scenario must produce zero fantasy points');
 });

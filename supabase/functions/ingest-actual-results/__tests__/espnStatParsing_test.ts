@@ -1,4 +1,4 @@
-import { parseEspnAthleteStats, statKeyFromLabel } from '../espnStatParsing.ts';
+import { parseEspnAthleteStats, parseMinutes, statKeyFromLabel } from '../espnStatParsing.ts';
 
 function assertEquals(actual: unknown, expected: unknown, message: string) {
   if (actual !== expected) throw new Error(`${message}: expected ${expected}, got ${actual}`);
@@ -18,6 +18,11 @@ Deno.test('identical ESPN column labels resolve differently by stat group', () =
 Deno.test('receiving REC and fumbles REC do not collide', () => {
   assertEquals(statKeyFromLabel('REC', 'receiving'), 'receptions', 'receiving REC');
   assertEquals(statKeyFromLabel('REC', 'fumbles'), 'fumblesRecovered', 'fumbles REC');
+});
+
+Deno.test('basketball minutes retain seconds from ESPN clock values', () => {
+  assertEquals(parseMinutes('31:30'), 31.5, 'clock minutes');
+  assertEquals(parseEspnAthleteStats({ stats: ['31:30'] }, ['MIN']).minutes, 31.5, 'MIN stat');
 });
 
 Deno.test('a QB line summed across passing, rushing, and fumbles groups keeps stats distinct', () => {

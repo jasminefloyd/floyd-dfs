@@ -94,4 +94,22 @@ Deno.test('WNBA opportunity projection does not blend the same last-five sample 
   if (player.projected_points !== 28.31) {
     throw new Error(`Expected direct minutes-rate projection of 28.31, got ${player.projected_points}`);
   }
+  if (player.minutes_distribution?.p50 !== 30 || player.minutes_distribution.p10 === null || player.minutes_distribution.p90 === null) {
+    throw new Error(`Expected shadow minutes distribution centered at 30, got ${JSON.stringify(player.minutes_distribution)}`);
+  }
+  if (player.minutes_distribution.didNotPlayProbability !== 0) {
+    throw new Error(`Expected zero DNP probability for five played games, got ${player.minutes_distribution.didNotPlayProbability}`);
+  }
+});
+
+Deno.test('WNBA replacement logic prefers settled replacement-minute priors over a fixed share', () => {
+  const result = redistributeMinutes([
+    { id: 'out', name: 'Out starter', team: 'NYL', position: 'PG', injury_status: 'out', minutes_projection: 30 },
+    { id: 'replacement', name: 'Replacement', team: 'NYL', position: 'PG', injury_status: 'active', minutes_projection: 20, confirmed_starter: true,
+      wnba_role_prior: { sampleSize: 12, historicalMinutes: 24, historicalMinutesStddev: 3, replacementMinutesGain: 12, didNotPlayProbability: 0, cohort: 'elevated' } },
+  ], 'wnba');
+  const replacement = result.players.find((player) => player.id === 'replacement');
+  if (!replacement || replacement.minutes_projection <= 30 || !replacement.role_counterfactual?.some((note) => note.includes('Out starter out'))) {
+    throw new Error(`Expected an evidence-traceable WNBA replacement adjustment, got ${JSON.stringify(replacement)}`);
+  }
 });

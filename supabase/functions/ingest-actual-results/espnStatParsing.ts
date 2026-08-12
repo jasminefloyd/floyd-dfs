@@ -3,6 +3,17 @@ export function parseNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function parseMinutes(value: unknown): number {
+  const text = String(value ?? '').trim();
+  const match = text.match(/^(\d+):(\d{1,2})$/);
+  if (!match) return parseNumber(text);
+  const minutes = Number(match[1]);
+  const seconds = Number(match[2]);
+  return Number.isFinite(minutes) && Number.isFinite(seconds) && seconds >= 0 && seconds < 60
+    ? minutes + seconds / 60
+    : 0;
+}
+
 // ESPN reuses short column headers (YDS, TD, REC, ...) across unrelated stat groups
 // (passing/rushing/receiving all use "TD"; receiving's "REC" collides with fumbles'
 // "REC"), so the group name must disambiguate before falling back to the generic map.
@@ -65,7 +76,8 @@ export function parseEspnAthleteStats(athlete: any, labels: string[], groupName 
   const stats = Array.isArray(athlete?.stats) ? athlete.stats : [];
   const statLine: Record<string, number> = {};
   labels.forEach((label, index) => {
-    statLine[statKeyFromLabel(label, groupName)] = parseNumber(stats[index]);
+    const key = statKeyFromLabel(label, groupName);
+    statLine[key] = key === 'minutes' ? parseMinutes(stats[index]) : parseNumber(stats[index]);
   });
   return statLine;
 }

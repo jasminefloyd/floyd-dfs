@@ -13,6 +13,11 @@ import {
   type MlbForensicPlayerRow,
   type MlbForensicScorecard,
 } from '../generate-pios-lineups/mlbForensic.ts';
+import {
+  buildWnbaForensicScorecard,
+  enrichWnbaForensicLineup,
+  type WnbaForensicLineupRow,
+} from '../generate-pios-lineups/wnbaForensic.ts';
 
 type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
@@ -33,6 +38,8 @@ interface ActualPlayer {
   team: string | null;
   position?: string | null;
   actual_points: number;
+  actual_minutes?: number | null;
+  actual_starter?: boolean | null;
 }
 
 interface ProjectionResultRow {
@@ -44,6 +51,8 @@ interface ProjectionResultRow {
   position: string | null;
   projected_points: number | null;
   actual_points: number | null;
+  actual_minutes?: number | null;
+  actual_starter?: boolean | null;
   projection_source?: string | null;
 }
 
@@ -74,6 +83,7 @@ interface GeneratedLineupRow {
     simulationEv?: number;
     topNRate?: number;
     expectedPayout?: number;
+    scanSnapshotId?: string;
   } | null;
   players: Array<{
     player_id?: string | null;
@@ -94,6 +104,7 @@ interface GeneratedLineupRow {
     role_stability?: number | null;
     minutes_volatility?: number | null;
     recent_fantasy_per_minute?: number | null;
+    minutes_projection?: number | null;
   }>;
   projected_points: number;
   salary_used: number;
@@ -232,6 +243,7 @@ async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<Actu
     team: string;
     position: string | null;
     statLine: Record<string, number>;
+    actual_starter: boolean;
   }>();
 
   for (const event of events) {
@@ -257,6 +269,7 @@ async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<Actu
             team,
             position: athlete?.position?.abbreviation ?? null,
             statLine: {},
+            actual_starter: athleteRow?.starter === true || athleteRow?.starter === 'true' || athleteRow?.starter === 1,
           };
           for (const [statKey, statValue] of Object.entries(statLine)) {
             existing.statLine[statKey] = (existing.statLine[statKey] ?? 0) + statValue;
@@ -273,6 +286,8 @@ async function fetchEspnActuals(sport: Sport, contestDate: string): Promise<Actu
       team: item.team,
       position: item.position,
       actual_points: Number(dkFantasyPoints(item.statLine, sport as DkSport).toFixed(2)),
+      actual_minutes: Number.isFinite(item.statLine.minutes) ? item.statLine.minutes : null,
+      actual_starter: Boolean((item as { actual_starter?: boolean }).actual_starter),
     });
   }
 
@@ -458,6 +473,8 @@ function matchActualsToSlate(slatePlayers: SlatePlayer[], actuals: ActualPlayer[
       position: player.position,
       projected_points: player.projected_points,
       actual_points: actual.actual_points,
+      actual_minutes: actual.actual_minutes ?? null,
+      actual_starter: actual.actual_starter ?? null,
       source: 'auto_boxscore',
       projection_source: player.projection_source ?? 'unknown',
       });
@@ -475,6 +492,20 @@ function buildActualMap(rows: ProjectionResultRow[]) {
     const actual = Number(row.actual_points ?? 0);
     if (!row.player_name || !Number.isFinite(actual)) continue;
     actualByNameTeam.set(actualKey(row.player_name, row.team), actual);
+  }
+  return actualByNameTeam;
+}
+
+function buildActualDetailsMap(rows: ProjectionResultRow[]) {
+  const actualByNameTeam = new Map<string, { points: number; minutes: number | null }>();
+  for (const row of rows) {
+    const points = Number(row.actual_points ?? 0);
+    if (!row.player_name || !Number.isFinite(points)) continue;
+    const minutes = Number(row.actual_minutes);
+    actualByNameTeam.set(actualKey(row.player_name, row.team), {
+      points,
+      minutes: Number.isFinite(minutes) ? minutes : null,
+    });
   }
   return actualByNameTeam;
 }
@@ -615,6 +646,7 @@ async function scoreGeneratedLineups(
   missing_players: number;
   wnba_backtest: WnbaBacktestBucket[];
   mlb_forensic?: MlbForensicScorecard;
+  wnba_forensic?: ReturnType<typeof buildWnbaForensicScorecard>;
 }> {
   const targetLineups = lineups ?? await getUnscoredLineupsForDate(sport, contestDate);
   if (!targetLineups.length) return {
@@ -622,6 +654,7 @@ async function scoreGeneratedLineups(
     missing_players: 0,
     wnba_backtest: [],
     mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined,
+    wnba_forensic: sport === 'wnba' ? buildWnbaForensicScorecard([]) : undefined,
   };
 
   const actualByNameTeam = buildActualMap(actualRows);
@@ -630,6 +663,8 @@ async function scoreGeneratedLineups(
   let missingPlayers = 0;
   const piosEvaluations: Array<Record<string, unknown>> = [];
   const wnbaRows = sport === 'wnba' ? [] as Array<Record<string, unknown>> : null;
+  const wnbaForensicLineups: WnbaForensicLineupRow[] = [];
+  const actualDetailsByNameTeam = buildActualDetailsMap(actualRows);
   const forensicLineups: MlbForensicLineupRow[] = [];
 
   for (const lineup of targetLineups) {
@@ -688,6 +723,50 @@ async function scoreGeneratedLineups(
         })),
       });
     }
+    if (sport === 'wnba') {
+      wnbaForensicLineups.push(enrichWnbaForensicLineup({
+        generated_lineup_id: lineup.id,
+        contest_date: contestDate,
+        contest_type: lineup.contest_type,
+        contest_id: lineup.contest_id,
+        contest_strategy: lineup.contest_strategy,
+        lineup_mode: lineup.lineup_mode,
+        field_size: lineup.field_size,
+        entry_fee: lineup.entry_fee,
+        finish_rank: lineup.finish_rank,
+        cash_line: lineup.cash_line,
+        payout: lineup.payout,
+        actual_duplicates: lineup.actual_duplicates,
+        expected_duplicates: lineup.expected_duplicates,
+        projected_points: lineup.projected_points,
+        actual_points: actual,
+        optimal_points: optimal,
+        optimizer_rank: lineup.optimizer_rank,
+        scan_snapshot_id: typeof lineup.config?.scanSnapshotId === 'string' ? lineup.config.scanSnapshotId : null,
+        players: lineup.players.map((player) => {
+          const result = actualDetailsByNameTeam.get(actualKey(String(player.player_name ?? ''), player.team));
+          return {
+            player_id: player.player_id,
+            player_name: player.player_name,
+            team: player.team,
+            position: player.position,
+            projected_points: player.projected_points,
+            actual_points: result?.points ?? null,
+            minutes_projection: player.minutes_projection,
+            actual_minutes: result?.minutes ?? null,
+            ownership_projection: player.ownership_projection,
+            projection_source: player.projection_source,
+            confirmed_starter: player.confirmed_starter,
+          };
+        }),
+      }));
+    }
+    if (missingForLineup > 0) {
+      await callSupabaseRpc('fantasy_ai_mark_generated_lineup_result_partial', {
+        p_id: lineup.id,
+      });
+      continue;
+    }
     await callSupabaseRpc('fantasy_ai_score_generated_lineup', {
       p_id: lineup.id,
       p_actual: actual,
@@ -733,6 +812,9 @@ async function scoreGeneratedLineups(
   const mlbForensic = sport === 'mlb'
     ? buildMlbForensicScorecard(forensicPlayers, forensicLineups)
     : undefined;
+  const wnbaForensic = sport === 'wnba'
+    ? buildWnbaForensicScorecard(wnbaForensicLineups)
+    : undefined;
   if (mlbForensic) {
     const contestGroups = new Map<string, MlbForensicLineupRow[]>();
     for (const lineup of forensicLineups) {
@@ -759,12 +841,35 @@ async function scoreGeneratedLineups(
       });
     }
   }
+  if (wnbaForensic) {
+    const contestGroups = new Map<string, WnbaForensicLineupRow[]>();
+    for (const lineup of wnbaForensicLineups) {
+      const key = `${lineup.contest_type}:${lineup.contest_id ?? ''}`;
+      contestGroups.set(key, [...(contestGroups.get(key) ?? []), lineup]);
+    }
+    for (const contestRows of contestGroups.values()) {
+      const scorecard = buildWnbaForensicScorecard(contestRows);
+      await callSupabaseRpc('fantasy_ai_upsert_wnba_forensic_report', {
+        p_report: {
+          contest_date: contestDate,
+          contest_type: contestRows[0]?.contest_type ?? 'unknown',
+          contest_id: contestRows[0]?.contest_id ?? null,
+          scorecard,
+          lineups: contestRows,
+          coverage: scorecard.coverage,
+        },
+      }).catch((error) => {
+        console.error('WNBA forensic report persistence failed:', error);
+      });
+    }
+  }
 
   return {
     scored,
     missing_players: missingPlayers,
     wnba_backtest: wnbaRows ? summarizeWnbaBacktest(wnbaRows) : [],
     mlb_forensic: mlbForensic,
+    wnba_forensic: wnbaForensic,
   };
 }
 
@@ -778,7 +883,7 @@ async function ingestSport(sport: Sport, contestDate: string) {
   ]);
   const slatePlayers = mergeSlatePlayersForResults(storedSlatePlayers ?? [], slatePlayersFromGeneratedLineups(generatedLineups));
   if (!slatePlayers.length) {
-    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined, unmatched_names: [] };
+    return { sport, matched: 0, unmatched: 0, upserted: 0, lineups_scored: 0, lineup_missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined, wnba_forensic: sport === 'wnba' ? buildWnbaForensicScorecard([]) : undefined, unmatched_names: [] };
   }
 
   const actuals = await fetchActuals(sport, contestDate);
@@ -793,11 +898,14 @@ async function ingestSport(sport: Sport, contestDate: string) {
     : 0;
   const scoreboard = rows.length
     ? await scoreGeneratedLineups(sport, contestDate, slatePlayers, rows as ProjectionResultRow[], generatedLineups)
-    : { scored: 0, missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined };
+    : { scored: 0, missing_players: 0, wnba_backtest: [], mlb_forensic: sport === 'mlb' ? buildMlbForensicScorecard([], []) : undefined, wnba_forensic: sport === 'wnba' ? buildWnbaForensicScorecard([]) : undefined };
   const snapshotsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_mios_snapshots', {
     p_sport: sport,
     p_contest_date: contestDate,
   }).catch(() => 0) ?? 0;
+  const wnbaFeaturesMaterialized = sport === 'wnba'
+    ? await callSupabaseRpc<number>('fantasy_ai_materialize_wnba_features', { p_contest_date: contestDate }).catch(() => 0) ?? 0
+    : 0;
   const piosRelationshipsEvaluated = await callSupabaseRpc<number>('fantasy_ai_evaluate_pios_relationships_for_date', {
     p_sport: sport,
     p_contest_date: contestDate,
@@ -808,9 +916,11 @@ async function ingestSport(sport: Sport, contestDate: string) {
     unmatched: matched.unmatched.length,
     upserted,
     lineups_scored: scoreboard.scored,
+    wnba_features_materialized: wnbaFeaturesMaterialized,
     lineup_missing_players: scoreboard.missing_players,
     wnba_backtest: scoreboard.wnba_backtest,
     mlb_forensic: scoreboard.mlb_forensic,
+    wnba_forensic: scoreboard.wnba_forensic,
     snapshots_evaluated: snapshotsEvaluated,
     pios_relationships_evaluated: piosRelationshipsEvaluated,
     unmatched_names: matched.unmatched.slice(0, 40),

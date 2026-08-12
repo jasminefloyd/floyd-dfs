@@ -31,6 +31,19 @@ export interface IndexedFieldLineup {
   entries: Array<{ index: number; multiplier: number }>;
 }
 
+export type RandomSource = () => number;
+
+export function seededRandom(seed: number): RandomSource {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6D2B79F5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
 export function scoreIndexedEntries(outcomes: Float64Array, entries: Array<{ index: number; multiplier: number }>): number {
   return entries.reduce((total, entry) => total + (outcomes[entry.index] ?? 0) * entry.multiplier, 0);
 }
@@ -47,31 +60,32 @@ export function scaleFinishRank(simulatedRank: number, simulatedFieldSize: numbe
   );
 }
 
-export function randomNormal(mean: number, stdDev: number): number {
-  const first = Math.max(Math.random(), Number.EPSILON);
-  const second = Math.max(Math.random(), Number.EPSILON);
+export function randomNormal(mean: number, stdDev: number, random: RandomSource = Math.random): number {
+  const first = Math.max(random(), Number.EPSILON);
+  const second = Math.max(random(), Number.EPSILON);
   const z = Math.sqrt(-2 * Math.log(first)) * Math.cos(2 * Math.PI * second);
   return mean + z * stdDev;
 }
 
-export function sampleLognormalOutcome(mean: number, stdDev: number): number {
+export function sampleLognormalOutcome(mean: number, stdDev: number, random: RandomSource = Math.random): number {
   if (!Number.isFinite(mean) || mean <= 0) return 0;
   const safeStdDev = Math.max(Number.isFinite(stdDev) ? stdDev : 0, 0.001);
   const sigmaSquared = Math.log(1 + (safeStdDev / mean) ** 2);
   const sigma = Math.sqrt(sigmaSquared);
   const mu = Math.log(mean) - sigmaSquared / 2;
-  return Math.exp(randomNormal(mu, sigma));
+  return Math.exp(randomNormal(mu, sigma, random));
 }
 
-export function sampleWnbaOutcome(mean: number, stdDev: number, scenarios: WnbaOutcomeScenario[] = [], randomValue = Math.random()): number {
+export function sampleWnbaOutcome(mean: number, stdDev: number, scenarios: WnbaOutcomeScenario[] = [], random: RandomSource = Math.random): number {
+  const randomValue = random();
   const scenario = selectWnbaScenario(scenarios, randomValue);
-  if (!scenario) return sampleLognormalOutcome(mean, stdDev);
+  if (!scenario) return sampleLognormalOutcome(mean, stdDev, random);
   if (scenario.state === 'inactive') return 0;
   const minutesMultiplier = scenario.minutes_multiplier ?? 1;
   const productionMultiplier = scenario.production_multiplier ?? 1;
   const scenarioMean = mean * minutesMultiplier * productionMultiplier;
   const scenarioStdDev = stdDev * (scenario.state === 'limited' ? 1.1 : 1);
-  return sampleLognormalOutcome(scenarioMean, scenarioStdDev);
+  return sampleLognormalOutcome(scenarioMean, scenarioStdDev, random);
 }
 
 export function adjustedProjection(player: SimPlayer): number {
@@ -117,15 +131,16 @@ export function correlateOutcomes(
   sport: string,
   gamePairs: Array<[string, string]> = [],
   contestType = '',
+  random: RandomSource = Math.random,
 ): void {
   if (sport === 'nba' || sport === 'wnba') {
-    applyBasketballCorrelation(outcomes, means, roster, gamePairs, contestType);
+    applyBasketballCorrelation(outcomes, means, roster, gamePairs, contestType, random);
   } else if (sport === 'nfl') {
     applyNflCorrelation(outcomes, means, stdDevs, roster, gamePairs);
   } else if (sport === 'mlb') {
-    applyMlbCorrelation(outcomes, means, roster, gamePairs);
+    applyMlbCorrelation(outcomes, means, roster, gamePairs, random);
   } else if (sport === 'golf') {
-    applyGolfWaveCorrelation(outcomes, roster);
+    applyGolfWaveCorrelation(outcomes, roster, random);
   }
   applyShrunkRelationshipCorrelation(outcomes, means, roster);
 }
@@ -137,12 +152,12 @@ export function correlateOutcomes(
 // there's no ordering dependency to get wrong the way a pairwise adjustment would have.
 // Kept deliberately small: shared conditions are a much weaker signal than a real
 // team's shared play-by-play dependency (e.g. a QB-to-WR connection).
-function applyGolfWaveCorrelation(outcomes: Float64Array, roster: SimPlayer[]): void {
+function applyGolfWaveCorrelation(outcomes: Float64Array, roster: SimPlayer[], random: RandomSource): void {
   const wavePulses = new Map<string, number>();
   roster.forEach((player, index) => {
     const wave = player.golf_wave;
     if (!wave) return;
-    if (!wavePulses.has(wave)) wavePulses.set(wave, randomNormal(0, 0.04));
+    if (!wavePulses.has(wave)) wavePulses.set(wave, randomNormal(0, 0.04, random));
     const multiplier = 1 + (wavePulses.get(wave) ?? 0);
     outcomes[index] = Math.max(0, outcomes[index] * multiplier);
   });
@@ -175,15 +190,16 @@ function applyBasketballCorrelation(
   roster: SimPlayer[],
   gamePairs: Array<[string, string]>,
   contestType: string,
+  random: RandomSource,
 ) {
   const teamPulses = new Map<string, number>();
   const gamePulseByTeam = new Map<string, number>();
   for (const player of roster) {
     const team = teamKey(player);
-    if (team && !teamPulses.has(team)) teamPulses.set(team, randomNormal(0, 0.06));
+    if (team && !teamPulses.has(team)) teamPulses.set(team, randomNormal(0, 0.06, random));
   }
   for (const [home, away] of gamePairs) {
-    const pulse = randomNormal(0, contestType === 'showdown' ? 0.11 : 0.06);
+    const pulse = randomNormal(0, contestType === 'showdown' ? 0.11 : 0.06, random);
     gamePulseByTeam.set(home, pulse);
     gamePulseByTeam.set(away, pulse);
   }
@@ -260,11 +276,12 @@ function applyMlbCorrelation(
   means: Float64Array,
   roster: SimPlayer[],
   gamePairs: Array<[string, string]>,
+  random: RandomSource,
 ) {
   const teamPulses = new Map<string, number>();
   for (const player of roster) {
     const team = teamKey(player);
-    if (team && !teamPulses.has(team)) teamPulses.set(team, randomNormal(0, 0.09));
+    if (team && !teamPulses.has(team)) teamPulses.set(team, randomNormal(0, 0.09, random));
   }
   roster.forEach((player, index) => {
     const team = teamKey(player);
@@ -280,10 +297,10 @@ function applyMlbCorrelation(
   });
 }
 
-function weightedPick<T>(items: T[], weight: (item: T) => number): T | null {
+function weightedPick<T>(items: T[], weight: (item: T) => number, random: RandomSource): T | null {
   const weights = items.map((item) => Math.max(0.0001, weight(item)));
   const total = weights.reduce((sum, value) => sum + value, 0);
-  let cursor = Math.random() * total;
+  let cursor = random() * total;
   for (let index = 0; index < items.length; index += 1) {
     cursor -= weights[index];
     if (cursor <= 0) return items[index];
@@ -297,6 +314,7 @@ export function generateFieldLineups(
   contestType: string,
   fieldSize = 800,
   slotsBySport: Record<string, SimRosterSlot[]>,
+  random: RandomSource = Math.random,
 ): SimFieldLineup[] {
   const slots = contestType === 'showdown'
     ? Array.from({ length: 6 }, (_, index) => ({ slot: index === 0 ? 'CPT' : `FLEX${index}`, eligible: roster.map((player) => player.position) }))
@@ -314,17 +332,17 @@ export function generateFieldLineups(
   );
   while (field.length < chalkTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('chalk', (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8));
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('chalk', (player) => adjustedProjection(player) + (player.ownership_projection ?? 0.08) * 8), random);
     if (lineup) field.push(lineup);
   }
   while (field.length < chalkTarget + randomTarget && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('random', (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15));
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('random', (player) => Math.max(player.ownership_projection ?? 0.08, 0.01) ** 1.15), random);
     if (lineup) field.push(lineup);
   }
   while (field.length < fieldSize && attempts < retryCap) {
     attempts += 1;
-    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('leverage', (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01)));
+    const lineup = buildFieldLineup(roster, slots, contestType, fieldWeight('leverage', (player) => adjustedProjection(player) / Math.max(player.ownership_projection ?? 0.08, 0.01)), random);
     if (lineup) field.push(lineup);
   }
   return field;
@@ -335,6 +353,7 @@ export function buildFieldLineup(
   slots: SimRosterSlot[],
   contestType: string,
   weight: (player: SimPlayer) => number,
+  random: RandomSource = Math.random,
 ): SimFieldLineup | null {
   const selected: SimPlayer[] = [];
   const usedIds = new Set<string>();
@@ -350,7 +369,7 @@ export function buildFieldLineup(
     });
     const pick = weightedPick(candidates, (player) => {
       return weight(player);
-    });
+    }, random);
     if (!pick) return null;
     selected.push(pick);
     usedIds.add(pick.player_id);
