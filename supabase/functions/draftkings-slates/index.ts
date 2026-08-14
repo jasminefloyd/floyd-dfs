@@ -90,9 +90,10 @@ const VALID_SPORTS = new Set(['nba', 'wnba', 'nfl', 'mlb', 'golf']);
 const VALID_CONTEST_TYPES = new Set(['showdown', 'classic']);
 const SLATE_LOOKAHEAD_HOURS = 48;
 const DRAFTKINGS_HEADERS = {
-  Accept: 'application/json',
-  'User-Agent': 'Mozilla/5.0 (compatible; fantasy-ai/1.0; +https://floyd-dfs.vercel.app)',
+  Accept: 'application/json, text/plain, */*',
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   Referer: 'https://www.draftkings.com/',
+  Origin: 'https://www.draftkings.com',
 };
 
 function jsonResponse(body: unknown, status = 200) {

@@ -4016,7 +4016,7 @@ function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: 
   if (sport === 'wnba') {
     const wideMinutes = roster.filter((player) => {
       const distribution = player.minutes_distribution;
-      return distribution?.p10 !== null && distribution?.p90 !== null && distribution.p90 - distribution.p10 >= 14;
+      return distribution?.p10 != null && distribution.p90 != null && distribution.p90 - distribution.p10 >= 14;
     });
     const uncertainStarters = roster.filter((player) => player.confirmed_starter === undefined && (player.minutes_projection ?? 0) >= 20);
     if (wideMinutes.length) cautions.push(`${wideMinutes.length} WNBA player${wideMinutes.length === 1 ? '' : 's'} has a wide minutes distribution; tournament exposure should be limited until role certainty improves.`);
