@@ -8,6 +8,8 @@ export interface WnbaJointPlayer extends SimPlayer {
   implied_total?: number;
   spread?: number;
   confirmed_starter?: boolean;
+  role_stability?: number;
+  wnba_role_prior?: { didNotPlayProbability?: number | null; sampleSize?: number };
 }
 
 export interface WnbaJointSimulationResult { outcomes: Float64Array; gameStateByTeam: Map<string, string>; }
@@ -37,10 +39,12 @@ export function sampleWnbaJointOutcomes(roster: WnbaJointPlayer[], gamePairs: Ar
       const player = roster[index];
       const scenario = selectWnbaScenario(player.wnba_scenarios ?? [], random());
       const distribution = player.minutes_distribution;
-      const dnp = Number(distribution?.didNotPlayProbability);
+      const dnp = Number(distribution?.didNotPlayProbability ?? player.wnba_role_prior?.didNotPlayProbability);
       const inactive = scenario?.state === 'inactive' || (scenario === null && Number.isFinite(dnp) && random() < dnp);
       const center = Number(distribution?.p50 ?? player.minutes_projection ?? 22);
-      const stdDev = Math.max(2.5, Number(distribution?.standardDeviation) || center * 0.1);
+      const roleStability = clamp(Number(player.role_stability ?? 0.55), 0, 1);
+      const roleUncertainty = 1 - roleStability;
+      const stdDev = Math.max(2.5, (Number(distribution?.standardDeviation) || center * 0.1) * (1 + roleUncertainty * 0.28));
       const scenarioMultiplier = scenario?.state === 'limited' ? scenario.minutes_multiplier ?? 0.62 : scenario?.minutes_multiplier ?? 1;
       const blowoutMultiplier = state.blowout ? (state.margin > 0 && player.confirmed_starter ? 0.86 : state.margin < 0 && player.confirmed_starter ? 0.9 : 1.08) : 1;
       const overtimeMultiplier = state.overtime ? 1.06 : 1;
@@ -56,7 +60,8 @@ export function sampleWnbaJointOutcomes(roster: WnbaJointPlayer[], gamePairs: Ar
       const components = player.wnba_component_projection;
       const baselineMinutes = Number(player.minutes_projection ?? 24);
       const minuteRatio = row.minutes / Math.max(Number.isFinite(baselineMinutes) && baselineMinutes > 0 ? baselineMinutes : 24, 1);
-      const usageShock = randomNormal(0, 0.13, random);
+      const roleStability = clamp(Number(player.role_stability ?? 0.55), 0, 1);
+      const usageShock = randomNormal(0, 0.1 + (1 - roleStability) * 0.12, random);
       const teamPace = state.pace;
       if (components) {
         const points = Math.max(0, components.points * minuteRatio * teamPace * (1 + usageShock));

@@ -114,6 +114,7 @@ interface Player {
   minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
   depth_chart_order?: number;
   context_score?: number;
+  statcast_quality_score?: number;
   news_score?: number;
   news_note?: string;
   news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
@@ -2533,6 +2534,7 @@ function applyStatcastQuality(players: Player[], qualityByKey: Map<string, Statc
     return {
       ...player,
       context_score: Number(((player.context_score ?? 0) + quality.quality_score).toFixed(3)),
+      statcast_quality_score: quality.quality_score,
       projected_points: projectedPoints,
       model_adjusted_fantasy_pts: projectedPoints,
       news_score: Number(((player.news_score ?? 0) + quality.quality_score * 4).toFixed(2)),

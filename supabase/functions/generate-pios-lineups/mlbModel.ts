@@ -15,6 +15,7 @@ export interface MlbProxyPlayer {
   implied_total?: number;
   run_factor?: number;
   context_score?: number;
+  statcast_quality_score?: number;
 }
 
 export interface MlbProxyDistribution {
@@ -50,14 +51,26 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+export function mlbOpportunityMultiplier(player: MlbProxyPlayer): number {
+  if (isMlbPitcher(player)) return player.own_probable_starter === false ? 0.7 : 1;
+  const order = Number(player.batting_order);
+  const orderMultiplier = order === 1 ? 1.07 : order === 2 ? 1.055 : order >= 3 && order <= 5 ? 1.025 : order === 7 ? 0.97 : order >= 8 ? 0.94 : 1;
+  const runEnvironment = clamp((Number(player.implied_total ?? 4.5) / 4.5) * Number(player.run_factor ?? 1), 0.84, 1.2);
+  const starterMultiplier = player.confirmed_starter === false ? 0.62 : 1;
+  return clamp(orderMultiplier * runEnvironment * starterMultiplier, 0.5, 1.25);
+}
+
 export function buildMlbProxyDistribution(player: MlbProxyPlayer): MlbProxyDistribution {
   const mean = Math.max(0, Number(player.projected_points ?? 0));
   const pitcher = isMlbPitcher(player);
   const baseStdev = finite(player.stdev_fantasy_pts) && player.stdev_fantasy_pts > 0
     ? player.stdev_fantasy_pts
     : mean * (pitcher ? 0.42 : 0.62);
+  const opportunity = mlbOpportunityMultiplier(player);
   const contextVolatility = Math.abs(Number(player.context_score ?? 0)) * mean * 0.08;
-  const stdev = Math.max(1, baseStdev + contextVolatility);
+  const statcastVolatility = Math.max(0, 0.12 - Math.abs(Number(player.statcast_quality_score ?? 0))) * mean;
+  const opportunityVolatility = Math.abs(opportunity - 1) * mean * 0.18;
+  const stdev = Math.max(1, baseStdev + contextVolatility + statcastVolatility + opportunityVolatility);
   const floor = Math.max(0, mean - stdev * (pitcher ? 1.15 : 1.35));
   const p90 = Math.max(mean, finite(player.p90_projection) ? player.p90_projection : mean + stdev * (pitcher ? 1.25 : 1.55));
   const p95 = Math.max(p90, finite(player.p95_projection) ? player.p95_projection : mean + stdev * (pitcher ? 1.7 : 2.1));
@@ -104,7 +117,8 @@ export function buildMlbProxyStacks(players: MlbProxyPlayer[]): MlbProxyStack[] 
 export function mlbProxyFieldWeight(player: MlbProxyPlayer, mode: 'chalk' | 'random' | 'leverage'): number {
   const projection = Math.max(Number(player.projected_points ?? 0), 0.1);
   const ownership = clamp(Number(player.ownership_projection ?? 0.08), 0.01, 0.95);
-  if (mode === 'chalk') return projection * (0.65 + ownership * 0.9);
-  if (mode === 'leverage') return projection / Math.sqrt(ownership);
-  return Math.max(0.01, projection * (0.35 + Math.random() * 0.65));
+  const opportunity = mlbOpportunityMultiplier(player);
+  if (mode === 'chalk') return projection * opportunity * (0.65 + ownership * 0.9);
+  if (mode === 'leverage') return projection * opportunity / Math.sqrt(ownership);
+  return Math.max(0.01, projection * opportunity * (0.35 + Math.random() * 0.65));
 }

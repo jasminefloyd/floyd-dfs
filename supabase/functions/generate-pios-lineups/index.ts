@@ -19,6 +19,7 @@ import type { WnbaOutcomeScenario } from './wnbaScenarios.ts';
 import { buildMlbProxyDistribution } from './mlbModel.ts';
 import { sampleWnbaJointOutcomes, type WnbaJointPlayer } from './wnbaJointSimulation.ts';
 import { contestObjective, duplicateAdjustedPayout, objectiveScore, simulationUncertainty, type ContestObjective } from './contestObjective.ts';
+import { adaptiveRankComponents, type AdaptiveRankingProfile } from './adaptiveRanking.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -72,6 +73,7 @@ interface ManifestPlayer {
   usage_rate?: number;
   pace_metric?: number;
   context_score?: number;
+  statcast_quality_score?: number;
   news_score?: number;
   news_note?: string;
   news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
@@ -197,6 +199,7 @@ interface LineupConstructionRules {
   simulationSeed: number;
   nflStackMinimum: number;
   nflBringbackMinimum: number;
+  adaptiveProfile?: AdaptiveRankingProfile | null;
 }
 
 interface DraftLineup {
@@ -518,6 +521,38 @@ async function loadHistoricalRelationships(sport: string, players: ManifestPlaye
   }
 }
 
+async function loadAdaptiveRankingProfile(sport: string, contestType: string): Promise<AdaptiveRankingProfile | null> {
+  if (!envSupabaseUrl() || !envSupabaseServiceRoleKey()) return null;
+  try {
+    const rows = await callSupabaseRpc<Array<Record<string, unknown>>>('fantasy_ai_get_pios_adaptive_profile', {
+      p_sport: sport,
+      p_contest_type: contestType,
+      p_days: 45,
+    });
+    const row = rows?.[0];
+    if (!row) return null;
+    return {
+      sport,
+      contest_type: contestType,
+      sample_size: Number(row.sample_size ?? 0),
+      projected_correlation: Number(row.projected_correlation ?? NaN),
+      simulation_ev_correlation: Number(row.simulation_ev_correlation ?? NaN),
+      ceiling_correlation: Number(row.ceiling_correlation ?? NaN),
+      floor_correlation: Number(row.floor_correlation ?? NaN),
+      win_rate_correlation: Number(row.win_rate_correlation ?? NaN),
+      leverage_correlation: Number(row.leverage_correlation ?? NaN),
+      stack_quality_correlation: Number(row.stack_quality_correlation ?? NaN),
+      context_edge_correlation: Number(row.context_edge_correlation ?? NaN),
+      confidence_correlation: Number(row.confidence_correlation ?? NaN),
+      rank_score_correlation: Number(row.rank_score_correlation ?? NaN),
+      ready: row.ready === true && Number(row.sample_size ?? 0) >= 30,
+    };
+  } catch (error) {
+    console.warn('PIOS adaptive ranking profile load skipped:', error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
 function persistGeneratedLineups(
   lineups: DraftLineup[],
   payload: PiosRequest,
@@ -593,6 +628,22 @@ function persistGeneratedLineups(
       scenarioConfidence: lineup.scenario_confidence ?? null,
       relationshipScore: lineup.relationship_score ?? null,
       evidenceSummary: lineup.evidence_summary ?? [],
+      rankFeatures: {
+        projected: lineup.projected_points,
+        simulationEv: lineup.simulation_ev ?? lineup.projected_points,
+        ceiling: lineup.ceiling_score ?? lineup.projected_points,
+        floor: lineup.floor_score ?? lineup.projected_points,
+        winRate: lineup.win_rate ?? 0,
+        leverage: lineup.leverage_score ?? 0,
+        stackQuality: lineup.stack_quality_score ?? 0,
+        contextEdge: lineup.context_edge_score ?? 0,
+        confidence: lineup.confidence_score ?? 0,
+        rankScore: lineup.rank_score ?? 0,
+      },
+      adaptiveRanking: rules.adaptiveProfile?.ready ? {
+        sampleSize: rules.adaptiveProfile.sample_size,
+        contestType: rules.adaptiveProfile.contest_type,
+      } : null,
     },
     players: lineup.players.map((player) => ({
       player_id: player.player_id,
@@ -856,6 +907,7 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       usage_rate: positiveNumber(player.usage_rate),
       pace_metric: positiveNumber(player.pace_metric),
       context_score: normalizeContextScore(player.context_score),
+      statcast_quality_score: positiveNumber(player.statcast_quality_score),
       news_score: normalizeNewsScore(player.news_score),
       news_note: player.news_note,
       news_events: player.news_events,
@@ -2687,26 +2739,37 @@ function lineupRankScore(lineup: DraftLineup, riskTolerance: string, lineupMode:
   const volatility = lineup.volatility_score ?? 0.3;
   const isShowdown = lineup.players.some((player) => player.roster_slot === 'CPT');
   const stackMetric = lineup.stack_quality_score ?? lineup.primary_stack_size ?? 0;
+  const learned = adaptiveRankComponents(rules.adaptiveProfile, {
+    projected,
+    simulationEv: ev,
+    ceiling,
+    floor,
+    winRate,
+    leverage,
+    stackQuality,
+    contextEdge,
+    confidence,
+  });
   const stackBonus = isShowdown ? 0 : stackMetric * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldStack : rules.contestStrategy === 'cash' ? weights.cashStack : weights.standardStack);
   const antiPenalty = (lineup.anti_correlation_flags?.length ?? 0) * weights.antiCorrelationPenalty;
   const latePenalty = (lineup.late_swap_flags?.length ?? 0) * (rules.lateSwapMode ? weights.lateSwapEnabledPenalty : weights.lateSwapDisabledPenalty);
   const ownershipPenalty = (lineup.ownership_sum ?? 0) * weights.ownershipPenalty * rules.ownershipWeight;
   const strategyAdjustment = stackBonus * rules.correlationWeight
     + intelligence * (rules.contestStrategy === 'cash' ? weights.cashIntelligence : weights.tournamentIntelligence)
-    + stackQuality * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldStackQuality : weights.standardStackQuality) * rules.correlationWeight
-    + contextEdge * weights.contextEdge
+    + learned.stackQuality * (rules.contestStrategy === 'large_field_gpp' ? weights.largeFieldStackQuality : weights.standardStackQuality) * rules.correlationWeight
+    + learned.contextEdge * weights.contextEdge
     + volatility * (rules.contestStrategy === 'cash' ? weights.cashVolatility : weights.tournamentVolatility)
     - antiPenalty
     - latePenalty
     - ownershipPenalty;
 
   if (lineupMode === 'max_fpts') return projected;
-  if (lineupMode === 'safe') return floor * weights.safeFloor + confidence * weights.safeConfidence + projected + strategyAdjustment;
-  if (lineupMode === 'tournament') return expectedPayout * 10_000 + winRate * 100 + ceiling * 2 + leverage + strategyAdjustment;
+  if (lineupMode === 'safe') return learned.floor * weights.safeFloor + learned.confidence * weights.safeConfidence + learned.projected + strategyAdjustment;
+  if (lineupMode === 'tournament') return expectedPayout * 10_000 + learned.winRate * 100 + learned.ceiling * 2 + learned.leverage + strategyAdjustment;
 
-  if (riskTolerance === 'conservative') return expectedPayout * 6_000 + ev * 2 + floor * weights.conservativeFloor + confidence * weights.conservativeConfidence + strategyAdjustment;
-  if (riskTolerance === 'aggressive') return expectedPayout * 8_000 + winRate * 100 + ceiling * weights.aggressiveCeiling + strategyAdjustment;
-  return expectedPayout * 7_000 + ev * 2 + ceiling * weights.balancedCeiling + confidence * weights.balancedConfidence + strategyAdjustment;
+  if (riskTolerance === 'conservative') return expectedPayout * 6_000 + learned.simulationEv * 2 + learned.floor * weights.conservativeFloor + learned.confidence * weights.conservativeConfidence + strategyAdjustment;
+  if (riskTolerance === 'aggressive') return expectedPayout * 8_000 + learned.winRate * 100 + learned.ceiling * weights.aggressiveCeiling + strategyAdjustment;
+  return expectedPayout * 7_000 + learned.simulationEv * 2 + learned.ceiling * weights.balancedCeiling + learned.confidence * weights.balancedConfidence + strategyAdjustment;
 }
 
 function classifyLineup(lineup: DraftLineup): DraftLineup['lineup_type'] {
@@ -2765,7 +2828,10 @@ Deno.serve(async (req) => {
       validated: Number(row.sample_size ?? 0) >= 20,
     })) ?? await loadHistoricalRelationships(payload.sport, payload.playerRoster);
     const draftPlayers = enrichPiosIntelligence(mapToDraftPlayers(payload.playerRoster, payload.sport), payload.sport, payload.slate, historicalRelationships);
-    const constructionRules = strategyProfile(payload);
+    const adaptiveProfile = (payload.sport === 'wnba' || payload.sport === 'mlb')
+      ? await loadAdaptiveRankingProfile(payload.sport, payload.contestType)
+      : null;
+    const constructionRules = { ...strategyProfile(payload), adaptiveProfile };
     const ownershipCoverage = draftPlayers.length
       ? draftPlayers.filter((player) => player.ownership_projection !== undefined).length / draftPlayers.length
       : 0;
@@ -2852,6 +2918,12 @@ Deno.serve(async (req) => {
         : []),
       ...(tournamentNeedsOwnership && ownershipCoverage < 0.7
         ? [`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage and duplicate estimates are degraded until ownership scrape coverage reaches 70%.`]
+        : []),
+      ...((payload.sport === 'wnba' || payload.sport === 'mlb') && adaptiveProfile && !adaptiveProfile.ready
+        ? [`Adaptive ${payload.sport.toUpperCase()} ranking is not active yet; ${adaptiveProfile.sample_size} scored lineups are below the 30-lineup evidence threshold.`]
+        : []),
+      ...(adaptiveProfile?.ready
+        ? [`Adaptive ${payload.sport.toUpperCase()} ranking applied from ${adaptiveProfile.sample_size} scored lineups for ${payload.contestType}.`]
         : []),
       ...(lineups.length ? [] : [
         'No valid lineups could be generated from the provided roster.',
