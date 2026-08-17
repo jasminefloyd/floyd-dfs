@@ -14,6 +14,12 @@ function todayUtc() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function addUtcDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
 async function invoke(url: string, key: string, functionName: string, body: Record<string, unknown>) {
   const response = await fetch(`${url.replace(/\/$/, '')}/functions/v1/${functionName}`, {
     method: 'POST',
@@ -48,14 +54,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const contestDate = typeof req.query.date === 'string' ? req.query.date : todayUtc();
-  const results = await Promise.all(SPORTS.flatMap((sport) => [
-    invoke(url, key, 'scrape-ownership', { sport, contestDate }),
-    invoke(url, key, 'scrape-confirmed-lineups', { sport, game_date: contestDate }),
-  ]));
+  const dates = [contestDate, addUtcDays(contestDate, 1)];
+  const results = await Promise.all(dates.flatMap((gameDate) => SPORTS.flatMap((sport) => [
+    invoke(url, key, 'scrape-ownership', { sport, contestDate: gameDate }),
+    invoke(url, key, 'scrape-confirmed-lineups', { sport, game_date: gameDate }),
+  ])));
   const failed = results.filter((result) => !result.ok);
 
   res.status(failed.length ? 207 : 200).json({
     contestDate,
+    dates,
     generatedAt: new Date().toISOString(),
     results,
     failedCount: failed.length,

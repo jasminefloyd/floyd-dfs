@@ -50,6 +50,8 @@ function normalizeInjuryTag(value: string): InjuryTag {
 function playerNameFromBlock(block: string): string {
   const explicit = attrValue(block, 'data-player') || attrValue(block, 'data-name');
   if (explicit) return explicit;
+  const title = attrValue(block, 'title');
+  if (title) return title;
   const anchor = block.match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
   if (anchor) return stripTags(anchor[1]);
   return stripTags(block)
@@ -64,7 +66,12 @@ function battingOrderFromBlock(block: string, _index: number, sport: LineupSport
   const attr = Number(attrValue(block, 'data-batting-order') || attrValue(block, 'data-order'));
   if (Number.isFinite(attr) && attr > 0) return attr;
   const match = stripTags(block).match(/^\s*(\d+)\s*[.)\s-]/);
-  return match ? Number(match[1]) : null;
+  if (match) return Number(match[1]);
+
+  // Direct Rotowire HTML uses one .lineup__player element per confirmed
+  // batting slot and does not include a numeric attribute. Do not apply this
+  // to generic list items, which may include pitchers, status, or bench rows.
+  return /class=["'][^"']*\blineup__player\b(?!-highlight)[^"']*["']/i.test(block) ? _index + 1 : null;
 }
 
 function isStartingPitcherBlock(block: string, sport: LineupSport): boolean {
@@ -97,7 +104,8 @@ function balancedTagBlocks(html: string, predicate: (tagName: string, attributes
 }
 
 function splitTeamBlocks(html: string): string[] {
-  const dataTeamBlocks = balancedTagBlocks(html, (_tagName, attributes) => /\bdata-team=["'][^"']+["']/i.test(attributes));
+  const dataTeamBlocks = balancedTagBlocks(html, (_tagName, attributes) => /\bdata-team=["'][^"']+["']/i.test(attributes))
+    .filter((block) => /\blineup__player\b/i.test(block));
   if (dataTeamBlocks.length) return dataTeamBlocks;
 
   return balancedTagBlocks(html, (_tagName, attributes) => /class=["'][^"']*(?:lineup-card|lineup__team|lineup__list)[^"']*["']/i.test(attributes));
@@ -114,9 +122,10 @@ function playerBlocks(teamBlock: string): string[] {
   const dataPlayers = [...teamBlock.matchAll(/<([a-z0-9]+)\b[^>]*\bdata-player=["'][^"']+["'][^>]*>[\s\S]*?<\/\1>/gi)]
     .map((match) => match[0]);
   const listItems = [...teamBlock.matchAll(/<li\b[^>]*>[\s\S]*?<\/li>/gi)].map((match) => match[0]);
-  const classPlayers = [...teamBlock.matchAll(/<([a-z0-9]+)\b[^>]*class=["'][^"']*(?:lineup__player|lineup__batter|lineup-player|player-name)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi)]
+  const directPlayers = listItems.filter((block) => /class=["'][^"']*\blineup__player\b(?!-highlight)[^"']*["']/i.test(block));
+  const classPlayers = [...teamBlock.matchAll(/<([a-z0-9]+)\b[^>]*class=["'][^"']*(?:lineup__batter|lineup-player|player-name)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi)]
     .map((match) => match[0]);
-  return dataPlayers.length ? dataPlayers : listItems.length ? listItems : classPlayers;
+  return dataPlayers.length ? dataPlayers : directPlayers.length ? directPlayers : classPlayers.length ? classPlayers : listItems;
 }
 
 export function parseRotowireLineups(html: string, sport: LineupSport, gameDate: string): ConfirmedLineupRow[] {

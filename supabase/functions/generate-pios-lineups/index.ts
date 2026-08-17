@@ -361,6 +361,7 @@ const SIMULATION_LINEUP_CAP = 40;
 const DEFAULT_FIELD_LINEUP_CAP = 240;
 const MAX_FIELD_LINEUP_CAP = 360;
 const EXACT_SOLVER_DEADLINE_MS = 1_200;
+const MLB_MAX_FPTS_SOLVER_DEADLINE_MS = 5_000;
 const GENERATION_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const GENERATION_RATE_LIMIT_MAX = 12;
 const generationRateLimit = new Map<string, number[]>();
@@ -1033,7 +1034,7 @@ function generateLineups(
   // instead of the captain-based showdown path every other sport uses.
   const useClassicConstruction = contestType === 'classic' || sport === 'golf';
   const classicExact = useClassicConstruction
-    ? generateExactClassicCandidatePool(sortedPlayers, sport, rules)
+    ? generateExactClassicCandidatePool(sortedPlayers, sport, rules, lineupMode)
     : undefined;
   const candidates = contestType === 'showdown' && sport !== 'golf'
     ? generateExactShowdownLineups(sortedPlayers, rules, showdownRosterSize(sport, slate), lineupMode === 'max_fpts')
@@ -1132,9 +1133,9 @@ function dedupeLineups(lineups: DraftLineup[]): DraftLineup[] {
   });
 }
 
-function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules: LineupConstructionRules) {
+function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules: LineupConstructionRules, lineupMode: string) {
   const options: Parameters<typeof solveOptimalLineupsWithMeta>[3] = {
-    deadlineMs: EXACT_SOLVER_DEADLINE_MS,
+    deadlineMs: sport === 'mlb' && lineupMode === 'max_fpts' ? MLB_MAX_FPTS_SOLVER_DEADLINE_MS : EXACT_SOLVER_DEADLINE_MS,
     maxSharedPlayers: rules.maxSharedPlayers,
   };
   if (sport !== 'golf') {
@@ -1164,9 +1165,12 @@ function generateExactClassicCandidatePool(
   players: LineupPlayerDraft[],
   sport: string,
   rules: LineupConstructionRules,
+  lineupMode: string,
 ): ExactClassicPool {
-  const exactTarget = sport === 'mlb' && rules.contestStrategy !== 'cash' && rules.minPrimaryStack >= 3 ? 36 : 24;
-  const solverOptions = classicSolverOptions(sport, players, rules);
+  const exactTarget = lineupMode === 'max_fpts'
+    ? Math.max(1, Math.min(36, rules.entryCount * 4))
+    : sport === 'mlb' && rules.contestStrategy !== 'cash' && rules.minPrimaryStack >= 3 ? 36 : 24;
+  const solverOptions = classicSolverOptions(sport, players, rules, lineupMode);
   const result = solveOptimalLineupsWithMeta(players, sport, exactTarget, solverOptions);
   const unfilteredBest = result.lineups[0] as DraftLineup | undefined;
   const fallbackNote = sport !== 'golf' && players.some((player) => !String(player.game_id ?? '').trim())
@@ -2497,7 +2501,9 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     maxPlayerExposure: clampNumber(payload.maxPlayerExposure, 0.2, 1, defaults.maxPlayerExposure),
     maxTeamExposure: clampNumber(payload.maxTeamExposure, 0.2, 1, defaults.maxTeamExposure),
     maxGameExposure: payload.sport === 'wnba' ? clampNumber(payload.maxTeamExposure, 0.2, 1, defaults.maxTeamExposure) : 1,
-    minPrimaryStack: Math.round(clampNumber(payload.minPrimaryStack, 0, 5, defaults.minPrimaryStack)),
+    minPrimaryStack: lineupMode === 'max_fpts'
+      ? 0
+      : Math.round(clampNumber(payload.minPrimaryStack, 0, 5, defaults.minPrimaryStack)),
     diversifyLineups: payload.diversifyLineups ?? defaults.diversifyLineups,
     lateSwapMode: payload.lateSwapMode ?? defaults.lateSwapMode,
     entryCount,

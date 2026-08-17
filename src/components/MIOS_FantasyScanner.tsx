@@ -652,7 +652,7 @@ function deriveScanOptions(input: DerivedScanInput) {
     contestStrategy,
     maxPlayerExposure,
     maxTeamExposure: input.contestType === 'showdown' ? DEFAULT_SCAN_OPTIONS.maxTeamExposure : maxPlayerExposure,
-    minPrimaryStack: input.sport === 'mlb' && input.contestType === 'classic' && input.payoutShape !== 'double_up' ? 3 : DEFAULT_SCAN_OPTIONS.minPrimaryStack,
+    minPrimaryStack: input.sport === 'mlb' && input.contestType === 'classic' && input.payoutShape !== 'double_up' && lineupMode !== 'max_fpts' ? 3 : DEFAULT_SCAN_OPTIONS.minPrimaryStack,
     maxEntriesPerUser,
     ownershipWeight: ownershipWeightForContest(input.fieldSize, input.payoutShape, maxEntriesPerUser),
     correlationWeight: DEFAULT_SCAN_OPTIONS.correlationWeight,

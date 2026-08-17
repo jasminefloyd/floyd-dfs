@@ -20,6 +20,10 @@ const ROTOWIRE_URLS: Record<LineupSport, string> = {
   nfl: 'https://www.rotowire.com/football/nfl-lineups.php',
 };
 
+function rotowireUrl(sport: LineupSport, gameDate: string): string {
+  return `${ROTOWIRE_URLS[sport]}?date=${encodeURIComponent(gameDate)}`;
+}
+
 interface ScrapeRequest {
   sport?: LineupSport;
   game_date?: string;
@@ -71,33 +75,53 @@ async function callSupabaseRpc<T>(functionName: string, body: Record<string, unk
   return text ? (JSON.parse(text) as T) : null;
 }
 
-async function scrapeRotowireHtml(sport: LineupSport): Promise<{ html: string; markdown?: string }> {
+async function scrapeRotowireHtml(sport: LineupSport, gameDate: string): Promise<{ html: string; markdown?: string }> {
   const firecrawlKey = envFirecrawlKey();
-  if (!firecrawlKey) throw new Error('FIRECRAWL_API_KEY is required');
+  let firecrawlFailure = 'Firecrawl was not configured';
+  const targetUrl = rotowireUrl(sport, gameDate);
 
-  const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${firecrawlKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      url: ROTOWIRE_URLS[sport],
-      formats: ['markdown', 'html'],
-    }),
-  });
+  if (firecrawlKey) {
+    try {
+      const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${firecrawlKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: targetUrl,
+          formats: ['markdown', 'html'],
+        }),
+      });
 
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Firecrawl scrape failed: ${response.status} ${message}`);
+      if (response.ok) {
+        const payload = await response.json() as any;
+        const data = payload?.data ?? payload;
+        return {
+          html: String(data?.html ?? data?.content ?? ''),
+          markdown: data?.markdown ? String(data.markdown) : undefined,
+        };
+      }
+      firecrawlFailure = `Firecrawl scrape failed: ${response.status} ${(await response.text()).slice(0, 300)}`;
+    } catch (error) {
+      firecrawlFailure = `Firecrawl request failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
-  const payload = await response.json() as any;
-  const data = payload?.data ?? payload;
-  return {
-    html: String(data?.html ?? data?.content ?? ''),
-    markdown: data?.markdown ? String(data.markdown) : undefined,
-  };
+  // Direct Rotowire is the no-credit fallback. Its server-rendered HTML
+  // contains the same lineup-card markers consumed by parser.ts.
+  const directResponse = await fetch(targetUrl, {
+    headers: {
+      Accept: 'text/html',
+      'User-Agent': 'fantasy-ai lineup-ingestor/1.0',
+    },
+  });
+  if (!directResponse.ok) {
+    throw new Error(`${firecrawlFailure}; direct Rotowire fetch failed: ${directResponse.status}`);
+  }
+  const html = await directResponse.text();
+  if (!html.trim()) throw new Error(`${firecrawlFailure}; direct Rotowire returned empty HTML`);
+  return { html };
 }
 
 Deno.serve(async (req) => {
@@ -120,7 +144,7 @@ Deno.serve(async (req) => {
     : new Date().toISOString().slice(0, 10);
 
   try {
-    const scraped = await scrapeRotowireHtml(sport);
+    const scraped = await scrapeRotowireHtml(sport, gameDate);
     const rows = parseRotowireLineups(scraped.html, sport, gameDate);
     const warning = rows.length
       ? null
@@ -137,7 +161,7 @@ Deno.serve(async (req) => {
       upserted_count: upserted ?? 0,
       warning,
       sample: rows.slice(0, 8),
-    });
+    }, rows.length ? 200 : 502);
   } catch (error) {
     return jsonResponse({
       sport,
