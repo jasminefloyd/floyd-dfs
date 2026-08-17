@@ -137,7 +137,6 @@ Deno.serve(async (req) => {
 
   const sport = String(payload.sport ?? '').toLowerCase() as LineupSport;
   if (!ROTOWIRE_URLS[sport]) return jsonResponse({ error: 'sport must be one of nba, wnba, mlb, nfl' }, 400);
-  if (!envFirecrawlKey()) return jsonResponse({ error: 'FIRECRAWL_API_KEY is required to scrape Rotowire lineups' }, 400);
 
   const gameDate = payload.game_date && !Number.isNaN(new Date(`${payload.game_date}T00:00:00`).getTime())
     ? payload.game_date
@@ -156,7 +155,7 @@ Deno.serve(async (req) => {
     return jsonResponse({
       sport,
       game_date: gameDate,
-      source_url: ROTOWIRE_URLS[sport],
+      source_url: rotowireUrl(sport, gameDate),
       parsed_count: rows.length,
       upserted_count: upserted ?? 0,
       warning,
