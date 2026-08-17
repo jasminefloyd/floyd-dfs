@@ -50,6 +50,8 @@ function normalizeInjuryTag(value: string): InjuryTag {
 function playerNameFromBlock(block: string): string {
   const explicit = attrValue(block, 'data-player') || attrValue(block, 'data-name');
   if (explicit) return explicit;
+  const anchorTitle = block.match(/<a\b[^>]*\btitle=["']([^"']+)["'][^>]*>/i);
+  if (anchorTitle) return decodeHtml(anchorTitle[1]).trim();
   const title = attrValue(block, 'title');
   if (title) return title;
   const anchor = block.match(/<a\b[^>]*>([\s\S]*?)<\/a>/i);
@@ -128,8 +130,37 @@ function playerBlocks(teamBlock: string): string[] {
   return dataPlayers.length ? dataPlayers : directPlayers.length ? directPlayers : classPlayers.length ? classPlayers : listItems;
 }
 
+function parseWnbaGameCards(html: string, gameDate: string): ConfirmedLineupRow[] {
+  const gameBlocks = balancedTagBlocks(html, (_tagName, attributes) => /class=["'][^"']*\blineup\b[^"']*["']/i.test(attributes));
+  return gameBlocks.flatMap((gameBlock) => {
+    const teams = [...gameBlock.matchAll(/<div\b[^>]*class=["'][^"']*\blineup__abbr\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi)]
+      .map((match) => stripTags(match[1]).toUpperCase())
+      .filter(Boolean);
+    const lists = balancedTagBlocks(gameBlock, (_tagName, attributes) => /class=["'][^"']*\blineup__list\b[^"']*["']/i.test(attributes));
+    return lists.flatMap((list, index) => {
+      const team = teams[index] ?? '';
+      if (!team) return [];
+      const lineupStatus = statusFromText(stripTags(list));
+      return playerBlocks(list).slice(0, 5).flatMap((block) => {
+        const playerName = playerNameFromBlock(block);
+        if (!playerName) return [];
+        return [{
+          sport: 'wnba' as const,
+          game_date: gameDate,
+          team,
+          player_name: playerName,
+          batting_order: null,
+          lineup_status: lineupStatus,
+          injury_tag: normalizeInjuryTag(stripTags(block)),
+          is_starting_pitcher: false,
+        }];
+      });
+    });
+  });
+}
+
 export function parseRotowireLineups(html: string, sport: LineupSport, gameDate: string): ConfirmedLineupRow[] {
-  const rows = splitTeamBlocks(html).flatMap((teamBlock) => {
+  const rows = sport === 'wnba' ? parseWnbaGameCards(html, gameDate) : splitTeamBlocks(html).flatMap((teamBlock) => {
     const team = teamFromBlock(teamBlock);
     if (!team) return [];
     const lineupStatus = statusFromText(attrValue(teamBlock, 'data-lineup-status') || stripTags(teamBlock));

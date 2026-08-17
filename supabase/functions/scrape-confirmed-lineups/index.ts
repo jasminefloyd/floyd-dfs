@@ -15,7 +15,7 @@ const corsHeaders = {
 
 const ROTOWIRE_URLS: Record<LineupSport, string> = {
   nba: 'https://www.rotowire.com/basketball/nba-lineups.php',
-  wnba: 'https://www.rotowire.com/basketball/wnba-lineups.php',
+  wnba: 'https://www.rotowire.com/wnba/lineups.php',
   mlb: 'https://www.rotowire.com/baseball/daily-lineups.php',
   nfl: 'https://www.rotowire.com/football/nfl-lineups.php',
 };
