@@ -59,6 +59,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     invoke(url, key, 'scrape-ownership', { sport, contestDate: gameDate }),
     invoke(url, key, 'scrape-confirmed-lineups', { sport, game_date: gameDate }),
   ])));
+  const understand = await invoke(url, key, 'ingest-understand-events', {
+    sports: SPORTS,
+    include_market: true,
+  });
+  results.push(understand);
   const failed = results.filter((result) => !result.ok);
 
   res.status(failed.length ? 207 : 200).json({
