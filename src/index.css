@@ -45,6 +45,11 @@
   }
 }
 
+html,
+body {
+  color-scheme: light;
+}
+
 #root {
   min-height: 100svh;
   display: flex;

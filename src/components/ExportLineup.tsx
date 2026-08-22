@@ -49,7 +49,7 @@ export function ExportLineup({ lineup }: ExportLineupProps) {
           link.click();
           URL.revokeObjectURL(url);
         }}
-        className="flex-1 rounded-md bg-[#0b1f3a] py-2 font-bold text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
+        className="flex-1 rounded-xl bg-[#0b1f3a] py-2.5 font-bold text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
         CSV
       </button>

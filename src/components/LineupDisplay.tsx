@@ -119,9 +119,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {manifest?.readiness?.cautions?.length ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
           <span className="font-black">Trust note:</span> {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
         </div>
       ) : null}
@@ -131,7 +131,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
         const detailsId = `lineup-${lineup.rank}-details`;
 
         return (
-          <div key={lineup.rank} className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[var(--shadow-medium)]">
+          <div key={lineup.rank} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[var(--shadow-medium)]">
             <button
               type="button"
               id={summaryId}
@@ -141,26 +141,29 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
               className="block w-full text-left transition-colors duration-[var(--transition-fast)] hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-cyan-500"
             >
               {/* Header */}
-              <div className="border-b border-slate-200 bg-slate-50 p-3 sm:p-4">
+              <div className="bg-[#0b1f3a] p-4 text-white sm:p-5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Lineup #{lineup.rank}</p>
-                    <h3 className="mt-1 truncate text-base font-black text-[#0b1f3a] sm:text-lg">{lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
-                    <p className="mt-1 text-[12px] font-medium text-slate-500">
-                      Projection reliability: {(lineup.confidence_score * 100).toFixed(0)}%
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-cyan-300 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-[#06213d]">Lineup #{lineup.rank}</span>
+                      <span className="rounded-full border border-white/20 bg-white/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-blue-100">{lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</span>
+                    </div>
+                    <h3 className="mt-3 truncate text-xl font-black tracking-tight text-white sm:text-2xl">{lineup.win_condition || lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
+                    <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.1em] text-blue-200">
+                      {lineup.confidence_score ? `${(lineup.confidence_score * 100).toFixed(0)}% model confidence` : 'Model confidence unavailable'}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-start gap-2 text-right">
                     <div>
-                      <div className="text-2xl font-black text-[#0b1f3a] sm:text-3xl">
+                      <div className="text-3xl font-black tracking-tight text-white sm:text-4xl">
                         {lineup.projected_points.toFixed(1)} pts
                       </div>
-                      <div className="text-[12px] font-bold text-slate-500">
+                      <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-cyan-200">
                         ${(lineup.salary_used / 1000).toFixed(1)}k / $50k
                       </div>
                     </div>
                     <ChevronDown
-                      className={`mt-1 h-5 w-5 text-slate-400 transition-transform duration-[var(--transition-default)] ${
+                      className={`mt-1 h-5 w-5 text-blue-200 transition-transform duration-[var(--transition-default)] ${
                         isExpanded ? 'rotate-180' : ''
                       }`}
                       aria-hidden="true"
@@ -170,38 +173,35 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
               </div>
 
               {(lineup.simulation_ev || lineup.ceiling_score || lineup.leverage_score) ? (
-                <div className="grid grid-cols-2 gap-2 border-b border-slate-200 p-3 sm:grid-cols-4 sm:p-4">
+                <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200 sm:grid-cols-4">
                   <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
                   <Metric label="Top Decile" value={lineup.top_decile_rate !== undefined ? `${(lineup.top_decile_rate * 100).toFixed(1)}%` : lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
-                  <Metric label="Top N" value={lineup.top_n_rate !== undefined ? `${(lineup.top_n_rate * 100).toFixed(1)}%` : '—'} />
+                  <Metric label="Leverage" value={lineup.leverage_score !== undefined ? lineup.leverage_score.toFixed(2) : '—'} />
                   <Metric label="Dupes" value={lineup.expected_duplicates !== undefined ? lineup.expected_duplicates.toFixed(1) : '—'} />
                 </div>
               ) : null}
 
               {/* Narrative */}
-              <p className={`px-3 py-3 text-[13px] font-medium text-slate-600 sm:px-4 ${isExpanded ? 'border-b border-slate-200' : ''}`}>
-                {lineup.narrative}
-                {lineup.win_condition ? (
-                  <span className="mt-2 block font-bold text-[#0b1f3a]">{lineup.win_condition}</span>
-                ) : null}
+              <div className={`border-b border-slate-200 px-4 py-3.5 sm:px-5 ${isExpanded ? '' : 'border-b-0'}`}>
+                <p className="text-[13px] leading-5 text-slate-600">{lineup.narrative}</p>
               {(lineup.scenario_key || lineup.relationship_score !== undefined) ? (
-                  <span className="mt-2 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                  <span className="mt-2 block text-[10px] font-black uppercase tracking-[0.1em] text-slate-500">
                     {lineup.scenario_key ? `Scenario: ${lineup.scenario_key.replace(/_/g, ' ')}` : ''}
                     {lineup.relationship_score !== undefined ? ` • Relationship evidence: ${lineup.relationship_score.toFixed(2)}` : ''}
                   </span>
                 ) : null}
                 {lineup.evidence_summary?.length ? (
-                  <span className="mt-1 block text-[11px] text-slate-500">
+                  <span className="mt-2 block text-[11px] text-slate-500">
                     Evidence: {lineup.evidence_summary.slice(0, 3).join(' · ')}
                   </span>
                 ) : null}
-              </p>
+              </div>
               {!isExpanded ? (
-                <div className="border-t border-slate-200 px-3 py-3 sm:px-4">
+                <div className="px-4 pb-4 pt-1 sm:px-5">
                   <div className="flex flex-wrap gap-1.5">
                     {lineup.players.slice(0, 10).map((player, index) => (
-                      <span key={`${lineup.rank}-${player.id ?? player.name ?? index}`} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600">
+                      <span key={`${lineup.rank}-${player.id ?? player.name ?? index}`} className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[10px] font-bold text-slate-600">
                         {player.roster_slot ? `${player.roster_slot} ` : ''}{player.name || player.full_name}
                       </span>
                     ))}
@@ -209,7 +209,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </div>
               ) : null}
               {lineup.strategy_notes?.length ? (
-                <div className="flex flex-wrap gap-2 border-t border-slate-200 px-3 py-3 sm:px-4">
+                <div className="flex flex-wrap gap-2 border-t border-slate-200 px-4 py-3 sm:px-5">
                   {lineup.strategy_notes.slice(0, 4).map((note) => (
                     <span key={note} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600">
                       {note}
@@ -229,16 +229,16 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     const trend = player.last_5_stats?.trend ?? 'stable';
                     const trendSymbol = trend === 'up' ? '↗' : trend === 'down' ? '↘' : '→';
                     return (
-                      <div
+                    <div
                         key={idx}
-                        className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-3 rounded-md border border-slate-200 bg-slate-50 p-3 sm:flex sm:items-center"
+                        className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 sm:flex sm:items-center"
                       >
                         <div className="flex items-center gap-2 sm:contents">
                           <PlayerPortrait player={player} />
                           <TeamMark team={player.team || player.nfl_team || 'FA'} logoUrl={player.team_logo_url} />
                         </div>
                         <div className="min-w-0 self-center">
-                          <p className="line-clamp-2 break-words text-sm font-black text-[#0b1f3a] sm:text-base">
+                          <p className="line-clamp-2 break-words text-sm font-black tracking-tight text-[#0b1f3a] sm:text-base">
                             {player.roster_slot ? (
                               <span className="mr-2 rounded-sm bg-[#0b1f3a] px-1.5 py-0.5 text-[10px] font-black text-white">
                                 {player.roster_slot}
@@ -265,7 +265,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                           </div>
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Projection</p>
-                            <p className="font-black text-[#0b1f3a]">{player.contextual_projection?.toFixed(1) ?? '—'} pts</p>
+                            <p className="font-black text-emerald-700">{player.contextual_projection?.toFixed(1) ?? '—'} pts</p>
                           </div>
                           <p className="col-span-2 text-[11px] font-medium leading-4 text-slate-500 sm:max-w-[160px]">
                             {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
@@ -294,10 +294,10 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex gap-2 border-t border-slate-200 p-3 sm:p-4">
+                <div className="flex gap-2 border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
                   <button
                     onClick={() => onSaveLineup?.(lineup)}
-                    className="flex-1 rounded-md bg-[#0b1f3a] py-2 font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
+                    className="flex-1 rounded-xl bg-[#0b1f3a] py-2.5 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
                     Save Lineup
                   </button>
@@ -391,9 +391,9 @@ function TeamMark({ team, logoUrl }: { team: string; logoUrl?: string }) {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="text-sm font-black text-[#0b1f3a]">{value}</p>
+    <div className="bg-white px-3 py-2.5 sm:px-4">
+      <p className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-400">{label}</p>
+      <p className="mt-0.5 text-sm font-black text-[#0b1f3a]">{value}</p>
     </div>
   );
 }

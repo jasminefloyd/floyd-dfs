@@ -148,7 +148,7 @@ export default function ScanPage() {
             <LineupSkeleton />
           ) : lineups.length > 0 ? (
             <div className="space-y-3">
-              <div className="sticky top-0 z-10 rounded-lg border border-slate-200 bg-white/95 p-3 shadow-[var(--shadow-subtle)] backdrop-blur sm:p-4 lg:static lg:bg-white">
+              <div className="sticky top-0 z-10 rounded-2xl border border-[#16385f] bg-[#0b1f3a]/[.98] p-3.5 shadow-[var(--shadow-medium)] backdrop-blur sm:p-4 lg:static">
                 <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                   <ResultTitle manifest={manifest} />
                   <ResultSummary lineups={lineups} manifest={manifest} warnings={dataWarnings} />
@@ -211,11 +211,11 @@ export default function ScanPage() {
 function ResultTitle({ manifest }: { manifest: MIOS_FantasyManifest | null }) {
   return (
     <div className="min-w-0">
-      <p className="text-[10px] font-black uppercase tracking-wide text-cyan-700">Recommended Lineups</p>
-      <h2 className="mt-0.5 truncate text-lg font-black text-[#0b1f3a] sm:text-xl">
+      <p className="text-[10px] font-black uppercase tracking-[0.12em] text-cyan-300">Recommended Lineups</p>
+      <h2 className="mt-0.5 truncate text-lg font-black text-white sm:text-xl">
         {manifest?.slate?.slate_name ?? 'Optimizer Board'}
       </h2>
-      <p className="mt-0.5 truncate text-xs font-medium text-slate-500">
+      <p className="mt-0.5 truncate text-xs font-medium text-blue-200">
         {manifest?.contest_date ?? 'Current scan'}
         {manifest?.game_id ? ` · Game ${manifest.game_id}` : ''}
       </p>
@@ -232,7 +232,7 @@ function ResultSummary({ lineups, manifest, warnings }: { lineups: Lineup[]; man
   const noteCount = routineDataNotes(warnings).length;
 
   return (
-    <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-6 xl:min-w-[620px]">
+    <div className="grid grid-cols-3 gap-1.5 text-center sm:grid-cols-6 xl:min-w-[620px]">
       <SummaryPill label="Lineups" value={String(lineups.length)} />
       <SummaryPill label="Top EV" value={(topLineup?.simulation_ev ?? topLineup?.projected_points ?? 0).toFixed(1)} />
       <SummaryPill label="Salary" value={`$${Math.round((topLineup?.salary_used ?? 0) / 1000)}k`} />
@@ -363,9 +363,9 @@ function isRoutineDataNote(message: string): boolean {
 
 function SummaryPill({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'neutral' | 'warn' }) {
   return (
-    <div className={`rounded-md border px-2 py-2 ${tone === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-slate-50'}`}>
-      <p className={`text-[10px] font-bold uppercase tracking-wide ${tone === 'warn' ? 'text-amber-700' : 'text-slate-500'}`}>{label}</p>
-      <p className="text-sm font-black text-[#0b1f3a]">{value}</p>
+    <div className={`rounded-lg border px-2 py-2 ${tone === 'warn' ? 'border-amber-300/60 bg-amber-300/15' : 'border-white/10 bg-white/[.08]'}`}>
+      <p className={`text-[9px] font-black uppercase tracking-[0.08em] ${tone === 'warn' ? 'text-amber-200' : 'text-blue-200'}`}>{label}</p>
+      <p className="text-sm font-black text-white">{value}</p>
     </div>
   );
 }
