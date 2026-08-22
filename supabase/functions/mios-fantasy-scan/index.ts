@@ -164,6 +164,12 @@ interface MiosManifest {
     adjustments: string[];
     confidence_definition: string;
   };
+  understand_context?: {
+    captured_at: string;
+    lookback_hours: number;
+    event_count: number;
+    events: Array<Record<string, unknown>>;
+  };
   snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
@@ -4557,6 +4563,36 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
   }
 
   try {
+    let contextManifest = manifest;
+    try {
+      const lookbackHours = 72;
+      const since = new Date(Date.parse(manifest.collected_at) - lookbackHours * 60 * 60 * 1000).toISOString();
+      const events = await callSupabaseRpc<Array<Record<string, unknown>>>('fantasy_ai_get_recent_intelligence_events', {
+        p_sport: manifest.sport,
+        p_since: since,
+        p_limit: 250,
+      }, { serviceRole: true, allowMissingServiceRole: true }) ?? [];
+      contextManifest = {
+        ...manifest,
+        source_status: { ...manifest.source_status, understand_context: 'ok' },
+        understand_context: {
+          captured_at: new Date().toISOString(),
+          lookback_hours: lookbackHours,
+          event_count: events.length,
+          events,
+        },
+      };
+    } catch (error) {
+      contextManifest = {
+        ...manifest,
+        data_warnings: [
+          ...manifest.data_warnings,
+          `Understand context capture failed: ${error instanceof Error ? error.message : String(error)}`,
+        ],
+        source_status: { ...manifest.source_status, understand_context: 'unavailable' },
+      };
+    }
+
     await callSupabaseRpc('fantasy_ai_ensure_user', {
       p_user_id: auth.userId,
       p_email: auth.email,
@@ -4564,16 +4600,16 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
 
     const persistedId = await callSupabaseRpc<string>('fantasy_ai_insert_mios_manifest', {
       p_user_id: auth.userId,
-      p_sport: manifest.sport,
-      p_contest_type: manifest.contest_type,
-      p_contest_date: manifest.contest_date,
-      p_data: manifest,
+      p_sport: contextManifest.sport,
+      p_contest_type: contextManifest.contest_type,
+      p_contest_date: contextManifest.contest_date,
+      p_data: contextManifest,
     }, { serviceRole: true });
 
     if (!persistedId) throw new Error('Manifest insert did not return an id');
 
     const persistedManifest: MiosManifest = {
-      ...manifest,
+      ...contextManifest,
       manifest_id: persistedId,
       source_status: { ...manifest.source_status, manifest_persistence: 'ok' },
     };

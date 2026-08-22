@@ -225,6 +225,12 @@ export interface MIOS_FantasyManifest {
     adjustments: string[];
     confidence_definition: string;
   };
+  understand_context?: {
+    captured_at: string;
+    lookback_hours: number;
+    event_count: number;
+    events: Array<Record<string, unknown>>;
+  };
   snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
