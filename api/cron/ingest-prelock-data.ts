@@ -60,7 +60,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     invoke(url, key, 'scrape-confirmed-lineups', { sport, game_date: gameDate }),
   ])));
   const understand = await invoke(url, key, 'ingest-understand-events', {
-    sports: SPORTS,
+    sports: [...SPORTS, 'golf'],
     include_market: true,
   });
   results.push(understand);
