@@ -5,7 +5,7 @@ import { PivotSuggestions } from '../components/PivotSuggestions';
 import { InjuryReport } from '../components/InjuryReport';
 import { PlayerListSkeleton, LineupSkeleton } from '../components/Skeleton';
 import { useToast } from '../hooks/useToast';
-import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
+import type { MIOS_FantasyManifest, SourceHealth } from '../lib/MIOS_FantasyAgents';
 import type { DraftLineup } from '../lib/PIOS_FantasyGenerator';
 import { useInjuryAlerts } from '../hooks/useInjuryAlerts';
 import { invokeMiosFantasyScan } from '../lib/miosFunctionClient';
@@ -360,17 +360,27 @@ function TrustPanel({ manifest }: { manifest: MIOS_FantasyManifest | null }) {
         <summary className="cursor-pointer text-xs font-black text-slate-600">View source coverage</summary>
         <div className="mt-2 space-y-1.5">
           {sourceHealth.map(([source, health]) => (
-            <div key={source} className="flex items-center justify-between gap-2 text-[11px]">
-              <span className="truncate text-slate-600">{source.replaceAll('_', ' ')}</span>
-              <span className={health.status === 'ok' ? 'font-bold text-emerald-700' : health.status === 'partial' ? 'font-bold text-amber-700' : 'font-bold text-red-700'}>
-                {health.coverage ? `${health.coverage.percent}% · ` : ''}{health.status}{health.freshness_seconds !== null && health.freshness_seconds !== undefined ? ` · ${formatAge(health.freshness_seconds)}` : ''}
-              </span>
+            <div key={source}>
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="truncate text-slate-600">{source.replaceAll('_', ' ')}</span>
+                <span className={`font-bold ${sourceHealthStatusClass(health)}`}>
+                  {health.coverage ? `${health.coverage.percent}% · ` : ''}{health.status === 'unavailable' && health.availability ? health.availability.replaceAll('_', ' ') : health.status}{health.freshness_seconds !== null && health.freshness_seconds !== undefined ? ` · ${formatAge(health.freshness_seconds)}` : ''}
+                </span>
+              </div>
+              {health.reason ? <p className="ml-1 text-[10px] leading-4 text-slate-400">{health.reason}</p> : null}
             </div>
           ))}
         </div>
       </details>
     </section>
   );
+}
+
+function sourceHealthStatusClass(health: SourceHealth): string {
+  if (health.status === 'ok') return 'text-emerald-700';
+  if (health.status === 'partial') return 'text-amber-700';
+  if (health.availability === 'failed') return 'text-red-700';
+  return 'text-slate-500';
 }
 
 function formatAge(seconds: number): string {

@@ -28,6 +28,8 @@ interface SourceHealth {
   failure_reason?: string;
   observed_at?: string | null;
   data_class?: 'live' | 'cached' | 'modeled' | 'unknown';
+  reason?: string;
+  availability?: 'available' | 'partial' | 'no_match' | 'not_configured' | 'not_yet_available' | 'failed';
 }
 
 interface ConfidenceBreakdown {
@@ -4214,8 +4216,31 @@ function buildSourceHealth(
         },
       } : {}),
       fallback_used: false,
+      ...sourceAvailabilityMetadata(source, status, coverageValue),
     } satisfies SourceHealth];
   }));
+}
+
+function sourceAvailabilityMetadata(source: string, status: SourceStatus[string], coverage?: { matched: number; total: number }): Pick<SourceHealth, 'reason' | 'availability'> {
+  if (status === 'ok') return { availability: 'available', reason: 'Usable data was matched for this scan.' };
+  if (status === 'partial') return { availability: 'partial', reason: coverage && coverage.matched > 0 ? `Matched ${coverage.matched} of ${coverage.total} eligible records.` : 'The source returned limited usable data.' };
+  const reasons: Record<string, { availability: SourceHealth['availability']; reason: string }> = {
+    free_game_schedule: { availability: 'no_match', reason: 'The selected DraftKings slate supplied the game IDs, but no separate schedule enrichment was needed.' },
+    free_odds: { availability: 'not_configured', reason: envOddsApiKey() ? 'No odds event matched the selected slate.' : 'The Odds API key is not configured and no cached odds matched the slate.' },
+    vegas_applied: { availability: 'no_match', reason: 'No spread or total was available to apply to the selected players.' },
+    wnba_role_priors: { availability: 'not_yet_available', reason: 'No historical WNBA role-prior records matched this roster yet.' },
+    ownership_projections: { availability: 'no_match', reason: 'No ownership rows matched this contest, draft group, or player roster.' },
+    player_props: { availability: envOddsApiKey() ? 'no_match' : 'not_configured', reason: envOddsApiKey() ? 'No cached or live player props matched this slate.' : 'The Odds API key is not configured and no cached player props matched this slate.' },
+    opportunity_model: { availability: 'no_match', reason: 'No usable recent minutes/game-log data was available for the opportunity model.' },
+    projection_calibration: { availability: 'not_yet_available', reason: 'Calibration remains inactive until enough settled outcomes reach the sample threshold.' },
+    espn_last5: { availability: 'no_match', reason: 'No parsed ESPN or fallback game logs matched the enriched roster.' },
+    reddit_sentiment: { availability: 'not_configured', reason: 'No live Reddit RSS signal or cached sentiment matched the selected players.' },
+    player_news: { availability: 'no_match', reason: 'No player-specific news item matched the selected roster.' },
+    espn_news: { availability: 'no_match', reason: 'The news collector returned no matching injury or player-news records.' },
+    mlb_bullpen_context: { availability: 'no_match', reason: 'No recent MLB boxscore workload context matched the selected games.' },
+    baseball_savant_statcast: { availability: 'no_match', reason: 'No Statcast quality rows matched the selected roster.' },
+  };
+  return reasons[source] ?? { availability: 'failed', reason: 'The source did not provide usable data for this scan.' };
 }
 
 function buildReadiness(sourceStatus: SourceStatus, warnings: string[], roster: Player[], ownershipCoverage: number, sport?: string): Readiness {
@@ -4435,7 +4460,7 @@ async function orchestrateMiosFantasyScan(
   sourceStatus.draftkings_salaries = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   sourceStatus.draftkings_salary_source = effectiveSalaryRows.length ? 'ok' : 'unavailable';
   warnings.push(`DraftKings salary source: ${salarySelection.source} (${salarySelection.reason}).`);
-  sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
+  sourceStatus.free_game_schedule = slate?.game_ids?.length || slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = vegasContext.some((context) => context.over_under || context.spread) ? 'ok' : 'unavailable';
   if (sport === 'mlb') {
     warnings.push('Baseball Savant event-level Statcast parsing is enabled for MLB reasoning; if unavailable, cached or modeled inputs remain explicitly labeled.');
@@ -4641,7 +4666,7 @@ async function orchestrateMiosFantasyScan(
   }
   const recentStatsCount = statAndSentiment.filter((item) => item.stats?.games_data?.length).length;
   const nflverseStatsCount = statAndSentiment.filter((item) => item.stats?.source === 'nflverse_player_stats').length;
-  sourceStatus.espn_last5 = recentStatsCount ? 'partial' : 'unavailable';
+  sourceStatus.espn_last5 = recentStatsCount >= enrichmentRoster.length && recentStatsCount > 0 ? 'ok' : recentStatsCount ? 'partial' : 'unavailable';
   if (sport === 'nfl') {
     sourceStatus.nflverse_last5 = nflverseStatsCount === enrichmentRoster.length
       ? 'ok'
@@ -4722,7 +4747,7 @@ async function orchestrateMiosFantasyScan(
   const sourceHealth = buildSourceHealth(sourceStatus, collectedAt, {
     ownership_projections: { matched: ownershipApplied.matchedPlayers, total: playerRoster.length },
     draftkings_salaries: { matched: playerRoster.length, total: effectiveSalaryRows.length },
-    espn_last5: { matched: enrichmentRoster.length, total: playerRoster.length },
+    espn_last5: { matched: recentStatsCount, total: enrichmentRoster.length },
     ...(sport === 'nfl' ? { nflverse_last5: { matched: nflverseStatsCount, total: enrichmentRoster.length } } : {}),
   }, {
     draftkings_salaries: effectiveSalaryRows[0]?.updated_at ?? effectiveSalaryRows[0]?.imported_at,

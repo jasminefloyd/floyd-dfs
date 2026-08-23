@@ -213,6 +213,8 @@ export interface SourceHealth {
   failure_reason?: string;
   observed_at?: string | null;
   data_class?: 'live' | 'cached' | 'modeled' | 'unknown';
+  reason?: string;
+  availability?: 'available' | 'partial' | 'no_match' | 'not_configured' | 'not_yet_available' | 'failed';
 }
 
 export interface Readiness {
