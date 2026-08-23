@@ -119,7 +119,7 @@ Deno.serve(async (req) => {
     const url = envSupabaseUrl();
     const key = envServiceRole();
     if (!url || !key) throw new Error('Supabase service-role environment is required for replay.');
-    const generatorResponse = await fetch(`${url.replace(/\/$/, '')}/functions/v1/generate-pios-lineups`, {
+    const generatorResponse = await fetch(`${url.replace(/\/$/, '')}/functions/v1/fantasy-pios-lineups`, {
       method: 'POST',
       headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...replayPayload, userId: null }),

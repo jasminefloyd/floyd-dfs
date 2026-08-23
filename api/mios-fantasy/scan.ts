@@ -28,7 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
   }
 
-  const response = await fetch(`${url.replace(/\/$/, '')}/functions/v1/mios-fantasy-scan`, {
+  const response = await fetch(`${url.replace(/\/$/, '')}/functions/v1/fantasy-mios-scan`, {
     method: 'POST',
     headers: {
       apikey: anonKey,

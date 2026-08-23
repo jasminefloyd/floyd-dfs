@@ -89,6 +89,9 @@ export interface DraftLineup {
   scenario_confidence?: number;
   relationship_score?: number;
   evidence_summary?: string[];
+  failure_condition?: string;
+  salary_left_unused?: number;
+  captain_rationale?: string;
   constraint_violations: string[];
 }
 

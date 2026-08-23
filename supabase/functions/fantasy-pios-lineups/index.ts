@@ -20,6 +20,9 @@ import { buildMlbProxyDistribution } from './mlbModel.ts';
 import { sampleWnbaJointOutcomes, type WnbaJointPlayer } from './wnbaJointSimulation.ts';
 import { contestObjective, duplicateAdjustedPayout, objectiveScore, simulationUncertainty, type ContestObjective } from './contestObjective.ts';
 import { adaptiveRankComponents, type AdaptiveRankingProfile } from './adaptiveRanking.ts';
+import { explainMlbStack, type MlbDecisionFeatures } from '../_shared/mlbReasoning.ts';
+import { type WnbaDecisionFeatures, explainWnbaRole } from '../_shared/wnbaReasoning.ts';
+import { type SportDecisionFeatures, explainSportReasoning } from '../_shared/sportReasoning.ts';
 
 type InjuryStatus = 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
 
@@ -65,6 +68,7 @@ interface ManifestPlayer {
   wnba_role_prior?: { sampleSize: number; historicalMinutes: number | null; historicalMinutesStddev: number | null; replacementMinutesGain: number | null; didNotPlayProbability: number | null; cohort: string };
   role_counterfactual?: string[];
   wnba_component_projection?: { points: number; rebounds: number; assists: number; steals: number; blocks: number; turnovers: number; threes: number; fantasyPoints: number; fantasyStdDev: number; sampleSize: number; source: string; blendVersion: string };
+  wnba_decision_features?: WnbaDecisionFeatures;
   candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
@@ -95,6 +99,8 @@ interface ManifestPlayer {
   confidence_breakdown?: Record<string, number | string>;
   projection_trace?: { model_version?: string; stages?: Array<{ name: string; projection: number | null; delta: number }> };
   wnba_scenarios?: WnbaOutcomeScenario[];
+  mlb_decision_features?: MlbDecisionFeatures;
+  sport_decision_features?: SportDecisionFeatures;
 }
 
 interface LineupPlayerDraft {
@@ -135,6 +141,7 @@ interface LineupPlayerDraft {
   wnba_role_prior?: ManifestPlayer['wnba_role_prior'];
   role_counterfactual?: string[];
   wnba_component_projection?: ManifestPlayer['wnba_component_projection'];
+  wnba_decision_features?: ManifestPlayer['wnba_decision_features'];
   candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
@@ -168,6 +175,15 @@ interface LineupPlayerDraft {
   news_events?: Array<{ headline: string; source: string; published_at?: string; impact_type: string; confirmed: boolean; is_speculative: boolean }>;
   relationship_edges?: PiosRelationship[];
   wnba_scenarios?: WnbaOutcomeScenario[];
+  mlb_decision_features?: MlbDecisionFeatures;
+  sport_decision_features?: SportDecisionFeatures;
+  field_provenance?: Record<string, { source?: string; observed_at?: string | null; is_modeled?: boolean; is_fallback?: boolean }>;
+  projection_trace?: { model_version?: string; stages?: Array<{ name: string; projection: number | null; delta: number }> };
+  captain_adjusted_median?: number;
+  captain_adjusted_ceiling?: number;
+  captain_optimal_frequency?: number;
+  captain_salary_unlock?: number;
+  captain_rationale?: string;
 }
 
 interface LineupConstructionRules {
@@ -197,6 +213,11 @@ interface LineupConstructionRules {
   fieldSimulationSize: number;
   showDiagnostics: boolean;
   simulationSeed: number;
+  salaryCap: number;
+  captainMultiplier: number;
+  rosterSize?: number;
+  candidate_counts?: Record<string, number>;
+  script_catalog?: Array<{ script_key: string; probability?: number; confidence?: number; thesis?: string }>;
   nflStackMinimum: number;
   nflBringbackMinimum: number;
   adaptiveProfile?: AdaptiveRankingProfile | null;
@@ -242,6 +263,14 @@ interface DraftLineup {
   scenario_confidence?: number;
   relationship_score?: number;
   candidate_score?: number;
+  lineup_id?: string;
+  failure_condition?: string;
+  salary_left_unused?: number;
+  captain_adjusted_median?: number;
+  captain_adjusted_ceiling?: number;
+  captain_optimal_frequency?: number;
+  captain_salary_unlock?: number;
+  captain_rationale?: string;
   evidence_summary?: string[];
   constraint_violations: string[];
 }
@@ -287,6 +316,11 @@ interface PiosRequest {
   showDiagnostics?: boolean;
   userId?: string;
   historical_relationships?: Array<{ player_id: string; related_player_id: string; relationship_type?: PiosRelationship['type']; direction: PiosRelationship['direction']; correlation?: number; mean_lift?: number; sample_size?: number; source?: string; confidence?: number }>;
+  dossierVersion?: string;
+  dossier?: Record<string, unknown>;
+  modelVersion?: string;
+  readiness?: { status?: 'ready' | 'caution' | 'blocked'; eligible_for_lineups?: boolean; eligible_for_tournament?: boolean; hard_blocks?: string[]; cautions?: string[] };
+  prelockPass?: { passId?: string; changedSources?: string[]; affectedPlayerIds?: string[]; affectedScriptKeys?: string[]; supersedesLineupIds?: string[] };
 }
 
 interface DraftKingsSlate {
@@ -567,6 +601,7 @@ function persistGeneratedLineups(
 
   const generatedAt = new Date().toISOString();
   const officialLockTime = payload.slate?.start_time ?? null;
+  const portfolioSummary = buildPortfolioSummary(lineups, rules);
   const rows = lineups.map((lineup, index) => ({
     user_id: userId,
     sport: payload.sport,
@@ -580,6 +615,24 @@ function persistGeneratedLineups(
     scan_snapshot_id: payload.snapshotId ?? null,
     generation_request_id: rules.requestId,
     generated_at: generatedAt,
+    dossier_version: payload.dossierVersion ?? 'dossier-v1',
+    script_key: lineup.scenario_key ?? null,
+    model_version: `${PIOS_CODE_VERSION}+${payload.modelVersion ?? 'mios-unknown'}`,
+    portfolio_decision: {
+      selected_lineup_ids: portfolioSummary.selected_lineup_ids,
+      script_assignment: portfolioSummary.script_assignment,
+      why_selected: portfolioSummary.why_selected,
+      script_key: lineup.scenario_key ?? null,
+      failure_condition: lineup.failure_condition ?? null,
+      one_entry_recommendation: portfolioSummary.one_entry_recommendation,
+      player_exposure: portfolioSummary.player_exposure,
+      team_exposure: portfolioSummary.team_exposure,
+      script_exposure: portfolioSummary.script_exposure,
+      concentration_flags: portfolioSummary.concentration_flags,
+      similarity_estimates: portfolioSummary.similarity_estimates,
+      rejected_alternatives: portfolioSummary.rejected_alternatives,
+      evidence_summary: lineup.evidence_summary ?? [],
+    },
     max_entries_per_user: rules.maxEntriesPerUser,
     entry_count: rules.entryCount,
     expected_duplicates: lineup.expected_duplicates ?? null,
@@ -615,18 +668,46 @@ function persistGeneratedLineups(
       forceUniqueCaptains: rules.forceUniqueCaptains,
       minSalaryUsed: rules.minSalaryUsed,
       maxDuplication: rules.maxDuplication,
+      prelockPass: payload.prelockPass ?? null,
+      player_decision_profiles: payload.playerRoster.map((player) => ({
+        player_id: player.id,
+        player_name: player.name,
+        team: player.team,
+        salary: player.salary,
+        projected_points: player.projected_points,
+        p50_projection: player.p50_projection,
+        p90_projection: player.p90_projection,
+        ownership_projection: player.ownership_projection,
+        role: player.wnba_decision_features?.role ?? player.mlb_decision_features?.role ?? player.sport_decision_features?.role ?? null,
+        confidence_breakdown: player.confidence_breakdown ?? null,
+      })),
       objectiveVersion: lineup.objective_version ?? null,
       duplicateAdjustedExpectedPayout: lineup.duplicate_adjusted_expected_payout ?? null,
       simulationUncertainty: lineup.simulation_uncertainty ?? null,
       simulationIterations: rules.simulationIterations,
       fieldSimulationSize: rules.fieldSimulationSize,
       simulationSeed: rules.simulationSeed,
+      salaryCap: rules.salaryCap,
+      captainMultiplier: rules.captainMultiplier,
+      rosterSize: rules.rosterSize ?? null,
+      salarySnapshot: payload.slate ? {
+        contestId: payload.slate.contest_id,
+        updatedAt: payload.slate.updated_at ?? null,
+        salaryCount: payload.slate.salary_count ?? null,
+        salaryCap: payload.slate.salary_cap,
+      } : null,
       showDiagnostics: rules.showDiagnostics,
       weightsVersion: PIOS_WEIGHTS.weights_version,
       scoringVersion: 'dk-scoring-v1',
       relationshipVersion: 'pios-relationship-v1',
+      dossierVersion: payload.dossierVersion ?? 'dossier-v1',
+      sourceDossier: payload.dossier ?? null,
+      sourceReadiness: payload.readiness ?? null,
       scenarioKey: lineup.scenario_key ?? null,
       scenarioConfidence: lineup.scenario_confidence ?? null,
+      lineupId: lineup.lineup_id ?? null,
+      failureCondition: lineup.failure_condition ?? null,
+      salaryLeftUnused: lineup.salary_left_unused ?? Math.max(0, rules.salaryCap - lineup.salary_used),
       relationshipScore: lineup.relationship_score ?? null,
       evidenceSummary: lineup.evidence_summary ?? [],
       rankFeatures: {
@@ -667,6 +748,14 @@ function persistGeneratedLineups(
       minutes_distribution: player.minutes_distribution ?? null,
       role_counterfactual: player.role_counterfactual ?? [],
       wnba_component_projection: player.wnba_component_projection ?? null,
+      sport_decision_features: player.sport_decision_features ?? null,
+      captain_adjusted_median: player.captain_adjusted_median ?? null,
+      captain_adjusted_ceiling: player.captain_adjusted_ceiling ?? null,
+      captain_optimal_frequency: player.captain_optimal_frequency ?? null,
+      captain_salary_unlock: player.captain_salary_unlock ?? null,
+      captain_rationale: player.captain_rationale ?? null,
+      wnba_decision_features: player.wnba_decision_features ?? null,
+      wnba_scenarios: player.wnba_scenarios ?? [],
       candidate_fantasy_projection: player.candidate_fantasy_projection ?? null,
       recent_fantasy_per_minute: player.recent_fantasy_per_minute,
       minutes_trend: player.minutes_trend,
@@ -729,7 +818,8 @@ function validatePayload(payload: PiosRequest) {
   const fieldSize = Number(payload.fieldSize ?? 500);
   const maxEntriesPerUser = Number(payload.maxEntriesPerUser ?? 1);
   const minPerTeam = Number(payload.minPerTeam ?? 1);
-  const minSalaryUsed = Number(payload.minSalaryUsed ?? (payload.lineupMode === 'max_fpts' ? 0 : 49_000));
+  const importedSalaryCap = slateSalaryCap(payload.slate);
+  const minSalaryUsed = Number(payload.minSalaryUsed ?? (payload.lineupMode === 'max_fpts' ? 0 : Math.floor(importedSalaryCap * 0.98)));
   if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 20) throw new Error('Entry count must be between 1 and 20');
   if (!Number.isInteger(fieldSize) || fieldSize < 2 || fieldSize > 500_000) throw new Error('Field size must be between 2 and 500,000');
   if (!Number.isInteger(maxEntriesPerUser) || maxEntriesPerUser < 1 || maxEntriesPerUser > 150) throw new Error('Max entries per user must be between 1 and 150');
@@ -746,8 +836,8 @@ function validatePayload(payload: PiosRequest) {
   const allowsNoShowdownSalaryFloor = payload.lineupMode === 'max_fpts';
   if (payload.contestType === 'showdown' && (!Number.isFinite(minSalaryUsed)
     || minSalaryUsed < (allowsNoShowdownSalaryFloor ? 0 : 40_000)
-    || minSalaryUsed > 50_000)) {
-    throw new Error('Showdown minimum salary must be between 40,000 and 50,000');
+    || minSalaryUsed > importedSalaryCap)) {
+    throw new Error(`Showdown minimum salary must be between 40,000 and ${importedSalaryCap}`);
   }
   if (payload.maxSharedPlayers !== undefined && (!Number.isInteger(payload.maxSharedPlayers) || payload.maxSharedPlayers < 0 || payload.maxSharedPlayers > 10)) {
     throw new Error('Maximum shared players must be a whole number between 0 and 10');
@@ -756,6 +846,7 @@ function validatePayload(payload: PiosRequest) {
   if (payload.lockedPlayers !== undefined && !Array.isArray(payload.lockedPlayers)) throw new Error('lockedPlayers must be an array');
   if (payload.excludedPlayers !== undefined && !Array.isArray(payload.excludedPlayers)) throw new Error('excludedPlayers must be an array');
   if (!Array.isArray(payload.playerRoster)) throw new Error('playerRoster must be an array');
+  validateSlateTruth(payload);
   const locked = new Set((payload.lockedPlayers ?? []).map((name) => normalizePlayerName(String(name))));
   const excluded = new Set((payload.excludedPlayers ?? []).map((name) => normalizePlayerName(String(name))));
   for (const player of locked) {
@@ -765,7 +856,7 @@ function validatePayload(payload: PiosRequest) {
   const lockedRoster = [...locked].map((name) => rosterByName.get(name)).filter((player): player is ManifestPlayer => Boolean(player));
   if (lockedRoster.length !== locked.size) throw new Error('Every locked player must exist on the slate roster');
   const lockedSalary = lockedRoster.reduce((sum, player) => sum + Number(player.salary ?? 0), 0);
-  if (lockedSalary > 50_000) throw new Error('Locked players exceed the salary cap');
+  if (lockedSalary > importedSalaryCap) throw new Error('Locked players exceed the salary cap');
   if (payload.contestType === 'showdown' && minSalaryUsed > 0) {
     const rosterSize = showdownRosterSize(payload.sport, payload.slate);
     const lockedNames = new Set(lockedRoster.map((player) => normalizePlayerName(player.name ?? '')));
@@ -777,7 +868,7 @@ function validatePayload(payload: PiosRequest) {
       .slice(0, Math.max(rosterSize - lockedRoster.length, 0));
     const selectedBaseSalaries = [...lockedRoster.map((player) => Number(player.salary ?? 0)), ...remaining];
     // Golf Showdown has no captain multiplier, so there's no premium to add here.
-    const optimisticCaptainPremium = payload.sport === 'golf' ? 0 : Math.max(...selectedBaseSalaries, 0) * 0.5;
+    const optimisticCaptainPremium = payload.sport === 'golf' ? 0 : Math.max(...selectedBaseSalaries, 0) * (slateCaptainMultiplier(payload.slate) - 1);
     if (selectedBaseSalaries.reduce((sum, salary) => sum + salary, 0) + optimisticCaptainPremium < minSalaryUsed) {
       throw new Error('Minimum salary is unreachable with the locked players on this slate');
     }
@@ -787,6 +878,46 @@ function validatePayload(payload: PiosRequest) {
     if (![...locked].some((name) => captainPool.has(name))) {
       throw new Error('At least one locked player must be captain-eligible when a captain pool is set');
     }
+  }
+}
+
+function slateNumber(slate: DraftKingsSlate | undefined, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = Number(slate?.data?.[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+function slateSalaryCap(slate?: DraftKingsSlate): number {
+  const value = Number(slate?.salary_cap);
+  return Number.isFinite(value) && value > 0 ? value : 50_000;
+}
+
+function slateCaptainMultiplier(slate?: DraftKingsSlate): number {
+  return slateNumber(slate, ['captain_multiplier', 'captain_salary_multiplier', 'multiplier']) ?? 1.5;
+}
+
+function validateSlateTruth(payload: PiosRequest) {
+  const slate = payload.slate;
+  if (!slate) return;
+  if (String(slate.sport).toLowerCase() !== String(payload.sport).toLowerCase()) throw new Error('Imported slate sport does not match the lineup request.');
+  if (String(slate.contest_type).toLowerCase() !== String(payload.contestType).toLowerCase()) throw new Error('Imported slate contest type does not match the lineup request.');
+  if (payload.contestDate && slate.contest_date && slate.contest_date !== payload.contestDate) throw new Error('Imported slate contest date does not match the lineup request.');
+  if (!Number.isFinite(Number(slate.salary_cap)) || Number(slate.salary_cap) <= 0) throw new Error('Imported slate has no valid salary cap.');
+  const rosterSize = slateNumber(slate, ['roster_size', 'roster_slots']);
+  if (payload.contestType === 'showdown' && rosterSize === null) throw new Error('Imported Showdown slate is missing its verified roster size.');
+  if (payload.contestType === 'showdown' && rosterSize !== null && (rosterSize < 2 || rosterSize > 8)) throw new Error('Imported slate has an invalid Showdown roster size.');
+  const multiplier = slateNumber(slate, ['captain_multiplier', 'captain_salary_multiplier', 'multiplier']);
+  if (payload.contestType === 'showdown' && payload.sport !== 'golf' && multiplier === null) throw new Error('Imported Showdown slate is missing its verified Captain salary multiplier.');
+  if (payload.contestType === 'showdown' && payload.sport !== 'golf' && multiplier !== null && (multiplier < 1 || multiplier > 2)) throw new Error('Imported slate has an invalid Captain salary multiplier.');
+  if (payload.playerRoster.some((player) => !Number.isFinite(Number(player.salary)) || Number(player.salary) <= 0)) throw new Error('Imported slate roster contains missing or invalid DraftKings salaries.');
+  if (payload.lineupMode !== 'max_fpts' && payload.playerRoster.some((player) => player.salary_source === 'estimated')) throw new Error('Tournament lineup generation requires verified DraftKings salaries; estimated salary rows are not eligible.');
+  const contestTimestamp = Date.parse(String(slate.contest_date));
+  const updatedTimestamp = Date.parse(String(slate.updated_at ?? ''));
+  const todayTimestamp = Date.parse(new Date().toISOString().slice(0, 10));
+  if (Number.isFinite(contestTimestamp) && contestTimestamp >= todayTimestamp && Number.isFinite(updatedTimestamp) && Date.now() - updatedTimestamp > 48 * 60 * 60 * 1000) {
+    throw new Error('Imported salary table is stale for the active contest date. Refresh the DraftKings slate before generating lineups.');
   }
 }
 
@@ -904,6 +1035,8 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       wnba_role_prior: player.wnba_role_prior,
       role_counterfactual: player.role_counterfactual,
       wnba_component_projection: player.wnba_component_projection,
+      wnba_decision_features: player.wnba_decision_features,
+      sport_decision_features: player.sport_decision_features,
       candidate_fantasy_projection: player.candidate_fantasy_projection,
       usage_rate: positiveNumber(player.usage_rate),
       pace_metric: positiveNumber(player.pace_metric),
@@ -917,6 +1050,7 @@ function mapToDraftPlayers(players: ManifestPlayer[], sport: string): LineupPlay
       news_evidence: deriveNewsEvidence(player.news_score, player.news_note, player.last_5_stats?.last_updated_at, player.news_events),
       home_away: player.home_away ?? 'unknown',
       wnba_scenarios: player.wnba_scenarios,
+      mlb_decision_features: player.mlb_decision_features,
     };
   });
 }
@@ -1054,7 +1188,7 @@ function generateLineups(
   });
 
   const baseCandidates = candidates
-    .filter((lineup) => validateLineup(lineup, contestType, sport))
+    .filter((lineup) => validateLineup(lineup, contestType, sport, rules))
     .map((lineup) => enrichLineupConstruction(lineup, rules, sport));
   const strategyCandidates = baseCandidates.filter((lineup) => validateLineup(lineup, contestType, sport, rules));
   const antiCorrelationFiltered = lineupMode === 'max_fpts'
@@ -1066,6 +1200,14 @@ function generateLineups(
     anti_correlation_filtered: antiCorrelationFiltered.length,
   });
   const simulationSource = antiCorrelationFiltered.length ? antiCorrelationFiltered : strategyCandidates.length ? strategyCandidates : withRelaxedRuleNote(baseCandidates);
+  rules.candidate_counts = {
+    enumerated: candidates.length,
+    legal_after_base_constraints: baseCandidates.length,
+    legal_after_strategy_constraints: strategyCandidates.length,
+    anti_correlation_retained: antiCorrelationFiltered.length,
+    simulation_pool: Math.min(simulationSource.length, simulationLineupCap(rules, sport, contestType)),
+    pruned: Math.max(0, candidates.length - strategyCandidates.length),
+  };
   const simulationCandidates = ensureLineupInSimulationPool(
     simulationSource
     .sort((a, b) => preSimulationLineupScore(b, rules) - preSimulationLineupScore(a, rules))
@@ -1097,12 +1239,33 @@ function generateLineups(
       || lineupSignature(a).localeCompare(lineupSignature(b)))
     .map((lineup, index) => ({ ...lineup, optimizer_rank: index + 1 }));
 
-  const diversified = diversifyRankedLineups(rankedLineups, rules, lineupMode);
+  const scriptedRankedLineups = assignPortfolioScripts(rankedLineups, rules);
+  const diversified = diversifyRankedLineups(scriptedRankedLineups, rules, lineupMode);
   const finalLineups = lineupMode === 'max_fpts'
-    ? enforceExactOptimalTop(diversified, rankedLineups, exactOptimalStatus)
+    ? enforceExactOptimalTop(diversified, scriptedRankedLineups, exactOptimalStatus)
     : diversified;
 
   return finalLineups.slice(0, rules.entryCount);
+}
+
+function assignPortfolioScripts(lineups: DraftLineup[], rules: LineupConstructionRules): DraftLineup[] {
+  const catalog = [...(rules.script_catalog ?? [])].sort((a, b) => Number(b.confidence ?? 0) - Number(a.confidence ?? 0) || Number(b.probability ?? 0) - Number(a.probability ?? 0));
+  if (!catalog.length) return lineups;
+  const counts = Object.fromEntries(catalog.map((script) => [script.script_key, 0]));
+  const assigned = lineups.map((lineup, index) => {
+    const existing = catalog.find((script) => script.script_key === lineup.scenario_key);
+    const script = existing ?? catalog[index % catalog.length];
+    counts[script.script_key] = (counts[script.script_key] ?? 0) + 1;
+    return {
+      ...lineup,
+      scenario_key: script.script_key as PiosScenario['key'],
+      scenario_confidence: Number((script.confidence ?? 0.4).toFixed(3)),
+      failure_condition: `Fails if ${script.script_key.replace(/_/g, ' ')} does not occur or late news invalidates the assigned roles.`,
+      strategy_notes: [...(lineup.strategy_notes ?? []), `Script assignment: ${script.script_key}${script.thesis ? ` — ${script.thesis}` : ''}`],
+    };
+  });
+  rules.candidate_counts = { ...(rules.candidate_counts ?? {}), ...Object.fromEntries(Object.entries(counts).map(([key, count]) => [`script_${key}`, count])) };
+  return assigned;
 }
 
 interface ExactClassicPool {
@@ -1137,6 +1300,7 @@ function classicSolverOptions(sport: string, players: LineupPlayerDraft[], rules
   const options: Parameters<typeof solveOptimalLineupsWithMeta>[3] = {
     deadlineMs: sport === 'mlb' && lineupMode === 'max_fpts' ? MLB_MAX_FPTS_SOLVER_DEADLINE_MS : EXACT_SOLVER_DEADLINE_MS,
     maxSharedPlayers: rules.maxSharedPlayers,
+    salaryCap: rules.salaryCap,
   };
   if (sport !== 'golf') {
     // DraftKings Classic rules require players from at least 2 different games for every
@@ -1325,7 +1489,7 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
   const lineupsByCaptain = new Map<string, DraftLineup[]>();
   const leverageLineups: DraftLineup[] = [];
   const signatures = new Set<string>();
-  const salaryCapShowdown = 50_000;
+  const salaryCapShowdown = rules.salaryCap;
   const keepCount = exactLineupKeepCount(rules);
   const captainPool = new Set(rules.captainPool.map(normalizePlayerKey));
   const captainCandidates = selectCaptainCandidates(players, captainPool.size > 0);
@@ -1333,17 +1497,24 @@ function generateExactShowdownLineups(players: LineupPlayerDraft[], rules: Lineu
     .filter((player) => !captainPool.size || captainPool.has(normalizePlayerKey(player.name)))
     .sort((a, b) => maximizePoints
       ? adjustedProjection(b) - adjustedProjection(a) || a.player_id.localeCompare(b.player_id)
-      : captainLeverageScore(b) - captainLeverageScore(a) || a.player_id.localeCompare(b.player_id));
+      : (b.mlb_decision_features ? mlbCaptainScore(b, rules) : b.wnba_decision_features ? wnbaCaptainScore(b, rules) : b.sport_decision_features ? sportCaptainScore(b, rules) : captainLeverageScore(b))
+        - (a.mlb_decision_features ? mlbCaptainScore(a, rules) : a.wnba_decision_features ? wnbaCaptainScore(a, rules) : a.sport_decision_features ? sportCaptainScore(a, rules) : captainLeverageScore(a))
+        || a.player_id.localeCompare(b.player_id));
 
   for (const captain of captains) {
     const captainLineups: DraftLineup[] = [];
     const captainWithMultiplier: LineupPlayerDraft = {
       ...captain,
       base_salary: captain.base_salary ?? captain.salary,
-      salary: Math.floor(captain.salary * 1.5),
-      salary_multiplier: 1.5,
+      salary: Math.floor(captain.salary * rules.captainMultiplier),
+      salary_multiplier: rules.captainMultiplier,
       roster_slot: 'CPT',
-      projected_points: adjustedProjection(captain) * 1.5,
+      projected_points: adjustedProjection(captain) * rules.captainMultiplier,
+      captain_adjusted_median: adjustedProjection(captain) * rules.captainMultiplier,
+      captain_adjusted_ceiling: (captain.ceiling_projection ?? captain.p90_projection ?? adjustedProjection(captain)) * rules.captainMultiplier,
+      captain_optimal_frequency: Number(Math.min(1, Math.max(0, (captain.boom_probability ?? 0.1) * (1 - (captain.wnba_decision_features?.minutes.dnp_probability ?? captain.sport_decision_features?.availability.restriction_probability ?? 0)))).toFixed(4)),
+      captain_salary_unlock: Number(((rules.salaryCap - captain.salary * rules.captainMultiplier) / rules.salaryCap).toFixed(4)),
+      captain_rationale: `Captain-adjusted median and ceiling use the imported ${rules.captainMultiplier}x multiplier; optimal frequency is modeled from boom probability and availability certainty.`,
     };
     const remainingSalary = salaryCapShowdown - captainWithMultiplier.salary;
     const fieldCandidates = players
@@ -1431,6 +1602,42 @@ function captainLeverageScore(player: LineupPlayerDraft): number {
   return adjustedProjection(player) / Math.max(player.cpt_ownership_projection ?? player.ownership_projection ?? 0.08, 0.01);
 }
 
+function mlbCaptainScore(player: LineupPlayerDraft, rules: LineupConstructionRules): number {
+  const features = player.mlb_decision_features;
+  if (!features) return captainLeverageScore(player);
+  const ownership = player.cpt_ownership_projection ?? player.ownership_projection ?? 0.08;
+  const ceiling = player.ceiling_projection ?? player.p90_projection ?? adjustedProjection(player);
+  const ceilingPath = features.role === 'pitcher'
+    ? (features.projected_strikeouts.p90 ?? 0) * 0.35
+    : (features.home_run_probability ?? 0) * 5 + (features.rbi_probability ?? 0) * 2;
+  const salaryUnlock = (rules.salaryCap - (player.salary * rules.captainMultiplier)) / rules.salaryCap;
+  const unsupportedPenalty = features.source === 'modeled_inputs' ? 0.08 : 0;
+  return adjustedProjection(player) * rules.captainMultiplier + ceiling * rules.captainMultiplier * 0.8 + ceilingPath + salaryUnlock * 3 + (1 - ownership) * 2 - unsupportedPenalty;
+}
+
+function wnbaCaptainScore(player: LineupPlayerDraft, rules: LineupConstructionRules): number {
+  const features = player.wnba_decision_features;
+  if (!features) return captainLeverageScore(player);
+  const ownership = player.cpt_ownership_projection ?? player.ownership_projection ?? 0.08;
+  const minutes = Number(features.minutes.p90 ?? features.minutes.p50 ?? player.minutes_projection ?? 0);
+  const certainty = 1 - Number(features.minutes.dnp_probability ?? 0);
+  const replacementPenalty = features.injury_replacement.is_contingent ? 0.12 : 0;
+  const blowoutPenalty = Number(features.game_environment.blowout_risk ?? 0) * 0.35;
+  const correlationBonus = features.correlation_tags.length * 0.18;
+  return adjustedProjection(player) * rules.captainMultiplier + minutes * 0.22 + certainty * 2 + correlationBonus + (1 - ownership) * 2 - replacementPenalty - blowoutPenalty;
+}
+
+function sportCaptainScore(player: LineupPlayerDraft, rules: LineupConstructionRules): number {
+  const features = player.sport_decision_features;
+  if (!features) return captainLeverageScore(player);
+  const ownership = player.cpt_ownership_projection ?? player.ownership_projection ?? 0.08;
+  const ceiling = features.distribution.p90 ?? player.p90_projection ?? adjustedProjection(player);
+  const certainty = 1 - features.availability.restriction_probability;
+  const salaryUnlock = (rules.salaryCap - player.salary * rules.captainMultiplier) / rules.salaryCap;
+  const unsupportedPenalty = features.uncertainty.length * 0.08;
+  return adjustedProjection(player) * rules.captainMultiplier + ceiling * 0.8 + certainty * 2 + salaryUnlock * 3 + (1 - ownership) * 2 - unsupportedPenalty;
+}
+
 function showdownLeverageLineupScore(lineup: DraftLineup): number {
   const ownershipProduct = lineupOwnershipProduct(lineup);
   return ownershipProduct === undefined ? Number.NEGATIVE_INFINITY : lineup.projected_points / Math.max(ownershipProduct, 0.000001);
@@ -1513,7 +1720,7 @@ function generateClassicLineups(
 
     for (const candidate of candidateLists[slotIndex]) {
       if (usedIds.has(candidate.player_id)) continue;
-      if (salaryUsed + candidate.salary > 50_000) continue;
+      if (salaryUsed + candidate.salary > rules.salaryCap) continue;
 
       selected.push({ ...candidate, roster_slot: slots[slotIndex].slot, salary_multiplier: 1, base_salary: candidate.base_salary ?? candidate.salary });
       usedIds.add(candidate.player_id);
@@ -1786,7 +1993,7 @@ function calculateProjectedPoints(players: LineupPlayerDraft[]): number {
 
 function validateLineup(lineup: DraftLineup, contestType: string, sport?: string, rules?: LineupConstructionRules): boolean {
   const violations: string[] = [];
-  if (lineup.salary_used > 50_000) violations.push('salary cap exceeded');
+  if (lineup.salary_used > (rules?.salaryCap ?? 50_000)) violations.push('salary cap exceeded');
   if (contestType === 'showdown' && rules?.minSalaryUsed && lineup.salary_used < rules.minSalaryUsed) {
     violations.push(`showdown salary below ${rules.minSalaryUsed}`);
   }
@@ -2091,6 +2298,9 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
     stack.size ? `${stack.team} ${stack.size}-player primary stack` : '',
     stackQuality ? `${sport.toUpperCase()} correlation/rotation score ${stackQuality.toFixed(1)}` : '',
     contextEdge ? `Context edge ${contextEdge.toFixed(1)} from park/weather/news/role signals` : '',
+    sport === 'mlb' && stack.team ? explainMlbStack(stack.team, lineup.players) : '',
+    sport === 'wnba' ? lineup.players.filter((player) => player.wnba_decision_features).slice(0, 2).map((player) => explainWnbaRole(player, player.wnba_decision_features!)).join(' ') : '',
+    (sport === 'nba' || sport === 'nfl' || sport === 'golf') ? lineup.players.filter((player) => player.sport_decision_features).slice(0, 2).map((player) => explainSportReasoning(player, player.sport_decision_features! as SportDecisionFeatures)).join(' ') : '',
     // Not repeated here as a chip -- the full detail already renders as its own
     // highlighted warning (see LineupAlerts in LineupDisplay.tsx), so a summary chip
     // here would just show the same text twice.
@@ -2106,8 +2316,19 @@ function enrichLineupConstruction(lineup: DraftLineup, rules: LineupConstruction
     stack_quality_score: stackQuality,
     context_edge_score: contextEdge,
     volatility_score: volatility,
+    salary_left_unused: Math.max(0, rules.salaryCap - lineup.salary_used),
+    failure_condition: `Fails if the assigned ${lineup.scenario_key?.replace(/_/g, ' ') ?? 'primary'} script does not occur or the highest-context roles lose expected opportunity.`,
     strategy_notes: strategyNotes,
+    evidence_summary: [
+      ...(lineup.evidence_summary ?? []),
+      ...(sport === 'mlb' && stack.team ? [explainMlbStack(stack.team, lineup.players)] : []),
+      ...(sport === 'wnba' ? lineup.players.filter((player) => player.wnba_decision_features).slice(0, 2).map((player) => explainWnbaRole(player, player.wnba_decision_features!)) : []),
+      ...((sport === 'nba' || sport === 'nfl' || sport === 'golf') ? lineup.players.filter((player) => player.sport_decision_features).slice(0, 2).map((player) => explainSportReasoning(player, player.sport_decision_features! as SportDecisionFeatures)) : []),
+    ].slice(0, 8),
   };
+  if (enriched.salary_left_unused !== undefined && enriched.salary_left_unused > 0 && enriched.salary_left_unused <= 2_000) {
+    enriched.strategy_notes = [...(enriched.strategy_notes ?? []), `Intentional salary left unused: ${enriched.salary_left_unused} to reduce common construction duplication.`];
+  }
   const intelligent = applyLineupIntelligence(enriched, sport);
   return {
     ...intelligent,
@@ -2444,9 +2665,10 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
   const minPerTeam = Math.round(clampNumber(payload.minPerTeam, 1, 3, 1));
   const forceUniqueCaptains = Boolean(payload.forceUniqueCaptains ?? entryCount <= 5);
   const lineupMode = payload.lineupMode ?? defaultLineupMode(payoutShape);
+  const salaryCap = slateSalaryCap(payload.slate);
   const minSalaryUsed = lineupMode === 'max_fpts'
     ? 0
-    : Math.round(clampNumber(payload.minSalaryUsed, 40_000, 50_000, 49_000));
+    : Math.round(clampNumber(payload.minSalaryUsed, 40_000, salaryCap, Math.floor(salaryCap * 0.98)));
   const maxSharedPlayers = payload.maxSharedPlayers === undefined
     ? undefined
     : Math.round(clampNumber(payload.maxSharedPlayers, 0, 10, 10));
@@ -2455,6 +2677,9 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
   const fieldSimulationSize = Math.min(resourceBudgetedFieldSimulationSize(payload, fieldSize, entryCount), fieldSize, MAX_FIELD_LINEUP_CAP);
   const simulationSeed = normalizedSimulationSeed(payload.simulationSeed);
   const showDiagnostics = Boolean(payload.showDiagnostics ?? false);
+  const captainMultiplier = payload.sport === 'golf' ? 1 : slateCaptainMultiplier(payload.slate);
+  const rosterSize = payload.contestType === 'showdown' ? showdownRosterSize(payload.sport, payload.slate) : ROSTER_SLOTS[payload.sport]?.length;
+  const scriptCatalog = dossierScriptCatalog(payload);
   if (lineupMode === 'max_fpts') {
     return {
       contestStrategy,
@@ -2483,6 +2708,11 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
       fieldSimulationSize,
       showDiagnostics,
       simulationSeed,
+      salaryCap,
+      captainMultiplier,
+      rosterSize,
+      candidate_counts: {},
+      script_catalog: scriptCatalog,
       nflStackMinimum: 0,
       nflBringbackMinimum: 0,
     };
@@ -2524,9 +2754,38 @@ function strategyProfile(payload: PiosRequest): LineupConstructionRules {
     fieldSimulationSize,
     showDiagnostics,
     simulationSeed,
+    salaryCap,
+    captainMultiplier,
+    rosterSize,
+    candidate_counts: {},
+    script_catalog: scriptCatalog,
     nflStackMinimum: contestStrategy === 'large_field_gpp' ? 2 : 1,
     nflBringbackMinimum: contestStrategy === 'large_field_gpp' ? 1 : 0,
   };
+}
+
+function dossierScriptCatalog(payload: PiosRequest): Array<{ script_key: string; probability?: number; confidence?: number; thesis?: string }> {
+  const raw = payload.dossier?.game_scripts;
+  if (Array.isArray(raw)) {
+    const scripts = raw.map((item) => {
+      const row = item as Record<string, unknown>;
+      return {
+        script_key: String(row.script_key ?? ''),
+        probability: Number.isFinite(Number(row.probability)) ? Number(row.probability) : undefined,
+        confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : undefined,
+        thesis: typeof row.thesis === 'string' ? row.thesis : undefined,
+      };
+    }).filter((item) => item.script_key);
+    if (scripts.length) return scripts;
+  }
+  const keys: Record<string, string[]> = {
+    nba: ['nba_competitive_high_total', 'nba_favorite_control', 'nba_blowout_bench_value', 'nba_underdog_creator', 'nba_injury_replacement', 'nba_overtime_ceiling'],
+    nfl: ['nfl_shootout_stack', 'nfl_favorite_control', 'nfl_underdog_comeback', 'nfl_defensive_game', 'nfl_weather_rushing', 'nfl_injury_redistribution'],
+    golf: ['golf_calm_scoring', 'golf_difficult_cut', 'golf_windy_wave', 'golf_ball_striking', 'golf_birdie_ceiling', 'golf_placement_stability'],
+    wnba: ['wnba_competitive_high_total', 'wnba_favorite_controls', 'wnba_injury_replacement', 'wnba_blowout_minutes_loss', 'wnba_overtime_ceiling'],
+    mlb: ['mlb_pitcher_duel', 'mlb_favorite_offense', 'mlb_both_offenses', 'mlb_starter_exit_bullpen_attack', 'mlb_one_sided_blowout'],
+  };
+  return (keys[payload.sport] ?? ['base_case']).map((script_key, index) => ({ script_key, probability: 1 / Math.max(1, (keys[payload.sport] ?? ['base_case']).length), confidence: index < 3 ? 0.5 : 0.35 }));
 }
 
 function normalizedSimulationSeed(value: unknown): number {
@@ -2569,6 +2828,9 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
   const gameCountsAcrossLineups = new Map<string, number>();
   const captainCounts = new Map<string, number>();
   const remaining = [...lineups];
+  const requiredScripts = rules.entryCount > 1
+    ? [...(rules.script_catalog ?? [])].filter((script) => Number(script.confidence ?? 0) >= 0.5).slice(0, targetCount).map((script) => script.script_key)
+    : [];
 
   while (selected.length < targetCount && remaining.length) {
     remaining.sort((a, b) => portfolioMarginalScore(b, selected, rules) - portfolioMarginalScore(a, selected, rules));
@@ -2579,6 +2841,8 @@ function diversifyRankedLineups(lineups: DraftLineup[], rules: LineupConstructio
     for (let index = 0; index < remaining.length; index += 1) {
       const lineup = remaining[index];
       const nextIndex = selected.length + 1;
+      const selectedScripts = new Set(selected.map((item) => item.scenario_key));
+      if (selected.length < requiredScripts.length && (!lineup.scenario_key || !requiredScripts.includes(lineup.scenario_key) || selectedScripts.has(lineup.scenario_key))) continue;
       const maxPlayerUses = Math.max(1, Math.ceil(targetCount * rules.maxPlayerExposure));
       const maxTeamUses = Math.max(1, Math.ceil(targetCount * rules.maxTeamExposure));
       const maxGameUses = Math.max(1, Math.ceil(targetCount * rules.maxGameExposure));
@@ -2786,6 +3050,36 @@ function classifyLineup(lineup: DraftLineup): DraftLineup['lineup_type'] {
   return 'high_ev';
 }
 
+function buildPortfolioSummary(lineups: DraftLineup[], rules: LineupConstructionRules) {
+  const playerCounts = new Map<string, number>();
+  const teamCounts = new Map<string, number>();
+  const scriptCounts = new Map<string, number>();
+  for (const lineup of lineups) {
+    for (const player of lineup.players) playerCounts.set(player.name, (playerCounts.get(player.name) ?? 0) + 1);
+    for (const team of new Set(lineup.players.map((player) => String(player.team ?? '').toUpperCase()).filter(Boolean))) teamCounts.set(team, (teamCounts.get(team) ?? 0) + 1);
+    if (lineup.scenario_key) scriptCounts.set(lineup.scenario_key, (scriptCounts.get(lineup.scenario_key) ?? 0) + 1);
+  }
+  const denominator = Math.max(lineups.length, 1);
+  const overlap = Math.max(...lineups.flatMap((lineup, index) => lineups.slice(index + 1).map((other) => sharedPlayerCount(lineup, other))), 0);
+  const oneEntry = [...lineups].sort((a, b) => (b.rank_score ?? b.projected_points) - (a.rank_score ?? a.projected_points))[0];
+  const primaryScript = [...scriptCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  return {
+    selected_lineup_ids: lineups.map((lineup) => lineup.lineup_id).filter(Boolean),
+    one_entry_recommendation: oneEntry?.lineup_id ?? null,
+    script_assignment: Object.fromEntries(lineups.filter((lineup) => lineup.lineup_id).map((lineup) => [lineup.lineup_id, lineup.scenario_key ?? 'unassigned'])),
+    why_selected: Object.fromEntries(lineups.filter((lineup) => lineup.lineup_id).map((lineup) => [lineup.lineup_id, lineup.win_condition ?? 'No win condition was generated.'])),
+    player_exposure: Object.fromEntries([...playerCounts.entries()].map(([name, count]) => [name, Number((count / denominator).toFixed(3))])),
+    team_exposure: Object.fromEntries([...teamCounts.entries()].map(([team, count]) => [team, Number((count / denominator).toFixed(3))])),
+    script_exposure: Object.fromEntries([...scriptCounts.entries()].map(([script, count]) => [script, Number((count / denominator).toFixed(3))])),
+    max_shared_players: overlap,
+    similarity_estimates: { max_shared_players: overlap, average_shared_players: lineups.length > 1 ? Number((lineups.reduce((sum, lineup, index) => sum + lineups.slice(index + 1).reduce((inner, other) => inner + sharedPlayerCount(lineup, other), 0), 0) / Math.max(1, lineups.length * (lineups.length - 1) / 2)).toFixed(2)) : 0 },
+    rejected_alternatives: [],
+    average_salary_left_unused: lineups.length ? Number((lineups.reduce((sum, lineup) => sum + (lineup.salary_left_unused ?? Math.max(0, rules.salaryCap - lineup.salary_used)), 0) / lineups.length).toFixed(2)) : 0,
+    concentration_flags: portfolioCorrelationFlags(lineups, rules),
+    primary_thesis_failure: primaryScript ? `If ${primaryScript.replace(/_/g, ' ')} fails, the portfolio's concentrated exposure loses its main correlation and opportunity assumptions; review the alternative script branches.` : 'No primary thesis was assigned.',
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405);
@@ -2799,7 +3093,18 @@ Deno.serve(async (req) => {
 
   try {
     payload.requestId = crypto.randomUUID();
+    const stageTelemetry: Array<Record<string, unknown>> = [];
+    const stageStarts = new Map<string, { startedAt: string; started: number }>();
+    const beginStage = (stage: string) => stageStarts.set(stage, { startedAt: new Date().toISOString(), started: Date.now() });
+    const endStage = (stage: string, metadata: Record<string, unknown> = {}) => {
+      const started = stageStarts.get(stage);
+      if (!started) return;
+      const durationMs = Date.now() - started.started;
+      stageTelemetry.push({ stage, started_at: started.startedAt, finished_at: new Date().toISOString(), duration_ms: durationMs, ...metadata });
+      logStage(payload.requestId!, stage, { duration_ms: durationMs, ...metadata });
+    };
     logStage(payload.requestId, 'request_received');
+    beginStage('request_validation');
     payload.sport = String(payload.sport ?? '').toLowerCase();
     payload.contestType = String(payload.contestType ?? '').toLowerCase();
     payload.riskTolerance = String(payload.riskTolerance ?? 'balanced').toLowerCase();
@@ -2816,6 +3121,7 @@ Deno.serve(async (req) => {
     const requestedUserId = String(payload.userId ?? '');
     const auth = await validateFunctionAuth(req, requestedUserId);
     assertGenerationRateLimit(auth.userId, req);
+    endStage('request_validation', { authenticated: Boolean(auth.userId), player_count: payload.playerRoster.length });
     logStage(payload.requestId, 'auth_and_rate_limit_ok', {
       authenticated: Boolean(auth.userId),
       sport: payload.sport,
@@ -2823,6 +3129,16 @@ Deno.serve(async (req) => {
       lineup_mode: payload.lineupMode,
     });
 
+    const readiness = payload.readiness;
+    const tournamentRequest = payload.lineupMode !== 'safe' && payload.lineupMode !== 'max_fpts';
+    if (readiness?.status === 'blocked' && tournamentRequest) {
+      throw new Error(`Tournament generation blocked by MIOS readiness: ${(readiness.hard_blocks ?? ['Required scan inputs are unavailable.']).join(' ')}`);
+    }
+    if (readiness?.eligible_for_lineups === false) {
+      throw new Error(`Lineup generation blocked by MIOS readiness: ${(readiness.hard_blocks ?? ['The scan is not eligible for lineups.']).join(' ')}`);
+    }
+
+    beginStage('candidate_preparation');
     const historicalRelationships = payload.historical_relationships?.map((row) => ({
       player_id: row.player_id,
       related_player_id: row.related_player_id,
@@ -2869,7 +3185,9 @@ Deno.serve(async (req) => {
         throw new Error('MLB tournament generation blocked: fewer than two confirmed probable starting pitchers are available.');
       }
     }
+    endStage('candidate_preparation', { input_count: payload.playerRoster.length, output_count: draftPlayers.length, ownership_coverage: Number(ownershipCoverage.toFixed(3)) });
     const startedAt = Date.now();
+    beginStage('lineup_enumeration');
     const lineups = generateLineups(
       draftPlayers,
       payload.sport,
@@ -2879,12 +3197,14 @@ Deno.serve(async (req) => {
       payload.lineupMode,
       constructionRules,
       payload.slate,
-    );
+    ).map((lineup, index) => ({ ...lineup, lineup_id: `${payload.requestId}:${index + 1}` }));
     const intelligencePersistenceWarning = await persistPiosIntelligence(draftPlayers, payload.sport);
+    endStage('lineup_enumeration', { input_count: draftPlayers.length, output_count: lineups.length, fallback_count: intelligencePersistenceWarning ? 1 : 0 });
     logStage(payload.requestId, 'lineups_generated', {
       lineups: lineups.length,
       wall_time_ms: Date.now() - startedAt,
       ownership_coverage: Number(ownershipCoverage.toFixed(3)),
+      candidate_counts: constructionRules.candidate_counts ?? {},
     });
 
     const injuryExcludedCount = draftPlayers.filter((player) => LINEUP_EXCLUDED_INJURY_STATUSES.has(player.injury_status)).length;
@@ -2952,11 +3272,31 @@ Deno.serve(async (req) => {
       simulation_iterations: responseSimulationIterations(payload.lineupMode, constructionRules),
       field_simulation_size: constructionRules.fieldSimulationSize,
       candidate_lineup_cap: MAX_CANDIDATE_LINEUPS,
+      salary_snapshot: payload.slate ? {
+        contest_id: payload.slate.contest_id,
+        updated_at: payload.slate.updated_at ?? null,
+        salary_count: payload.slate.salary_count ?? null,
+        salary_cap: payload.slate.salary_cap,
+      } : null,
       lineup_mode: payload.lineupMode,
       construction_rules: constructionRules,
       generated_at: new Date().toISOString(),
       code_version: PIOS_CODE_VERSION,
       data_warnings: dataWarnings,
+      portfolio_summary: buildPortfolioSummary(lineups, constructionRules),
+      prelock_pass: payload.prelockPass ?? null,
+      request_id: payload.requestId,
+      dossier_version: payload.dossierVersion ?? 'dossier-v1',
+      model_version: `${PIOS_CODE_VERSION}+${payload.modelVersion ?? 'mios-unknown'}`,
+      observability: {
+        request_id: payload.requestId,
+        generated_at: new Date().toISOString(),
+        stages: stageTelemetry,
+        source_counts: { player_roster: draftPlayers.length },
+        fallbacks: dataWarnings.filter((warning) => /fallback|unavailable|heuristic/i.test(warning)).map((reason) => ({ stage: 'generation', reason })),
+        candidate_counts: { player_pool: draftPlayers.length, generated_lineups: lineups.length, candidate_cap: MAX_CANDIDATE_LINEUPS, ...(constructionRules.candidate_counts ?? {}) },
+        rejection_counts: { injury_excluded: injuryExcludedCount, no_valid_lineup: lineups.length ? 0 : 1 },
+      },
     });
   } catch (error) {
     return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);

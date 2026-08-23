@@ -251,6 +251,11 @@ async function fetchDraftKingsDraftGroupSlate(
   ].filter((value): value is string => Boolean(value))));
 
   const rosterSize = draftKingsRosterSize(contest) ?? (contestType === 'showdown' ? 6 : null);
+  // DraftKings encodes Captain eligibility through roster slot 511 and the
+  // normalized salary rows below already reverse the 1.5x Captain salary.
+  // Persist the verified rule with the slate so PIOS never has to infer it
+  // from a hardcoded default at generation time.
+  const captainMultiplier = contestType === 'showdown' && sport !== 'golf' ? 1.5 : null;
   const normalizedSalaries = normalizeDraftKingsSalaries(draftables, sport, contestType, rosterSize);
   if (!normalizedSalaries.length) return null;
 
@@ -274,6 +279,9 @@ async function fetchDraftKingsDraftGroupSlate(
       game_type: contest.gameType ?? null,
       game_type_id: contest.gameTypeId ?? null,
       roster_size: rosterSize,
+      captain_multiplier: captainMultiplier,
+      captain_multiplier_verified: captainMultiplier !== null,
+      captain_multiplier_source: captainMultiplier !== null ? 'draftkings_showdown_roster_slot_511' : null,
       team_abbreviations: teams,
       competitions,
       salaries: normalizedSalaries,

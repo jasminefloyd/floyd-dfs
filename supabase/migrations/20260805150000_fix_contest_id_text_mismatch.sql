@@ -1,6 +1,6 @@
 -- Fix contest_id type mismatch.
 --
--- generate-pios-lineups, ingest-actual-results, and scrape-ownership all pass the app's
+-- fantasy-pios-lineups, ingest-actual-results, and scrape-ownership all pass the app's
 -- slate identifier (e.g. "dk-mlb-showdown-151666", built in
 -- supabase/functions/draftkings-slates/index.ts) as contest_id. projection_results and
 -- ownership_projections declared contest_id as UUID (a leftover FK to

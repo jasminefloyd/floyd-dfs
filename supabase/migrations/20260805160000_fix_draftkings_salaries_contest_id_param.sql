@@ -1,5 +1,5 @@
 -- fantasy_ai_get_draftkings_salaries took p_contest_id as UUID, but its only caller
--- (supabase/functions/mios-fantasy-scan/index.ts collectDraftKingsSalaries) passes the
+-- (supabase/functions/fantasy-mios-scan/index.ts collectDraftKingsSalaries) passes the
 -- app's slate identifier string (e.g. "dk-mlb-showdown-151666"), not a UUID. Every call
 -- with a contestId threw "invalid input syntax for type uuid" -- silently, since the
 -- caller wraps it in a .catch() that returns an empty list. Change the param to TEXT and

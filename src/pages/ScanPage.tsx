@@ -10,6 +10,7 @@ import type { DraftLineup } from '../lib/PIOS_FantasyGenerator';
 import { useInjuryAlerts } from '../hooks/useInjuryAlerts';
 import { invokeMiosFantasyScan } from '../lib/miosFunctionClient';
 import { invokePiosLineupGeneration } from '../lib/piosFunctionClient';
+import { ReasoningPresentation } from '../components/ReasoningPresentation';
 
 type ScanPhase = 'idle' | 'fetching' | 'generating';
 
@@ -257,9 +258,66 @@ function ScanDiagnostics({
   return (
     <div className="space-y-3">
       <TrustPanel manifest={manifest} />
+      <ReasoningPresentation manifest={manifest} lineups={lineups} />
+      <ResearchDossierPanel manifest={manifest} />
       <InjuryReport manifest={manifest} />
       <PivotSuggestions lineups={lineups} manifest={manifest} />
     </div>
+  );
+}
+
+function ResearchDossierPanel({ manifest }: { manifest: MIOS_FantasyManifest | null }) {
+  const dossier = manifest?.dossier as {
+    player_hierarchy?: Record<string, string[]>;
+    game_scripts?: Array<{ script_key?: string; thesis?: string; probability?: number; confidence?: number }>;
+    source_evidence?: Array<{ source?: string; fact?: string; is_modeled?: boolean }>;
+    data_gaps?: Array<{ message?: string; required?: boolean }>;
+    what_changed?: string[];
+    contradictions?: Array<{ fact_key?: string; severity?: string; summaries?: string[] }>;
+  } | undefined;
+  if (!dossier) return null;
+  const hierarchy = dossier.player_hierarchy ?? {};
+  const tierCount = Object.values(hierarchy).reduce((sum, players) => sum + players.length, 0);
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-[var(--shadow-subtle)]" aria-label="Research dossier">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Research dossier</p>
+          <p className="mt-1 text-sm font-black text-[#0b1f3a]">{tierCount} player decisions · {dossier.source_evidence?.length ?? 0} evidence items</p>
+        </div>
+        <span className="rounded-md bg-cyan-50 px-2 py-1 text-[10px] font-black uppercase text-cyan-800">{manifest?.dossier_version ?? 'dossier'}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {Object.entries(hierarchy).filter(([, players]) => players.length > 0).map(([tier, players]) => (
+          <span key={tier} className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-700">{tier}: {players.length}</span>
+        ))}
+      </div>
+      {dossier.game_scripts?.length ? (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-black text-slate-600">Candidate slate scripts</summary>
+          <div className="mt-2 space-y-2">
+            {dossier.game_scripts.map((script) => (
+              <div key={script.script_key} className="rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600">
+                <p className="font-black text-[#0b1f3a]">{script.script_key} · {Math.round((script.probability ?? 0) * 100)}%</p>
+                <p className="mt-0.5">{script.thesis}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {dossier.what_changed?.length ? (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-black text-slate-600">What changed</summary>
+          <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-slate-600">{dossier.what_changed.map((change) => <li key={change}>{change}</li>)}</ul>
+        </details>
+      ) : null}
+      {(dossier.data_gaps?.length || dossier.contradictions?.length) ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900">
+          <p className="font-black">Research limitations</p>
+          <p className="mt-1">{dossier.data_gaps?.length ?? 0} data gaps · {dossier.contradictions?.length ?? 0} source contradictions</p>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -452,6 +510,9 @@ function toDisplayLineups(draftLineups: DraftLineup[]): Lineup[] {
     scenario_confidence: lu.scenario_confidence,
     relationship_score: lu.relationship_score,
     evidence_summary: lu.evidence_summary,
+    failure_condition: lu.failure_condition,
+    salary_left_unused: lu.salary_left_unused,
+    captain_rationale: lu.captain_rationale,
     narrative: lineupNarrative(lu, idx)
   }));
 }

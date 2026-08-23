@@ -28,7 +28,7 @@ export async function invokeMiosFantasyScan(
   const { data: sessionData } = await supabase.auth.getSession();
   const accessToken = sessionData.session?.access_token ?? supabaseAnonKey;
   const userId = sessionData.session?.user.id;
-  const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/mios-fantasy-scan`;
+  const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/fantasy-mios-scan`;
 
   const response = await fetch(endpoint, {
     method: 'POST',

@@ -95,6 +95,9 @@ export interface Lineup {
   scenario_confidence?: number;
   relationship_score?: number;
   evidence_summary?: string[];
+  failure_condition?: string;
+  salary_left_unused?: number;
+  captain_rationale?: string;
   narrative: string;
 }
 
@@ -156,7 +159,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                   <div className="flex shrink-0 items-start gap-2 text-right">
                     <div>
                       <div className="text-3xl font-black tracking-tight text-white sm:text-4xl">
-                        {lineup.projected_points.toFixed(1)} pts
+                        {lineup.projected_points.toFixed(1)} median pts
                       </div>
                       <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-cyan-200">
                         ${(lineup.salary_used / 1000).toFixed(1)}k / $50k

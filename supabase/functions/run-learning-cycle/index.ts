@@ -1,3 +1,5 @@
+import { compareCaptains, comparePlayers, comparePortfolios, compareScripts, LEARNING_MINIMUM_SAMPLE_SIZE } from '../_shared/learningAnalysis.ts';
+
 type LearningLineup = {
   id: string;
   snapshot_id?: string | null;
@@ -156,10 +158,11 @@ function aggregateRules(diagnostics: Diagnostic[]): Rule[] {
       const direction = avgRatio < 0.95 ? 'overestimates' : avgRatio > 1.05 ? 'underestimates' : 'is directionally calibrated for';
       rules.push({
         rule_key: `projection_bias:${mode}`, sport, rule_type: 'projection',
-        status: rows.length >= 10 && Math.abs(avgRatio - 1) >= 0.05 ? 'active' : 'candidate',
+        status: 'candidate',
         rule_statement: `${sport.toUpperCase()} ${mode} projections ${direction} actual fantasy output by ${(Math.abs(avgRatio - 1) * 100).toFixed(1)}% on average.`,
         recommended_action: Math.abs(avgRatio - 1) >= 0.05 ? `Apply a provisional ${(avgRatio).toFixed(3)} calibration multiplier to this mode; re-evaluate after more settled slates.` : 'Keep the current projection weight while collecting more settled outcomes.',
         evidence_count: rows.length, support_score: Math.max(-1, Math.min(1, avgRatio - 1)), confidence_score: confidence,
+        minimum_sample_size: LEARNING_MINIMUM_SAMPLE_SIZE, promotion_status: 'shadow_only',
         first_observed_at: new Date().toISOString(), last_observed_at: new Date().toISOString(),
         evidence: { average_projection_ratio: avgRatio, projection_samples: ratios.length, overestimate_count: errors },
       });
@@ -167,10 +170,11 @@ function aggregateRules(diagnostics: Diagnostic[]): Rule[] {
     if (avgOptimal !== null) {
       rules.push({
         rule_key: `strategy_performance:${mode}`, sport, rule_type: 'strategy',
-        status: rows.length >= 10 && avgOptimal >= 0.82 ? 'active' : 'candidate',
+        status: 'candidate',
         rule_statement: `${sport.toUpperCase()} ${mode} lineups reached ${(avgOptimal * 100).toFixed(1)}% of the actual optimal score on average.`,
         recommended_action: avgOptimal >= 0.82 ? 'Retain this strategy as a qualified baseline while monitoring contest-specific results.' : 'Do not promote this strategy; increase review of player selection and correlation assumptions.',
         evidence_count: rows.length, support_score: Math.max(-1, Math.min(1, avgOptimal - 0.75)), confidence_score: confidence,
+        minimum_sample_size: LEARNING_MINIMUM_SAMPLE_SIZE, promotion_status: 'shadow_only',
         first_observed_at: new Date().toISOString(), last_observed_at: new Date().toISOString(),
         evidence: { average_pct_of_optimal: avgOptimal, samples: optimal.length },
       });
@@ -195,6 +199,16 @@ function reportPayload(kind: 'daily' | 'weekly', start: string, end: string, lin
     learnings: rules.filter((rule) => rule.status === 'active' || Number(rule.evidence_count) >= 3).map((rule) => ({ statement: rule.rule_statement, action: rule.recommended_action, confidence: rule.confidence_score, evidence_count: rule.evidence_count })),
     by_day: [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, rows]) => ({ date, evaluated: rows.length, strong: rows.filter((row) => row.outcome_class === 'strong').length, misses: rows.filter((row) => row.outcome_class === 'miss').length, cashed: rows.filter((row) => row.cash_result === 'cashed').length, notable_reasons: [...new Set(rows.flatMap((row) => row.failure_reasons as string[]))] })),
     source_coverage: { snapshots_with_understand_context: summary.news_context_snapshots, total_snapshots: lineups.filter((lineup) => lineup.snapshot_id).length },
+    player_comparisons: comparePlayers(lineups),
+    captain_comparisons: compareCaptains(lineups),
+    portfolio_comparisons: comparePortfolios(lineups),
+    script_comparisons: compareScripts(lineups),
+    ownership_leverage_comparisons: comparePlayers(lineups).filter((row) => row.average_ownership_error !== null).map((row) => ({ player_key: row.player_key, projected_vs_actual_ownership_error: row.average_ownership_error, payout_linkage: 'Evaluate alongside lineup payout and finish rank.' })),
+    reasoning_changes: lineups.flatMap((lineup) => {
+      const dossier = lineup.snapshot_manifest?.dossier as { what_changed?: string[]; prelock_pass?: { what_changed?: string[] } } | undefined;
+      return [...(dossier?.what_changed ?? []), ...(dossier?.prelock_pass?.what_changed ?? [])];
+    }).filter((change, index, all) => all.indexOf(change) === index).slice(0, 50),
+    promotion_policy: { minimum_sample_size: LEARNING_MINIMUM_SAMPLE_SIZE, active_rules_require_shadow_evaluation: true, human_approval_required: true },
   };
 }
 

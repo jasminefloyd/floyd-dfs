@@ -56,7 +56,7 @@ export async function invokePiosLineupGeneration(
   const { data: sessionData } = await supabase.auth.getSession();
   const accessToken = sessionData.session?.access_token ?? supabaseAnonKey;
   const userId = sessionData.session?.user.id;
-  const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/generate-pios-lineups`;
+  const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/fantasy-pios-lineups`;
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -69,6 +69,11 @@ export async function invokePiosLineupGeneration(
     body: JSON.stringify({
       manifestId: params.manifest.manifest_id,
       snapshotId: params.manifest.snapshot_id,
+      requestId: params.manifest.request_id,
+      dossierVersion: params.manifest.dossier_version,
+      dossier: params.manifest.dossier,
+      modelVersion: params.manifest.model_version,
+      readiness: params.manifest.readiness,
       sport: params.sport,
       contestType: params.contestType,
       contestDate: params.manifest.contest_date,
@@ -117,6 +122,9 @@ export async function invokePiosLineupGeneration(
         wnba_role_prior: player.wnba_role_prior,
         role_counterfactual: player.role_counterfactual,
         wnba_component_projection: player.wnba_component_projection,
+        wnba_decision_features: player.wnba_decision_features,
+        wnba_scenarios: player.wnba_scenarios,
+        sport_decision_features: player.sport_decision_features,
         candidate_fantasy_projection: player.candidate_fantasy_projection,
         usage_rate: player.usage_rate,
         pace_metric: player.pace_metric,
@@ -126,6 +134,7 @@ export async function invokePiosLineupGeneration(
         news_events: player.news_events,
         confidence_breakdown: player.confidence_breakdown,
         projection_trace: player.projection_trace,
+        mlb_decision_features: player.mlb_decision_features,
         field_provenance: player.field_provenance,
         last_5_stats: player.last_5_stats
           ? {

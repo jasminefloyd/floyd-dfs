@@ -53,7 +53,7 @@ Deno.serve(async (req) => {
         const accrued = startedByName.get(name(draft));
         return accrued === undefined ? player : { ...draft, projected_points: accrued, contextual_projection: accrued };
       });
-      const generator = await post(url, key, '/functions/v1/generate-pios-lineups', {
+      const generator = await post(url, key, '/functions/v1/fantasy-pios-lineups', {
         sport: 'wnba', contestType: body.contestType, contestDate: body.contestDate, contestId: body.contestId, snapshotId: body.snapshotId,
         slate: body.slate, playerRoster: remainingRoster, userId: body.userId ?? null,
         excludedPlayers, lockedPlayers, lateSwapMode: true, entryCount: body.originalLineups.length,

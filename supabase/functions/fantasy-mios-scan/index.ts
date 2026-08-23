@@ -4,9 +4,15 @@ import { mapWithConcurrency } from './enrichment.ts';
 import { computeOpportunityProjection } from './opportunity.ts';
 import { isManifestCacheFresh } from '../_shared/cachePolicy.ts';
 import { parseNflverseWeeklyStats } from './nflverse.ts';
-import type { WnbaMinutesDistribution } from './wnbaModel.ts';
+import { deriveWnbaMinutesDistribution, type WnbaMinutesDistribution } from './wnbaModel.ts';
 import type { WnbaRolePrior } from './wnbaModel.ts';
 import { deriveWnbaComponentProjection, type WnbaComponentProjection } from './wnbaProduction.ts';
+import type { Phase0Observability, SlateResearchDossier, StageTelemetry } from '../_shared/decisionContracts.ts';
+import { PHASE0_DOSSIER_VERSION } from '../_shared/decisionContracts.ts';
+import { buildDataGaps, buildGenericScripts, buildMatchupEdges, buildPrelockChecklist, buildPlayerHierarchy, buildSlateRisks, corroborationGaps, detectContradictions, enrichGameScripts, evidenceForSourceHealth, sourcePolicy, summarizeChanges } from '../_shared/researchDossier.ts';
+import { buildMlbDecisionFeatures, buildMlbGameScripts, type MlbDecisionFeatures } from '../_shared/mlbReasoning.ts';
+import { buildWnbaDecisionFeatures, buildWnbaGameScripts, type WnbaDecisionFeatures, type WnbaReasoningPlayer } from '../_shared/wnbaReasoning.ts';
+import { buildSportDecisionFeatures, buildSportGameScripts, type SportDecisionFeatures } from '../_shared/sportReasoning.ts';
 
 type SourceStatus = Record<string, 'ok' | 'partial' | 'unavailable'>;
 type ReadinessStatus = 'ready' | 'caution' | 'blocked';
@@ -107,6 +113,9 @@ interface Player {
   wnba_role_prior?: WnbaRolePrior;
   role_counterfactual?: string[];
   wnba_component_projection?: WnbaComponentProjection;
+  wnba_decision_features?: WnbaDecisionFeatures;
+  wnba_scenarios?: Array<{ state: 'active' | 'limited' | 'inactive'; probability: number; minutes_multiplier?: number; production_multiplier?: number; evidence?: string }>;
+  sport_decision_features?: SportDecisionFeatures;
   candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
@@ -137,6 +146,7 @@ interface Player {
   field_provenance?: Record<string, FieldProvenance>;
   confidence_breakdown?: ConfidenceBreakdown;
   projection_trace?: ProjectionTrace;
+  mlb_decision_features?: MlbDecisionFeatures;
 }
 
 interface MiosManifest {
@@ -173,6 +183,10 @@ interface MiosManifest {
   snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
+  request_id?: string;
+  dossier_version?: string;
+  dossier?: SlateResearchDossier;
+  observability?: Phase0Observability;
 }
 
 interface ScanRequest {
@@ -378,6 +392,14 @@ interface MlbGameContext {
   run_factor: number;
   weather_note?: string;
   lineup_note?: string;
+  bullpen_context?: { available: boolean; freshness_seconds?: number | null; note: string; recent_workload?: Record<string, number> };
+}
+
+interface MlbBullpenContext {
+  team: string;
+  recent_workload: { pitches: number; innings: number; relievers_used: number; days_covered: number };
+  observed_at: string;
+  source: string;
 }
 
 interface StatcastQuality {
@@ -2104,6 +2126,7 @@ async function collectMlbFreeGameContext(contestDate: string, slate?: DraftKings
         weather_factor: weather.factor,
         run_factor: runFactor,
         weather_note: weather.note,
+        bullpen_context: { available: false, freshness_seconds: null, note: 'No verified bullpen workload or injured-reliever feed was available to this scan.' },
         lineup_note: lineupContext?.lineup_note,
       };
     }));
@@ -2111,6 +2134,63 @@ async function collectMlbFreeGameContext(contestDate: string, slate?: DraftKings
     console.error('MLB free game context error:', error);
     return [];
   }
+}
+
+function isoDateOffset(date: string, offsetDays: number): string {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + offsetDays);
+  return value.toISOString().slice(0, 10);
+}
+
+async function collectMlbBullpenContext(contestDate: string, contexts: MlbGameContext[]): Promise<Map<string, MlbBullpenContext>> {
+  const teams = new Set(contexts.flatMap((context) => [context.home_team, context.away_team]).filter(Boolean));
+  if (!teams.size) return new Map();
+  const games: Array<{ gamePk?: number; gameDate?: string; teams?: { home?: { team?: { abbreviation?: string } }; away?: { team?: { abbreviation?: string } } } }> = [];
+  for (let offset = -3; offset < 0; offset += 1) {
+    try {
+      const response = await limitedFetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${isoDateOffset(contestDate, offset)}&hydrate=team`, 'mlb-bullpen-schedule', { timeoutMs: 8_000, retries: 1, dedupeMs: 100 });
+      if (!response.ok) continue;
+      const payload = await response.json() as { dates?: Array<{ games?: typeof games }> };
+      games.push(...(payload.dates ?? []).flatMap((date) => date.games ?? []));
+    } catch {
+      // Bullpen context is optional; readiness exposes the gap when unavailable.
+    }
+  }
+  const relevantGames = games.filter((game) => teams.has(game.teams?.home?.team?.abbreviation ?? '') || teams.has(game.teams?.away?.team?.abbreviation ?? ''));
+  const workload = new Map<string, { pitches: number; innings: number; relievers: Set<string>; days: Set<string> }>();
+  await Promise.all(relevantGames.slice(0, 18).map(async (game) => {
+    if (!game.gamePk) return;
+    try {
+      const response = await limitedFetch(`https://statsapi.mlb.com/api/v1/game/${game.gamePk}/feed/live`, 'mlb-bullpen-boxscore', { timeoutMs: 8_000, retries: 1, dedupeMs: 100 });
+      if (!response.ok) return;
+      const payload = await response.json() as { liveData?: { boxscore?: { teams?: Record<string, { team?: { abbreviation?: string }; pitchers?: number[]; players?: Record<string, { stats?: { pitching?: { pitchesThrown?: number; inningsPitched?: string } } }> }> } } };
+      for (const side of Object.values(payload.liveData?.boxscore?.teams ?? {})) {
+        const team = side.team?.abbreviation;
+        if (!team || !teams.has(team)) continue;
+        const bucket = workload.get(team) ?? { pitches: 0, innings: 0, relievers: new Set<string>(), days: new Set<string>() };
+        for (const playerId of side.pitchers ?? []) {
+          const stats = side.players?.[`ID${playerId}`]?.stats?.pitching;
+          if (!stats) continue;
+          const pitches = Number(stats.pitchesThrown ?? 0);
+          bucket.pitches += pitches;
+          const innings = Number(String(stats.inningsPitched ?? '0').replace(/\.1$/, '.333').replace(/\.2$/, '.667'));
+          bucket.innings += Number.isFinite(innings) ? innings : 0;
+          if (pitches > 0) bucket.relievers.add(String(playerId));
+        }
+        if (game.gameDate) bucket.days.add(game.gameDate.slice(0, 10));
+        workload.set(team, bucket);
+      }
+    } catch {
+      // Keep partial workload coverage; one failed boxscore must not block the slate.
+    }
+  }));
+  const observedAt = new Date().toISOString();
+  return new Map([...workload.entries()].map(([team, bucket]) => [team, {
+    team,
+    recent_workload: { pitches: bucket.pitches, innings: Number(bucket.innings.toFixed(2)), relievers_used: bucket.relievers.size, days_covered: bucket.days.size },
+    observed_at: observedAt,
+    source: 'mlb_statsapi_recent_boxscores',
+  }]));
 }
 
 function mlbContextByTeam(contexts: MlbGameContext[]): Map<string, MlbGameContext> {
@@ -2598,6 +2678,32 @@ function applyStatcastQuality(players: Player[], qualityByKey: Map<string, Statc
         ...player.last_5_stats,
         confidence: Math.min(Math.max((player.last_5_stats.confidence ?? 0.6) + Math.min(Math.abs(quality.quality_score), 0.04), 0.2), 0.95),
       } : player.last_5_stats,
+    };
+  });
+}
+
+function applyMlbReasoningFeatures(players: Player[], qualityByKey: Map<string, StatcastQuality>): Player[] {
+  return players.map((player) => {
+    const quality = qualityByKey.get(normalizeName(player.name)) ?? qualityByKey.get(player.id);
+    const features = buildMlbDecisionFeatures({
+      position: player.position,
+      batting_order: player.batting_order,
+      own_probable_starter: player.own_probable_starter,
+      confirmed_starter: player.confirmed_starter,
+      opposing_probable_pitcher_name: player.opposing_probable_pitcher_name,
+      last5Games: player.last_5_stats?.games?.map((game) => game as unknown as Record<string, unknown>),
+      statcastQuality: quality,
+    });
+    const matchupAdjustment = features.matchup_edge == null ? 1 : 1 + features.matchup_edge * (features.role === 'pitcher' ? 0.035 : 0.055);
+    const projected = typeof player.projected_points === 'number'
+      ? Number(Math.max(0, player.projected_points * matchupAdjustment).toFixed(3))
+      : player.projected_points;
+    return {
+      ...player,
+      projected_points: projected,
+      candidate_fantasy_projection: projected,
+      context_score: features.matchup_edge ?? player.context_score,
+      mlb_decision_features: features,
     };
   });
 }
@@ -3581,6 +3687,55 @@ function projectedPointsForPriority(player: Player): number {
   return player.projected_points ?? player.last_5_stats?.avg_fantasy_pts ?? 0;
 }
 
+function applyWnbaReasoningFeatures(players: Player[]): Player[] {
+  const unavailableByTeam = new Map<string, string[]>();
+  for (const player of players) {
+    if (['out', 'doubtful'].includes(String(player.injury_status))) {
+      const team = normalizeTeamAbbr(player.team, 'wnba');
+      unavailableByTeam.set(team, [...(unavailableByTeam.get(team) ?? []), player.name]);
+    }
+  }
+  return players.map((player) => {
+    const team = normalizeTeamAbbr(player.team, 'wnba');
+    const unavailable = unavailableByTeam.get(team) ?? [];
+    const hasReplacementPath = unavailable.length > 0 && !['out', 'doubtful'].includes(String(player.injury_status))
+      && (player.confirmed_starter === true || (player.depth_chart_order ?? 99) <= 8 || (player.wnba_role_prior?.cohort === 'elevated'));
+    const roleCounterfactual = hasReplacementPath ? unavailable.map((name) => `replaces ${name}`) : (player.role_counterfactual ?? []);
+    const reasoningInput: WnbaReasoningPlayer = { ...player, role_counterfactual: roleCounterfactual };
+    const teammates = players.filter((candidate) => normalizeTeamAbbr(candidate.team, 'wnba') === team);
+    const features = buildWnbaDecisionFeatures(reasoningInput, teammates);
+    const distribution = deriveWnbaMinutesDistribution(player.last_5_stats?.games ?? [], {
+      confirmedStarter: player.confirmed_starter,
+      injuryStatus: player.injury_status,
+      depthChartOrder: player.depth_chart_order,
+      projectedMinutes: player.minutes_projection,
+      historicalPrior: player.wnba_role_prior,
+      spread: player.spread,
+    });
+    const status = String(player.injury_status);
+    const scenarios = status === 'out' || status === 'doubtful'
+      ? [{ state: 'inactive' as const, probability: 1, minutes_multiplier: 0, production_multiplier: 0, evidence: `status=${status}` }]
+      : status === 'questionable' || status === 'day_to_day'
+        ? [{ state: 'active' as const, probability: 0.45, evidence: `status=${status}` }, { state: 'limited' as const, probability: 0.3, minutes_multiplier: 0.62, production_multiplier: 0.8, evidence: `status=${status}` }, { state: 'inactive' as const, probability: 0.25, minutes_multiplier: 0, production_multiplier: 0, evidence: `status=${status}` }]
+        : [{ state: 'active' as const, probability: 1, evidence: 'baseline role scenario' }];
+    return {
+      ...player,
+      role_counterfactual: roleCounterfactual,
+      minutes_distribution: distribution,
+      wnba_decision_features: { ...features, minutes: { p10: distribution.p10, p50: distribution.p50, p90: distribution.p90, dnp_probability: distribution.didNotPlayProbability, standard_deviation: distribution.standardDeviation } },
+      wnba_scenarios: scenarios,
+    };
+  });
+}
+
+function applySportReasoningFeatures(players: Player[], sport: 'nba' | 'nfl' | 'golf'): Player[] {
+  return players.map((player) => {
+    const teammates = players.filter((candidate) => normalizeTeamAbbr(candidate.team, sport) === normalizeTeamAbbr(player.team, sport));
+    const features = buildSportDecisionFeatures(sport, player as unknown as Record<string, unknown>, teammates as unknown as Record<string, unknown>[]);
+    return { ...player, sport_decision_features: features };
+  });
+}
+
 const NORMAL_QUANTILES = { p10: -1.282, p25: -0.674, p75: 0.674, p90: 1.282, p95: 1.645 };
 
 function deriveOutcomeDistributions(
@@ -3985,6 +4140,8 @@ function applyTrustMetadata(
       player.minutes_projection !== undefined ? 'opportunity_model' : '',
       player.minutes_distribution ? 'wnba_minutes_distribution' : '',
       player.wnba_role_prior ? 'wnba_role_prior' : '',
+      player.wnba_decision_features ? 'wnba_reasoning_model' : '',
+      player.sport_decision_features ? `${player.sport}_reasoning_model` : '',
       player.implied_total !== undefined ? 'vegas_context' : '',
       sourceStatus.mlb_statsapi_context ? 'mlb_game_context' : '',
       sourceStatus.baseball_savant_statcast ? 'statcast_quality' : '',
@@ -4046,7 +4203,7 @@ function buildSourceHealth(
       freshness_seconds: freshnessSeconds(sourceObservedAt ?? undefined),
       data_class: status === 'unavailable'
         ? 'unknown'
-        : ['projections', 'opportunity_model', 'vegas_applied', 'outcome_distributions', 'projection_calibration'].includes(source)
+        : ['projections', 'opportunity_model', 'vegas_applied', 'outcome_distributions', 'projection_calibration', 'nba_reasoning_model', 'nfl_reasoning_model', 'golf_reasoning_model', 'wnba_reasoning_model'].includes(source)
           ? 'modeled'
           : 'live',
       ...(coverageValue ? {
@@ -4180,6 +4337,10 @@ function provenanceRows(manifest: MiosManifest) {
     }
     if (player.minutes_distribution) rows.push({ field_name: 'minutes_distribution', field_value: player.minutes_distribution, source: 'wnba_minutes_model', stage: 'minutes_distribution', is_modeled: true });
     if (player.role_counterfactual?.length) rows.push({ field_name: 'role_counterfactual', field_value: player.role_counterfactual, source: 'wnba_role_model', stage: 'injury_replacement', is_modeled: true });
+    if (player.wnba_decision_features) rows.push({ field_name: 'wnba_decision_features', field_value: player.wnba_decision_features, source: 'wnba_reasoning_model', stage: 'wnba_reasoning', is_modeled: true });
+    if (player.wnba_scenarios?.length) rows.push({ field_name: 'wnba_scenarios', field_value: player.wnba_scenarios, source: 'wnba_scenario_model', stage: 'availability_scenarios', is_modeled: true });
+    if (player.sport_decision_features) rows.push({ field_name: 'sport_decision_features', field_value: player.sport_decision_features, source: `${manifest.sport}_reasoning_model`, stage: 'sport_reasoning', is_modeled: true });
+    if (player.mlb_decision_features) rows.push({ field_name: 'mlb_decision_features', field_value: player.mlb_decision_features, source: 'mlb_reasoning_model', stage: 'mlb_reasoning', is_modeled: true });
     return rows.map((row) => ({
       player_id: player.id,
       player_name: player.name,
@@ -4208,12 +4369,34 @@ async function orchestrateMiosFantasyScan(
 
   const sourceStatus: SourceStatus = {};
   const warnings: string[] = [];
+  const requestId = crypto.randomUUID();
+  const stages: StageTelemetry[] = [];
+  const stageStarts = new Map<string, { startedAt: string; started: number }>();
+  const beginStage = (stage: string) => stageStarts.set(stage, { startedAt: new Date().toISOString(), started: Date.now() });
+  const endStage = (stage: string, metadata: Omit<StageTelemetry, 'stage' | 'started_at' | 'finished_at' | 'duration_ms'> = {}) => {
+    const started = stageStarts.get(stage);
+    if (!started) return;
+    const durationMs = Date.now() - started.started;
+    stages.push({ stage, started_at: started.startedAt, finished_at: new Date().toISOString(), duration_ms: durationMs, ...metadata });
+    console.log(JSON.stringify({ event: 'mios_scan_stage', request_id: requestId, stage, duration_ms: durationMs, ...metadata, timestamp: new Date().toISOString() }));
+  };
+  const observability: Phase0Observability = {
+    request_id: requestId,
+    generated_at: new Date().toISOString(),
+    stages,
+    source_counts: {},
+    fallbacks: [],
+    candidate_counts: {},
+    rejection_counts: {},
+  };
 
+  beginStage('source_collection');
   const [injuries, roster, salaryRows] = await Promise.all([
     collectNewsAndInjuries(sport),
     collectRoster(sport, warnings, sourceStatus),
     collectDraftKingsSalaries(sport, contestDate, contestType, contestId),
   ]);
+  endStage('source_collection', { output_count: roster.length, metadata: { injuries: injuries.length, salary_rows: salaryRows.length } });
   const liveSlateSalaryRows = slateSalaryRows(slate);
   const salarySelection = chooseSalarySource(liveSlateSalaryRows, salaryRows);
   const effectiveSalaryRows = salarySelection.rows;
@@ -4221,13 +4404,31 @@ async function orchestrateMiosFantasyScan(
     throw new Error('DraftKings salary rows are required before generating lineups. No estimated salary scan was run.');
   }
   const largeMlbSlate = sport === 'mlb' && effectiveSalaryRows.length > 40;
+  beginStage('context_collection');
   const [fallbackOddsContext, rawMlbFreeContexts, statcastQuality, confirmedLineups] = await Promise.all([
     hasFreeOddsContext(slate) ? Promise.resolve([]) : collectOddsApiContext(sport, slate),
     sport === 'mlb' ? collectMlbFreeGameContext(contestDate, slate) : Promise.resolve([]),
-    sport === 'mlb' ? collectStatcastQuality(false) : Promise.resolve(new Map<string, StatcastQuality>()),
+    sport === 'mlb' ? collectStatcastQuality(true) : Promise.resolve(new Map<string, StatcastQuality>()),
     ['nba', 'wnba', 'nfl', 'mlb'].includes(sport) ? collectConfirmedLineups(sport, contestDate) : Promise.resolve([]),
   ]);
+  endStage('context_collection', { output_count: confirmedLineups.length, metadata: { odds: fallbackOddsContext.length, mlb_games: rawMlbFreeContexts.length, confirmed_lineups: confirmedLineups.length } });
   const mlbFreeContexts = sport === 'mlb' ? mergeRotowireMlbLineups(rawMlbFreeContexts, confirmedLineups) : rawMlbFreeContexts;
+  const mlbBullpenByTeam = sport === 'mlb' ? await collectMlbBullpenContext(contestDate, mlbFreeContexts) : new Map<string, MlbBullpenContext>();
+  if (sport === 'mlb' && mlbBullpenByTeam.size) {
+    for (const context of mlbFreeContexts) {
+      const homeBullpen = mlbBullpenByTeam.get(context.home_team);
+      const awayBullpen = mlbBullpenByTeam.get(context.away_team);
+      context.bullpen_context = {
+        available: Boolean(homeBullpen || awayBullpen),
+        freshness_seconds: 0,
+        note: 'Recent MLB Stats API boxscores supplied bullpen workload context.',
+        recent_workload: Object.fromEntries([
+          homeBullpen ? [`${context.home_team}_pitches`, homeBullpen.recent_workload.pitches] : [],
+          awayBullpen ? [`${context.away_team}_pitches`, awayBullpen.recent_workload.pitches] : [],
+        ]),
+      };
+    }
+  }
   const confirmedMlbTeamCounts = sport === 'mlb' ? mlbConfirmedLineupTeamCounts(confirmedLineups, slate) : new Map<string, number>();
   const vegasContext = buildVegasContext(slate, fallbackOddsContext);
   sourceStatus.espn_news = injuries.length ? 'partial' : 'unavailable';
@@ -4237,9 +4438,10 @@ async function orchestrateMiosFantasyScan(
   sourceStatus.free_game_schedule = slate?.status === 'schedule_derived' || slate?.data?.source === 'espn_scoreboard' ? 'ok' : 'unavailable';
   sourceStatus.free_odds = vegasContext.some((context) => context.over_under || context.spread) ? 'ok' : 'unavailable';
   if (sport === 'mlb') {
-    warnings.push('Optional Baseball Savant event-level Statcast parsing was skipped to protect Edge Function compute limits; cached quality signals remain eligible.');
+    warnings.push('Baseball Savant event-level Statcast parsing is enabled for MLB reasoning; if unavailable, cached or modeled inputs remain explicitly labeled.');
     sourceStatus.mlb_statsapi_context = mlbFreeContexts.length ? 'ok' : 'unavailable';
     sourceStatus.nws_weather = mlbFreeContexts.some((context) => context.weather_note && context.weather_note !== 'roof/indoor park') ? 'partial' : 'unavailable';
+    sourceStatus.mlb_bullpen_context = mlbBullpenByTeam.size ? 'ok' : 'unavailable';
     const lineupTeamCounts = mlbFreeContexts.flatMap((context) => Object.values(context.batting_orders ?? {})
       .map((orders) => Object.keys(orders).length));
     const directLineupTeamCounts = [...confirmedMlbTeamCounts.values()];
@@ -4257,6 +4459,7 @@ async function orchestrateMiosFantasyScan(
     if (!confirmedLineups.length) warnings.push('Confirmed-lineup extraction returned zero rows; starter availability was not applied from Rotowire.');
   }
 
+  beginStage('roster_and_salary_matching');
   let playerRoster = filterRosterBySlateTeams(applyDraftKingsSalaries(dedupePlayers(roster), effectiveSalaryRows, sport), slate);
   if (slateTeamAbbreviations(slate).length && playerRoster.length === roster.length) {
     warnings.push('Selected slate included team metadata, but roster filtering did not reduce the player pool.');
@@ -4271,11 +4474,13 @@ async function orchestrateMiosFantasyScan(
     sourceStatus.wnba_role_priors = rolePriors.matched ? (rolePriors.matched === playerRoster.length ? 'ok' : 'partial') : 'unavailable';
     if (rolePriors.matched) warnings.push(`Applied settled WNBA role priors to ${rolePriors.matched} of ${playerRoster.length} slate players.`);
   }
+  endStage('roster_and_salary_matching', { input_count: roster.length, output_count: playerRoster.length, rejected_count: Math.max(0, roster.length - playerRoster.length), metadata: { salary_source: salarySelection.source } });
   const baseProjectionByPlayerId = new Map(
     playerRoster.map((player) => [player.id, typeof player.projected_points === 'number' ? player.projected_points : null]),
   );
   const projectionStagesByPlayerId = new Map<string, Map<string, number | null>>();
   recordProjectionStage(projectionStagesByPlayerId, 'salary_matched_base', playerRoster);
+  beginStage('ownership_collection');
   const ownershipRows = await collectOwnershipProjections(sport, contestDate, contestType, contestId, slate);
   const ownershipApplied = applyOwnershipProjections(playerRoster, ownershipRows);
   playerRoster = ownershipApplied.players;
@@ -4296,6 +4501,8 @@ async function orchestrateMiosFantasyScan(
   if (ownershipCoverage < 0.7) {
     warnings.push(`Ownership coverage is ${(ownershipCoverage * 100).toFixed(0)}%; tournament leverage and duplicate estimates will use heuristic ownership until coverage reaches 70%.`);
   }
+  endStage('ownership_collection', { input_count: playerRoster.length, output_count: ownershipApplied.matchedPlayers, fallback_count: playerRoster.length - ownershipApplied.matchedPlayers });
+  beginStage('projection_enrichment');
   const propCollection = await collectPlayerProps(sport, slate);
   if (largeMlbSlate) warnings.push('Large MLB slate used cached player props only; live prop-market fetching was skipped to protect Edge Function compute limits.');
   const propBlend = applyPropProjections(playerRoster, propCollection, sport);
@@ -4387,13 +4594,29 @@ async function orchestrateMiosFantasyScan(
   } else {
     delete sourceStatus.vegas_applied;
   }
+  if (sport === 'wnba') {
+    playerRoster = applyWnbaReasoningFeatures(playerRoster);
+    recordProjectionStage(projectionStagesByPlayerId, 'wnba_reasoning_features', playerRoster);
+    sourceStatus.wnba_reasoning_model = playerRoster.some((player) => player.wnba_decision_features) ? 'ok' : 'unavailable';
+    const scenarioCount = playerRoster.filter((player) => player.wnba_scenarios?.length).length;
+    warnings.push(`Applied WNBA minutes distributions, role contingencies, and explicit availability scenarios to ${playerRoster.filter((player) => player.minutes_distribution).length} players; ${scenarioCount} received scenario paths for simulation.`);
+  }
+  if (sport === 'nba' || sport === 'nfl' || sport === 'golf') {
+    playerRoster = applySportReasoningFeatures(playerRoster, sport);
+    recordProjectionStage(projectionStagesByPlayerId, `${sport}_reasoning_features`, playerRoster);
+    sourceStatus[`${sport}_reasoning_model`] = playerRoster.some((player) => player.sport_decision_features) ? 'ok' : 'unavailable';
+    warnings.push(`Applied ${sport.toUpperCase()} role, opportunity, environment, uncertainty, and correlation features to ${playerRoster.filter((player) => player.sport_decision_features).length} players.`);
+  }
   if (sport === 'mlb') {
     playerRoster = applyMlbFreeContext(playerRoster, mlbFreeContexts);
     playerRoster = applyMlbConfirmedLineups(playerRoster, confirmedLineups, slate);
     recordProjectionStage(projectionStagesByPlayerId, 'mlb_game_context', playerRoster);
     playerRoster = applyStatcastQuality(playerRoster, statcastQuality);
     recordProjectionStage(projectionStagesByPlayerId, 'statcast_quality', playerRoster);
+    playerRoster = applyMlbReasoningFeatures(playerRoster, statcastQuality);
+    recordProjectionStage(projectionStagesByPlayerId, 'mlb_reasoning_features', playerRoster);
     playerRoster = applyMlbConfidenceSignals(playerRoster, mlbFreeContexts, statcastQuality);
+    sourceStatus.mlb_reasoning_model = 'ok';
   }
   const dkFppgRows = effectiveSalaryRows.filter((row) => typeof row.dk_fppg === 'number' && row.dk_fppg > 0).length;
   const calibration = await getProjectionCalibration(sport);
@@ -4474,6 +4697,11 @@ async function orchestrateMiosFantasyScan(
     }
   }
 
+  endStage('projection_enrichment', {
+    input_count: playerRoster.length,
+    output_count: playerRoster.filter((player) => typeof player.projected_points === 'number').length,
+    fallback_count: warnings.filter((warning) => /fallback|unavailable|skipped|heuristic/i.test(warning)).length,
+  });
   const salaryObservedAtByPlayerId = new Map<string, string | undefined>();
   for (const row of effectiveSalaryRows) {
     const observedAt = row.updated_at ?? row.imported_at;
@@ -4504,9 +4732,123 @@ async function orchestrateMiosFantasyScan(
     ...(sport === 'nfl' && nflverseStatsCount ? {
       nflverse_last5: statAndSentiment.find((item) => item.stats?.source === 'nflverse_player_stats')?.stats?.last_updated_at,
     } : {}),
+    ...(sport === 'mlb' && mlbBullpenByTeam.size ? { mlb_bullpen_context: new Date().toISOString() } : {}),
     projection_calibration: new Date().toISOString(),
   });
   const readiness = buildReadiness(sourceStatus, warnings, playerRoster, ownershipCoverage, sport);
+  observability.source_counts = Object.fromEntries(Object.entries(sourceStatus).map(([source, status]) => [source, status === 'ok' ? playerRoster.length : status === 'partial' ? Math.ceil(playerRoster.length / 2) : 0]));
+  observability.fallbacks = warnings.filter((warning) => /fallback|unavailable|skipped|heuristic/i.test(warning)).map((reason) => ({ stage: 'scan', reason }));
+  observability.candidate_counts = { roster: playerRoster.length, salary_rows: effectiveSalaryRows.length, provenance_rows: playerRoster.length * 4 };
+  observability.rejection_counts = { salary_unmatched: Math.max(0, effectiveSalaryRows.length - playerRoster.length) };
+  const freshnessDeadline = slate?.start_time ?? new Date(Date.parse(collectedAt) + 2 * 60 * 60 * 1000).toISOString();
+  const sourceEvidence = [
+    ...evidenceForSourceHealth(sourceHealth),
+    ...playerRoster.flatMap((player) => Object.entries(player.field_provenance ?? {}).map(([field, provenance]) => ({
+      evidence_id: `${player.id}:${field}`,
+      source: provenance.source,
+      source_kind: sourcePolicy(provenance.source).kind,
+      observed_at: provenance.observed_at ?? null,
+      freshness_seconds: provenance.freshness_seconds ?? null,
+      fact: `${player.name} ${field}`,
+      normalized_fact: { fact_key: `${player.id}:${field}`, value_present: true },
+      is_modeled: provenance.is_modeled,
+      confidence: player.confidence_breakdown?.projection_reliability,
+    }))),
+  ];
+  const decisionProfiles = playerRoster.map((player) => ({
+    player_id: player.id,
+    player_name: player.name,
+    median: player.p50_projection ?? player.projected_points ?? null,
+    p75: player.p75_projection ?? null,
+    p90: player.p90_projection ?? null,
+    p95: player.p95_projection ?? null,
+    floor: player.p10_projection ?? null,
+    boom_probability: player.boom_probability ?? null,
+    bust_probability: player.bust_probability ?? null,
+    salary_efficiency: player.salary > 0 && player.projected_points != null ? player.projected_points / player.salary : null,
+    eligibility: player.position ? [player.position] : [],
+    expected_opportunity: {
+      minutes: player.minutes_projection ?? null,
+      batting_order: player.batting_order ?? null,
+      confirmed_starter: player.confirmed_starter ?? null,
+      projected_plate_appearances: player.mlb_decision_features?.projected_plate_appearances ?? null,
+      projected_innings: player.mlb_decision_features?.projected_innings ?? null,
+      projected_strikeouts_p50: player.mlb_decision_features?.projected_strikeouts.p50 ?? null,
+      early_exit_probability: player.mlb_decision_features?.early_exit_probability ?? null,
+      wnba_role: player.wnba_decision_features?.role ?? null,
+      wnba_minutes_p10: player.wnba_decision_features?.minutes.p10 ?? null,
+      wnba_minutes_p50: player.wnba_decision_features?.minutes.p50 ?? null,
+      wnba_minutes_p90: player.wnba_decision_features?.minutes.p90 ?? null,
+      wnba_blowout_risk: player.wnba_decision_features?.game_environment.blowout_risk ?? null,
+      wnba_replacement_for: player.wnba_decision_features?.injury_replacement.replacement_for.join(', ') || null,
+      sport_role: player.sport_decision_features?.role ?? null,
+      sport_opportunity: player.sport_decision_features?.opportunity ?? null,
+      sport_environment: player.sport_decision_features?.environment ?? null,
+      sport_distribution_p10: player.sport_decision_features?.distribution.p10 ?? null,
+      sport_distribution_p50: player.sport_decision_features?.distribution.p50 ?? null,
+      sport_distribution_p90: player.sport_decision_features?.distribution.p90 ?? null,
+    },
+    matchup_edge: player.context_score ?? null,
+    news_role_edge: player.news_score ?? null,
+    ownership: player.ownership_projection ?? null,
+    leverage: player.ownership_projection != null && player.ownership_projection > 0 ? (1 - player.ownership_projection) : null,
+    evidence_ids: Object.keys(player.field_provenance ?? {}).map((field) => `${player.id}:${field}`),
+    freshness_seconds: Math.min(...Object.values(player.field_provenance ?? {}).map((item) => item.freshness_seconds ?? Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER),
+  }));
+  const sourceEvidenceIds = sourceEvidence.slice(0, 1000).map((item) => item.evidence_id);
+  const previousDossierRows = await callSupabaseRpc<Array<{ dossier?: SlateResearchDossier }>>('fantasy_ai_get_previous_mios_dossier', {
+    p_sport: sport,
+    p_contest_date: contestDate,
+    p_contest_type: contestType,
+    p_contest_id: contestId ?? '',
+  }, { serviceRole: true, allowMissingServiceRole: true }).catch(() => null);
+  const previousDossier = previousDossierRows?.[0]?.dossier ?? null;
+  const dossier: SlateResearchDossier = {
+    dossier_version: PHASE0_DOSSIER_VERSION,
+    sport,
+    contest_type: contestType,
+    contest_id: contestId ?? null,
+    contest_date: contestDate,
+    lock_time: slate?.start_time ?? null,
+    generated_at: collectedAt,
+    freshness_deadline: freshnessDeadline,
+    readiness_status: readiness.status,
+    game_environment: { games: sport === 'mlb' ? mlbFreeContexts : vegasContext, slate_name: slate?.slate_name ?? null },
+    market_context: { vegas_context: vegasContext },
+    player_hierarchy: buildPlayerHierarchy(decisionProfiles),
+    game_scripts: sport === 'mlb'
+      ? buildMlbGameScripts(mlbFreeContexts.map((context) => {
+        const market = vegasContext.find((item) => item.game_id === context.game_id);
+        return {
+          game_id: context.game_id,
+          home_team: context.home_team,
+          away_team: context.away_team,
+          home_implied: market?.home_implied ?? null,
+          away_implied: market?.away_implied ?? null,
+          total: market?.over_under ?? null,
+          run_factor: context.run_factor,
+          weather_factor: context.weather_factor,
+          weather_note: context.weather_note,
+          bullpen_freshness: context.bullpen_context?.recent_workload,
+        };
+      }), sourceEvidenceIds)
+      : sport === 'wnba'
+        ? buildWnbaGameScripts(vegasContext.map((context) => ({ game_id: context.game_id, home_team: context.home_team, away_team: context.away_team, total: context.over_under, spread: context.spread })), playerRoster, sourceEvidenceIds)
+        : sport === 'nba' || sport === 'nfl' || sport === 'golf'
+          ? buildSportGameScripts(sport, vegasContext.map((context) => ({ game_id: context.game_id, home_team: context.home_team, away_team: context.away_team, total: context.over_under, spread: context.spread })), playerRoster, sourceEvidenceIds)
+      : buildGenericScripts({ sport, contest_type: contestType, market_context: { vegas_context: vegasContext }, observability }, sourceEvidenceIds),
+    source_evidence: sourceEvidence.slice(0, 1000),
+    data_gaps: buildDataGaps(sourceHealth, ['draftkings_salaries', 'projections', ...(sport === 'wnba' ? ['wnba_reasoning_model'] : []), ...(sport === 'mlb' ? ['mlb_statsapi_context'] : []), ...(['nba', 'nfl', 'golf'].includes(sport) ? [`${sport}_reasoning_model`] : [])]),
+    confidence_summary: { roster_count: playerRoster.length, ownership_coverage: ownershipCoverage, readiness: readiness.status, average_projection_reliability: playerRoster.length ? Number((playerRoster.reduce((sum, player) => sum + (player.confidence_breakdown?.projection_reliability ?? 0), 0) / playerRoster.length).toFixed(3)) : 0 },
+    observability,
+    contradictions: detectContradictions(sourceEvidence),
+  };
+  dossier.data_gaps = [...dossier.data_gaps, ...corroborationGaps(sourceEvidence)];
+  dossier.game_scripts = enrichGameScripts(dossier.game_scripts, sport);
+  dossier.matchup_edges = buildMatchupEdges(decisionProfiles);
+  dossier.slate_risks = buildSlateRisks(dossier);
+  dossier.prelock_checklist = buildPrelockChecklist(dossier.data_gaps, dossier.contradictions);
+  dossier.what_changed = summarizeChanges(dossier, previousDossier);
 
   const socialSentiment = statAndSentiment.map((item) => item.sentiment).filter(Boolean).map((item) => ({
     player_id: item.player_id,
@@ -4542,6 +4884,10 @@ async function orchestrateMiosFantasyScan(
     },
     data_warnings: warnings,
     collected_at: collectedAt,
+    request_id: requestId,
+    dossier_version: PHASE0_DOSSIER_VERSION,
+    dossier,
+    observability,
   };
 }
 
@@ -4572,15 +4918,43 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
         p_since: since,
         p_limit: 250,
       }, { serviceRole: true, allowMissingServiceRole: true }) ?? [];
+      const eventEvidence = events.map((event, index) => {
+        const source = String(event.source_key ?? event.source ?? 'understand_ledger');
+        const sourceConfig = sourcePolicy(source);
+        return {
+          evidence_id: `understand:${String(event.id ?? index)}`,
+          source,
+          source_kind: sourceConfig.kind,
+          url: typeof event.source_url === 'string' ? event.source_url : null,
+          published_at: typeof event.published_at === 'string' ? event.published_at : null,
+          observed_at: typeof event.observed_at === 'string' ? event.observed_at : null,
+          freshness_seconds: typeof event.observed_at === 'string' ? Math.max(0, Math.round((Date.now() - Date.parse(event.observed_at)) / 1000)) : null,
+          fact: String(event.summary ?? event.title ?? event.event_type ?? 'Understand ledger event'),
+          normalized_fact: { fact_key: `event:${String(event.player_name ?? event.team ?? event.event_type ?? index)}`, event_type: event.event_type ?? null, status: event.status ?? null },
+          raw_payload: event,
+          is_modeled: false,
+          confidence: Number.isFinite(Number(event.confidence_score)) ? Number(event.confidence_score) : sourceConfig.reliability,
+        };
+      });
       contextManifest = {
         ...manifest,
         source_status: { ...manifest.source_status, understand_context: 'ok' },
+        source_health: {
+          ...manifest.source_health,
+          understand_context: { status: 'ok', provider: 'Fantasy AI Understand ledger', collected_at: new Date().toISOString(), observed_at: new Date().toISOString(), freshness_seconds: 0, data_class: 'live' },
+        },
         understand_context: {
           captured_at: new Date().toISOString(),
           lookback_hours: lookbackHours,
           event_count: events.length,
           events,
         },
+        dossier: manifest.dossier ? {
+          ...manifest.dossier,
+          source_evidence: [...manifest.dossier.source_evidence, ...eventEvidence].slice(0, 1500),
+          data_gaps: manifest.dossier.data_gaps.filter((gap) => gap.key !== 'understand_context'),
+          contradictions: detectContradictions([...manifest.dossier.source_evidence, ...eventEvidence]),
+        } : undefined,
       };
     } catch (error) {
       contextManifest = {
@@ -4590,6 +4964,14 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
           `Understand context capture failed: ${error instanceof Error ? error.message : String(error)}`,
         ],
         source_status: { ...manifest.source_status, understand_context: 'unavailable' },
+        source_health: {
+          ...manifest.source_health,
+          understand_context: { status: 'unavailable', provider: 'Fantasy AI Understand ledger', collected_at: new Date().toISOString(), observed_at: null, freshness_seconds: null, failure_reason: error instanceof Error ? error.message : String(error), data_class: 'unknown' },
+        },
+        dossier: manifest.dossier ? {
+          ...manifest.dossier,
+          data_gaps: [...manifest.dossier.data_gaps, { key: 'understand_context', message: 'Understand ledger context is unavailable.', required: false, source: 'understand_context' }],
+        } : undefined,
       };
     }
 
@@ -4631,6 +5013,17 @@ async function persistMiosManifest(manifest: MiosManifest, auth: AuthResult): Pr
         p_manifest_data: persistedManifest,
         p_provenance: provenanceRows(persistedManifest),
       }, { serviceRole: true, allowMissingServiceRole: true });
+      if (snapshotId && persistedManifest.dossier && persistedManifest.observability) {
+        await callSupabaseRpc<boolean>('fantasy_ai_update_mios_snapshot_phase0', {
+          p_snapshot_id: snapshotId,
+          p_request_id: persistedManifest.request_id ?? null,
+          p_dossier_version: persistedManifest.dossier_version ?? PHASE0_DOSSIER_VERSION,
+          p_freshness_deadline: persistedManifest.dossier.freshness_deadline,
+          p_data_gaps: persistedManifest.dossier.data_gaps,
+          p_confidence_summary: persistedManifest.dossier.confidence_summary,
+          p_observability: persistedManifest.observability,
+        }, { serviceRole: true, allowMissingServiceRole: true });
+      }
       return {
         ...persistedManifest,
         snapshot_id: snapshotId ?? undefined,

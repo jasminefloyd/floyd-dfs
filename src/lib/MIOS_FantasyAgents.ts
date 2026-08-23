@@ -112,6 +112,9 @@ export interface Player {
     source: 'role_filtered_history' | 'position_hierarchical_prior';
     blendVersion: 'wnba-components-v1';
   };
+  wnba_decision_features?: Record<string, unknown>;
+  wnba_scenarios?: Array<{ state: 'active' | 'limited' | 'inactive'; probability: number; minutes_multiplier?: number; production_multiplier?: number; evidence?: string }>;
+  sport_decision_features?: Record<string, unknown>;
   candidate_fantasy_projection?: number;
   role_stability?: number;
   minutes_volatility?: number;
@@ -140,6 +143,7 @@ export interface Player {
   field_provenance?: Record<string, FieldProvenance>;
   confidence_breakdown?: ConfidenceBreakdown;
   projection_trace?: ProjectionTrace;
+  mlb_decision_features?: MlbDecisionFeatures;
 }
 
 export type ReadinessStatus = 'ready' | 'caution' | 'blocked';
@@ -161,6 +165,34 @@ export interface ProjectionTrace {
   applied_models: string[];
   stages: Array<{ name: string; projection: number | null; delta: number }>;
   note: string;
+}
+
+export interface MlbDecisionFeatures {
+  version: 'mlb-reasoning-v1';
+  role: 'pitcher' | 'hitter';
+  handedness_split?: 'vs_lhp' | 'vs_rhp' | 'unknown';
+  season: Record<string, number | null>;
+  recent: Record<string, number | null>;
+  injury_adjusted: Record<string, number | null>;
+  pitcher_metrics?: Record<string, number | null>;
+  hitter_metrics?: Record<string, number | null>;
+  pitch_type_edges: Record<string, number>;
+  projected_plate_appearances: number | null;
+  projected_innings: number | null;
+  projected_strikeouts: { p10: number | null; p50: number | null; p90: number | null };
+  early_exit_probability: number | null;
+  times_through_order_risk: number | null;
+  home_run_probability: number | null;
+  hit_probability: number | null;
+  double_probability: number | null;
+  rbi_probability: number | null;
+  run_probability: number | null;
+  walk_probability: number | null;
+  stolen_base_probability: number | null;
+  matchup_edge: number | null;
+  shrinkage_weight: number;
+  notes: string[];
+  source: 'observed_and_shrunk' | 'modeled_inputs';
 }
 
 export interface FieldProvenance {
@@ -234,6 +266,18 @@ export interface MIOS_FantasyManifest {
   snapshot_id?: string;
   data_warnings: string[];
   collected_at: string;
+  request_id?: string;
+  dossier_version?: string;
+  dossier?: Record<string, unknown>;
+  observability?: {
+    request_id: string;
+    generated_at: string;
+    stages: Array<Record<string, unknown>>;
+    source_counts: Record<string, number>;
+    fallbacks: Array<{ stage: string; reason: string }>;
+    candidate_counts: Record<string, number>;
+    rejection_counts: Record<string, number>;
+  };
 }
 
 /**

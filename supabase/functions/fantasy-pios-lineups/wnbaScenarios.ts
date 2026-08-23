@@ -10,7 +10,7 @@ export interface WnbaOutcomeScenario {
 
 export function normalizeWnbaScenarios(value: unknown): WnbaOutcomeScenario[] {
   if (!Array.isArray(value)) return [];
-  const scenarios = value.map((raw) => {
+  const scenarios = value.map((raw): WnbaOutcomeScenario | null => {
     const row = raw as Record<string, unknown>;
     const state = row.state;
     if (state !== 'active' && state !== 'limited' && state !== 'inactive') return null;

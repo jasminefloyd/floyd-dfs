@@ -53,8 +53,8 @@ deno test supabase/functions
 
 Core functions:
 
-- `mios-fantasy-scan`: collects slate data, salaries, projections, news, ownership, and context.
-- `generate-pios-lineups`: builds and simulates lineups from a MIOS manifest.
+- `fantasy-mios-scan`: collects slate data, salaries, projections, news, ownership, and context.
+- `fantasy-pios-lineups`: builds and simulates lineups from a MIOS manifest.
 - `scrape-ownership`: stores ownership projections.
 - `scrape-confirmed-lineups`: stores confirmed or expected lineups.
 - `ingest-actual-results`: ingests completed contest/player results for scorecards.

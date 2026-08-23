@@ -1,3 +1,5 @@
+import type { MlbDecisionFeatures } from '../_shared/mlbReasoning.ts';
+
 export interface MlbProxyPlayer {
   player_id: string;
   name?: string;
@@ -16,6 +18,7 @@ export interface MlbProxyPlayer {
   run_factor?: number;
   context_score?: number;
   statcast_quality_score?: number;
+  mlb_decision_features?: MlbDecisionFeatures;
 }
 
 export interface MlbProxyDistribution {
@@ -66,14 +69,21 @@ export function buildMlbProxyDistribution(player: MlbProxyPlayer): MlbProxyDistr
   const baseStdev = finite(player.stdev_fantasy_pts) && player.stdev_fantasy_pts > 0
     ? player.stdev_fantasy_pts
     : mean * (pitcher ? 0.42 : 0.62);
+  const features = player.mlb_decision_features;
   const opportunity = mlbOpportunityMultiplier(player);
-  const contextVolatility = Math.abs(Number(player.context_score ?? 0)) * mean * 0.08;
+  const outcomeVolatility = features?.role === 'pitcher'
+    ? (features.early_exit_probability ?? 0.2) * mean * 0.2
+    : (features?.home_run_probability ?? 0.08) * mean * 0.12;
+  const contextVolatility = Math.abs(Number(player.context_score ?? features?.matchup_edge ?? 0)) * mean * 0.08 + outcomeVolatility;
   const statcastVolatility = Math.max(0, 0.12 - Math.abs(Number(player.statcast_quality_score ?? 0))) * mean;
   const opportunityVolatility = Math.abs(opportunity - 1) * mean * 0.18;
   const stdev = Math.max(1, baseStdev + contextVolatility + statcastVolatility + opportunityVolatility);
   const floor = Math.max(0, mean - stdev * (pitcher ? 1.15 : 1.35));
-  const p90 = Math.max(mean, finite(player.p90_projection) ? player.p90_projection : mean + stdev * (pitcher ? 1.25 : 1.55));
-  const p95 = Math.max(p90, finite(player.p95_projection) ? player.p95_projection : mean + stdev * (pitcher ? 1.7 : 2.1));
+  const ceilingMultiplier = pitcher
+    ? 1 + (features?.projected_strikeouts.p90 ?? 0) / Math.max(features?.projected_strikeouts.p50 ?? 1, 1) * 0.08
+    : 1 + (features?.home_run_probability ?? 0.08) * 0.3;
+  const p90 = Math.max(mean, finite(player.p90_projection) ? player.p90_projection : mean + stdev * (pitcher ? 1.25 : 1.55) * ceilingMultiplier);
+  const p95 = Math.max(p90, finite(player.p95_projection) ? player.p95_projection : mean + stdev * (pitcher ? 1.7 : 2.1) * ceilingMultiplier);
   return {
     mean: Number(mean.toFixed(3)),
     floor: Number(floor.toFixed(3)),
@@ -102,13 +112,15 @@ export function buildMlbProxyStacks(players: MlbProxyPlayer[]): MlbProxyStack[] 
       return sum + (order >= 1 && order <= 5 ? 0.12 : order >= 6 && order <= 9 ? 0.04 : 0);
     }, 0);
     const runFactor = hitters.reduce((sum, player) => sum + Number(player.run_factor ?? 1), 0) / Math.max(hitters.length, 1);
+    const matchupEdge = hitters.map((player) => player.mlb_decision_features?.matchup_edge).filter(finite);
+    const matchupMultiplier = matchupEdge.length ? 1 + (matchupEdge.reduce((sum, value) => sum + value, 0) / matchupEdge.length) * 0.2 : 1;
     return {
       team,
       hitter_count: hitters.length,
       average_projection: projections.reduce((sum, value) => sum + value, 0) / Math.max(projections.length, 1),
       implied_total: impliedTotals.length ? impliedTotals.reduce((sum, value) => sum + value, 0) / impliedTotals.length : null,
       ownership_sum: ownership,
-      stack_score: Number((projections.reduce((sum, value) => sum + value, 0) * (1 + orderBonus) * runFactor / Math.max(ownership, 0.25)).toFixed(4)),
+      stack_score: Number((projections.reduce((sum, value) => sum + value, 0) * (1 + orderBonus) * runFactor * matchupMultiplier / Math.max(ownership, 0.25)).toFixed(4)),
       source: 'proxy_public_inputs' as const,
     };
   }).sort((a, b) => b.stack_score - a.stack_score);
@@ -118,7 +130,11 @@ export function mlbProxyFieldWeight(player: MlbProxyPlayer, mode: 'chalk' | 'ran
   const projection = Math.max(Number(player.projected_points ?? 0), 0.1);
   const ownership = clamp(Number(player.ownership_projection ?? 0.08), 0.01, 0.95);
   const opportunity = mlbOpportunityMultiplier(player);
+  const matchupEdge = Number(player.mlb_decision_features?.matchup_edge ?? 0);
+  const ceilingPath = isMlbPitcher(player)
+    ? Number(player.mlb_decision_features?.projected_strikeouts.p90 ?? 0)
+    : Number(player.mlb_decision_features?.home_run_probability ?? 0) * 10;
   if (mode === 'chalk') return projection * opportunity * (0.65 + ownership * 0.9);
-  if (mode === 'leverage') return projection * opportunity / Math.sqrt(ownership);
+  if (mode === 'leverage') return (projection * opportunity + matchupEdge * projection * 0.12 + ceilingPath * 0.15) / Math.sqrt(ownership);
   return Math.max(0.01, projection * opportunity * (0.35 + Math.random() * 0.65));
 }

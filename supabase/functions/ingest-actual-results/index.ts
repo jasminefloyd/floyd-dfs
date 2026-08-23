@@ -6,18 +6,18 @@ import { dkFantasyPoints, type DkRole, type DkSport } from '../_shared/dkScoring
 import { solveOptimalLineups, type SolverPlayer, type SolverRosterSlot } from '../_shared/lineupSolver.ts';
 import { parseEspnAthleteStats } from './espnStatParsing.ts';
 import { buildGolfStatLine, rankWithTies, type GolfRoundResult } from './golfStatParsing.ts';
-import { summarizeWnbaBacktest, type WnbaBacktestBucket } from '../generate-pios-lineups/wnbaModel.ts';
+import { summarizeWnbaBacktest, type WnbaBacktestBucket } from '../fantasy-pios-lineups/wnbaModel.ts';
 import {
   buildMlbForensicScorecard,
   type MlbForensicLineupRow,
   type MlbForensicPlayerRow,
   type MlbForensicScorecard,
-} from '../generate-pios-lineups/mlbForensic.ts';
+} from '../fantasy-pios-lineups/mlbForensic.ts';
 import {
   buildWnbaForensicScorecard,
   enrichWnbaForensicLineup,
   type WnbaForensicLineupRow,
-} from '../generate-pios-lineups/wnbaForensic.ts';
+} from '../fantasy-pios-lineups/wnbaForensic.ts';
 
 type Sport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
 
