@@ -19,8 +19,10 @@ interface SportsNewsError {
   error?: string;
 }
 
+const DEFAULT_FLOYD_DFS_API_URL = 'https://dfs-engine-kappa.vercel.app';
+
 export async function listSportsNews(signal?: AbortSignal): Promise<SportsNewsItem[]> {
-  const baseUrl = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? '';
+  const baseUrl = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? DEFAULT_FLOYD_DFS_API_URL;
   const response = await fetch(`${baseUrl}/api/news`, { method: 'GET', signal });
 
   const contentType = response.headers.get('content-type') ?? '';

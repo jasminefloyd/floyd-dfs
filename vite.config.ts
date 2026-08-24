@@ -8,7 +8,7 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: 5177,
-    strictPort: true,
+    strictPort: false,
     proxy: { '/api': { target: process.env.VITE_FLOYD_DFS_DEV_URL ?? 'https://dfs-engine-kappa.vercel.app', changeOrigin: true } },
   },
 })

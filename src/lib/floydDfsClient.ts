@@ -3,6 +3,7 @@ import type { FloydPipelineContext, MIOS_FantasyManifest, Player } from './MIOS_
 import type { Lineup } from '../components/LineupDisplay';
 
 type JsonRecord = Record<string, unknown>;
+const DEFAULT_FLOYD_DFS_API_URL = 'https://dfs-engine-kappa.vercel.app';
 
 export interface FloydGenerationResult {
   manifest: MIOS_FantasyManifest;
@@ -11,8 +12,8 @@ export interface FloydGenerationResult {
 }
 
 function apiUrl(path: string): string {
-  const configured = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '');
-  return `${configured ?? ''}${path}`;
+  const configured = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? DEFAULT_FLOYD_DFS_API_URL;
+  return `${configured}${path}`;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
