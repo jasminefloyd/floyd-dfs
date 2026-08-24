@@ -50,6 +50,13 @@ describe("ResearchAgent", () => {
     expect(result.unknowns[0].importance).toBe("CRITICAL");
   });
 
+  it("continues with an explicit partial warning when providers return no matching evidence", async () => {
+    const result = await new ResearchAgent({ providers: [{ name: "Empty feed", tier: 3, fetch: async () => [] }] }).run({ validatedSlate: slate });
+    expect(result.status).toBe("PARTIAL");
+    expect(result.findings).toHaveLength(0);
+    expect(result.unknowns[0]?.reason).toContain("No research evidence matched");
+  });
+
   it("does not carry explicitly foreign-sport RSS evidence into a slate", async () => {
     const wnbaSlate = { ...slate, sport: "WNBA" as const, league: "WNBA" };
     const agent = new ResearchAgent({ providers: [{ name: "DraftKings Network", tier: 3, fetch: async () => [

@@ -14,3 +14,4 @@ test-results/
 .env.development
 .env.staging
 .env.production
+.vercel

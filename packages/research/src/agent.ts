@@ -29,6 +29,7 @@ export class ResearchAgent {
       try { findings = [...findings, ...await this.options.synthesizer.synthesize({ slate: input.validatedSlate, plan, articles: slateArticles })]; }
       catch (error) { unknowns.push({ question: `Synthesize research with ${this.options.synthesizer.name}.`, importance: "MEDIUM", reason: error instanceof Error ? error.message : "Research synthesizer failed." }); }
     }
+    if (!findings.length) unknowns.push({ question: `Retrieve evidence for the ${input.validatedSlate.sport} slate.`, importance: "HIGH", reason: "No research evidence matched the selected slate; downstream decisions must treat the research layer as incomplete." });
     const conflicts = findConflicts(findings);
     const linked = linkConflicts(findings, conflicts);
     const playerEvidence = input.validatedSlate.playerPool.map((player) => ({ playerId: player.playerId, findingIds: linked.filter((finding) => finding.subjectId === player.playerId).map((finding) => finding.id), unresolved: false }));
@@ -41,7 +42,7 @@ export class ResearchAgent {
     const fieldFindings = linked.filter((finding) => finding.bucket === "FIELD_SENTIMENT");
     const competitiveFindings = linked.filter((finding) => finding.bucket === "COMPETITIVE_CONTEXT");
     const freshThrough = new Date(Math.min(Date.parse(input.validatedSlate.contest.lockTime), now.getTime() + 180 * 60_000)).toISOString();
-    const status = findings.length === 0 ? "BLOCKED" : unknowns.length || conflicts.some((conflict) => !conflict.resolved) ? "PARTIAL" : "COMPLETE";
+    const status = unknowns.length || conflicts.some((conflict) => !conflict.resolved) ? "PARTIAL" : "COMPLETE";
     return {
       slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, version: this.version,
       generatedAt: now.toISOString(), freshThrough, findings: linked,
