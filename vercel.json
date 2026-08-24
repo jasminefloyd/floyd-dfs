@@ -5,5 +5,15 @@
       "src": "apps/web/package.json",
       "use": "@vercel/next"
     }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/apps/web/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "apps/web"
+    }
   ]
 }
