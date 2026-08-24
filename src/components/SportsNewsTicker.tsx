@@ -15,7 +15,9 @@ const SPORT_LOGOS: Record<string, string> = {
   nba: 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png',
   mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
   nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
+  golf: 'https://a.espncdn.com/i/teamlogos/leagues/500/golf.png',
 };
+const ESPN_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/2/2f/ESPN_wordmark.svg';
 
 export function SportsNewsTicker() {
   const [items, setItems] = useState<SportsNewsItem[]>([]);
@@ -95,7 +97,9 @@ export function SportsNewsTicker() {
                         item.category === 'injury' ? 'text-amber-300' : 'text-blue-100'
                       }`}
                     >
-                      {sportLogo ? (
+                      {item.source_kind === 'espn' ? (
+                        <img src={ESPN_LOGO_URL} alt="ESPN" title="ESPN" className="h-5 w-8 shrink-0 object-contain" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
+                      ) : sportLogo ? (
                         <img
                           src={sportLogo}
                           alt={sportLabel}
@@ -104,7 +108,7 @@ export function SportsNewsTicker() {
                           loading="lazy"
                         />
                       ) : (
-                        <span className="font-black text-white">{sportLabel}</span>
+                        <span className="rounded bg-slate-700 px-1 py-1 text-[9px] font-black text-white" title={item.source_name ?? 'Sports news'} aria-label={item.source_name ?? 'Sports news'}>{item.source_name ?? 'NEWS'}</span>
                       )}
                       {item.category === 'injury' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
                       <span>{item.title}</span>

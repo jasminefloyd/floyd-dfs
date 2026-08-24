@@ -1,6 +1,5 @@
-import { ChevronDown } from 'lucide-react';
+import { Check, ChevronDown } from 'lucide-react';
 import { useState } from 'react';
-import { ExportLineup } from './ExportLineup';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
 
 export interface LineupPlayer {
@@ -16,6 +15,7 @@ export interface LineupPlayer {
   base_salary?: number;
   salary_multiplier?: number;
   roster_slot?: string;
+  lineup_status?: 'confirmed' | 'unconfirmed' | 'unknown';
   salary_source?: string;
   news_note?: string;
   prop_projection?: number;
@@ -61,6 +61,7 @@ export interface LineupPlayer {
 }
 
 export interface Lineup {
+  id?: string;
   rank: number;
   players: LineupPlayer[];
   projected_points: number;
@@ -71,13 +72,9 @@ export interface Lineup {
   floor_score?: number;
   p99_score?: number;
   win_rate?: number;
-  top_10_rate?: number;
-  top_decile_rate?: number;
   top_n_rate?: number;
   expected_payout?: number;
-  leverage_score?: number;
   ownership_sum?: number;
-  expected_duplicates?: number;
   lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   lineup_intelligence_score?: number;
   stack_quality_score?: number;
@@ -109,6 +106,7 @@ interface LineupDisplayProps {
 
 export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
   const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
+  const [enteredRanks, setEnteredRanks] = useState<Set<number>>(new Set());
   const toggleLineup = (rank: number) => {
     setExpandedRanks((current) => {
       const next = new Set(current);
@@ -120,12 +118,21 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
       return next;
     });
   };
+  const markEntered = async (lineup: Lineup) => {
+    await onSaveLineup?.(lineup);
+    setEnteredRanks((current) => new Set(current).add(lineup.rank));
+  };
 
   return (
     <div className="space-y-4">
       {manifest?.readiness?.cautions?.length ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
           <span className="font-black">Trust note:</span> {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
+        </div>
+      ) : null}
+      {manifest?.sport?.toLowerCase() === 'mlb' ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
+          <span className="font-black">MLB lineup status:</span> Player recommendations continue, but confirmed batting orders were not available when this lineup was generated. Players marked <span className="font-black">UNCONFIRMED</span> must be verified before entry.
         </div>
       ) : null}
       {lineups.map((lineup) => {
@@ -175,13 +182,10 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </div>
               </div>
 
-              {(lineup.simulation_ev || lineup.ceiling_score || lineup.leverage_score) ? (
-                <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200 sm:grid-cols-4">
+              {(lineup.simulation_ev || lineup.ceiling_score) ? (
+                <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200">
                   <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
-                  <Metric label="Top Decile" value={lineup.top_decile_rate !== undefined ? `${(lineup.top_decile_rate * 100).toFixed(1)}%` : lineup.top_10_rate !== undefined ? `${(lineup.top_10_rate * 100).toFixed(1)}%` : '—'} />
-                  <Metric label="Leverage" value={lineup.leverage_score !== undefined ? lineup.leverage_score.toFixed(2) : '—'} />
-                  <Metric label="Dupes" value={lineup.expected_duplicates !== undefined ? lineup.expected_duplicates.toFixed(1) : '—'} />
                 </div>
               ) : null}
 
@@ -248,6 +252,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                               </span>
                             ) : null}
                             {player.name || player.full_name}
+                            {player.lineup_status === 'unconfirmed' ? (
+                              <span className="ml-2 rounded-sm border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-amber-800">Unconfirmed</span>
+                            ) : null}
                           </p>
                           <p className="break-words text-[12px] font-medium text-slate-500">
                             {player.position} • {player.team || player.nfl_team || 'FA'} • {trendSymbol}{player.home_away && player.home_away !== 'unknown' ? ` • ${player.home_away}` : ''}
@@ -271,7 +278,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                             <p className="font-black text-emerald-700">{player.contextual_projection?.toFixed(1) ?? '—'} pts</p>
                           </div>
                           <p className="col-span-2 text-[11px] font-medium leading-4 text-slate-500 sm:max-w-[160px]">
-                            {player.last_5_stats?.avg_fantasy_pts?.toFixed(1) ?? '—'} avg
+                            {player.contextual_projection?.toFixed(1) ?? '—'} Floyd median
                             {player.last_5_stats?.stdev_fantasy_pts ? ` • σ ${player.last_5_stats.stdev_fantasy_pts.toFixed(1)}` : ''}
                             {player.salary_multiplier && player.salary_multiplier > 1
                               ? ` • ${player.salary_multiplier}x from ${formatSalary(player.base_salary)}`
@@ -297,16 +304,16 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex gap-2 border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
+                <div className="border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
                   <button
-                    onClick={() => onSaveLineup?.(lineup)}
-                    className="flex-1 rounded-xl bg-[#0b1f3a] py-2.5 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
+                    type="button"
+                    disabled={enteredRanks.has(lineup.rank)}
+                    onClick={() => void markEntered(lineup)}
+                    className="w-full rounded-xl bg-[#0b1f3a] py-3 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:cursor-default disabled:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
-                    Save Lineup
+                    {enteredRanks.has(lineup.rank) ? <Check className="mx-auto h-6 w-6" aria-hidden="true" /> : 'Lineup Entered'}
+                    {enteredRanks.has(lineup.rank) ? <span className="sr-only">Lineup Entered</span> : null}
                   </button>
-                  <div className="flex-[2]">
-                    <ExportLineup lineup={lineup} />
-                  </div>
                 </div>
               </div>
             ) : null}

@@ -12,6 +12,7 @@ const STATUS_LABELS: Record<Player['injury_status'], string> = {
   probable: 'Probable',
   day_to_day: 'Day-to-day',
   active: 'Active',
+  unknown: 'Unknown',
 };
 
 export function InjuryReport({ manifest }: InjuryReportProps) {
@@ -36,7 +37,7 @@ export function InjuryReport({ manifest }: InjuryReportProps) {
           </div>
         </div>
         <span className="rounded-full border border-amber-200 bg-white px-2 py-1 text-xs font-bold text-amber-700">
-          Injured players excluded
+          Floyd availability data
         </span>
       </div>
 

@@ -48,11 +48,18 @@ export interface Player {
   team_logo_url?: string;
   position: string;
   salary: number;
+  base_salary?: number;
+  captain_salary?: number;
+  utility_salary?: number;
+  salary_multiplier?: number;
+  roster_slot?: string;
+  lineup_status?: 'confirmed' | 'unconfirmed' | 'unknown';
   salary_source?: 'draftkings_import' | 'estimated';
-  injury_status: 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active';
+  injury_status: 'out' | 'doubtful' | 'questionable' | 'probable' | 'day_to_day' | 'active' | 'unknown';
   injury_note?: string;
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
+  contextual_projection?: number;
   p10_projection?: number;
   p25_projection?: number;
   p50_projection?: number;
@@ -225,6 +232,25 @@ export interface Readiness {
   cautions: string[];
 }
 
+export interface FloydStageRecord {
+  stage: string;
+  status: string;
+  version?: number;
+  output_payload?: Record<string, unknown>;
+  error?: Record<string, unknown>;
+}
+
+export interface FloydPipelineContext {
+  stages: FloydStageRecord[];
+  research?: Record<string, unknown>;
+  adjustment?: Record<string, unknown>;
+  projection?: Record<string, unknown>;
+  optimizer?: Record<string, unknown>;
+  selection?: Record<string, unknown>;
+  completedCount: number;
+  totalCount: number;
+}
+
 export interface MIOS_FantasyManifest {
   manifest_id: string;
   sport: string;
@@ -271,6 +297,7 @@ export interface MIOS_FantasyManifest {
   request_id?: string;
   dossier_version?: string;
   dossier?: Record<string, unknown>;
+  floyd_pipeline?: FloydPipelineContext;
   observability?: {
     request_id: string;
     generated_at: string;

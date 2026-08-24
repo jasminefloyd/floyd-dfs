@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
+import { getFloydContestFieldSize } from '../lib/floydDfsClient';
 import { validateScanInput } from '../lib/validation';
 
 export interface ScanParams {
@@ -76,13 +77,17 @@ const PAYOUT_SHAPES = [
   { value: 'double_up', label: 'Double Up' },
 ];
 
+const SLATES_PER_PAGE = 7;
+
 export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
   const [contestType, setContestType] = useState('showdown');
   const [slates, setSlates] = useState<DraftKingsSlate[]>([]);
   const [selectedContestId, setSelectedContestId] = useState('');
+  const selectedContestIdRef = useRef('');
   const [slateLoading, setSlateLoading] = useState(false);
   const [slateError, setSlateError] = useState<string | null>(null);
+  const [slatePage, setSlatePage] = useState(1);
   const [entryCount, setEntryCount] = useState(DEFAULT_SCAN_OPTIONS.entryCount);
   const [fieldSize, setFieldSize] = useState(DEFAULT_SCAN_OPTIONS.fieldSize);
   const [payoutShape, setPayoutShape] = useState(DEFAULT_SCAN_OPTIONS.payoutShape);
@@ -126,18 +131,39 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
     setMaxSharedPlayers(Number.isInteger(Number(config.maxSharedPlayers)) ? Number(config.maxSharedPlayers) : '');
   }
 
+  function selectSlate(contestId: string, availableSlates = slates) {
+    selectedContestIdRef.current = contestId;
+    setSelectedContestId(contestId);
+    const slate = availableSlates.find((item) => item.contest_id === contestId);
+    if (slate?.field_size !== undefined) setFieldSize(slate.field_size);
+    else void hydrateFieldSize(contestId);
+  }
+
+  async function hydrateFieldSize(contestId: string) {
+    try {
+      const value = await getFloydContestFieldSize(contestId);
+      if (value !== undefined && selectedContestIdRef.current === contestId) setFieldSize(value);
+    } catch {
+      // Keep the editable value when DraftKings does not expose contest size
+      // for the detail response.
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     setSlateLoading(true);
     setSlateError(null);
     setSlates([]);
+    selectedContestIdRef.current = '';
     setSelectedContestId('');
+    setSlatePage(1);
 
     listDraftKingsSlates({ sport, contestType }, controller.signal)
       .then((nextSlates) => {
         const eligibleSlates = nextSlates.filter(isWithinScanWindow);
         setSlates(eligibleSlates);
-        setSelectedContestId(eligibleSlates[0]?.contest_id ?? '');
+        const firstSlate = eligibleSlates[0];
+        selectSlate(firstSlate?.contest_id ?? '', eligibleSlates);
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -228,6 +254,8 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   };
 
   const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId);
+  const slatePageCount = Math.max(1, Math.ceil(slates.length / SLATES_PER_PAGE));
+  const visibleSlates = slates.slice((slatePage - 1) * SLATES_PER_PAGE, slatePage * SLATES_PER_PAGE);
   const scanDisabled = loading || slateLoading || !selectedSlate;
   const fieldClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 shadow-[var(--shadow-subtle)] transition-colors duration-[var(--transition-fast)] placeholder:text-slate-400 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30';
   const labelClass = 'block text-[11px] font-black uppercase tracking-wide text-slate-500';
@@ -381,11 +409,12 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         ) : null}
 
         <div className="space-y-2">
-          {slates.map((slate) => {
+          {visibleSlates.map((slate) => {
             const matchup = slateMatchup(slate);
             return (
               <label
                 key={slate.contest_id}
+                onClick={() => selectSlate(slate.contest_id)}
                 className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cyan-500 ${
                   selectedContestId === slate.contest_id ? 'border-[#0b1f3a] bg-blue-50 ring-2 ring-cyan-500/20' : 'border-slate-200 bg-white hover:border-cyan-500'
                 }`}
@@ -395,7 +424,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
                   name="selectedSlate"
                   value={slate.contest_id}
                   checked={selectedContestId === slate.contest_id}
-                  onChange={(e) => setSelectedContestId(e.target.value)}
+                  onChange={(e) => selectSlate(e.target.value)}
                   disabled={loading}
                   className="sr-only"
                 />
@@ -422,6 +451,27 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
             );
           })}
         </div>
+        {slates.length > SLATES_PER_PAGE ? (
+          <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+            <button
+              type="button"
+              onClick={() => setSlatePage((page) => Math.max(1, page - 1))}
+              disabled={slatePage === 1 || loading}
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="text-xs font-black text-slate-500">Page {slatePage} of {slatePageCount}</span>
+            <button
+              type="button"
+              onClick={() => setSlatePage((page) => Math.min(slatePageCount, page + 1))}
+              disabled={slatePage === slatePageCount || loading}
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <button
@@ -441,13 +491,13 @@ function isWithinScanWindow(slate: DraftKingsSlate): boolean {
   if (Number.isNaN(startTime.getTime())) return false;
 
   const now = new Date();
-  const latestAllowedTime = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+  const latestAllowedTime = new Date(now.getTime() + 72 * 60 * 60 * 1000);
   return startTime >= now && startTime <= latestAllowedTime;
 }
 
 function availabilityMessage(sport: string, contestType: string): string {
   const label = `${sport.toUpperCase()} ${contestType}`;
-  return `No DraftKings ${label} slates with verified salary data were found for the next 48 hours.`;
+  return `No DraftKings ${label} contests were found for the next 3 days.`;
 }
 
 function formatSlateDateTime(value: string): string {
@@ -527,7 +577,7 @@ function slateMatchup(slate: DraftKingsSlate): { label: string; teams: SlateTeam
   // that can't distinguish one slate from another.
   if (teams.length >= 2 && teamLabel(teams[0]) !== teamLabel(teams[1])) {
     return {
-      label: `${teamLabel(teams[0])} vs ${teamLabel(teams[1])}`,
+      label: slate.slate_name,
       teams,
     };
   }
@@ -545,6 +595,12 @@ function slateEventName(slate: DraftKingsSlate): string | null {
 
 function slateTeams(slate: DraftKingsSlate): SlateTeam[] {
   const data = slate.data as Record<string, any> | undefined;
+  const matchup = data?.matchup as Record<string, unknown> | null | undefined;
+  if (matchup?.away || matchup?.home) {
+    return [matchup.away, matchup.home]
+      .filter((team): team is string => typeof team === 'string' && team.length > 0)
+      .map((team) => ({ abbreviation: team, display_name: team, logo_url: teamLogoFallback(slate.sport, team) }));
+  }
   const competition = Array.isArray(data?.competitions) ? data.competitions[0] : undefined;
   if (competition?.awayTeam || competition?.homeTeam) {
     return [competition.awayTeam, competition.homeTeam]
@@ -567,6 +623,14 @@ function slateTeams(slate: DraftKingsSlate): SlateTeam[] {
 
 function teamLabel(team: SlateTeam): string {
   return team.abbreviation || team.display_name || 'Team';
+}
+
+function teamLogoFallback(sport: string, team: string): string | undefined {
+  const league = sport.toLowerCase();
+  const abbreviation = team.trim().toLowerCase();
+  return abbreviation && ['nba', 'wnba', 'mlb', 'nfl'].includes(league)
+    ? `https://a.espncdn.com/i/teamlogos/${league}/500/${abbreviation}.png`
+    : undefined;
 }
 
 function salaryStatusLabel(slate: DraftKingsSlate): 'Live' | 'Projected' {

@@ -1,5 +1,3 @@
-import { supabaseAnonKey, supabaseUrl } from './supabaseClient';
-
 export interface SportsNewsItem {
   id: string;
   sport: string;
@@ -7,6 +5,8 @@ export interface SportsNewsItem {
   link: string | null;
   published_at: string | null;
   category: 'injury' | 'trade' | 'transaction' | 'news';
+  source_name?: string;
+  source_kind?: 'espn' | 'league' | 'unknown';
 }
 
 interface SportsNewsResponse {
@@ -20,18 +20,8 @@ interface SportsNewsError {
 }
 
 export async function listSportsNews(signal?: AbortSignal): Promise<SportsNewsItem[]> {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error('Supabase URL and anon key are required to load sports news.');
-  }
-
-  const response = await fetch(`${supabaseUrl.replace(/\/$/, '')}/functions/v1/sports-news-ticker`, {
-    method: 'GET',
-    signal,
-    headers: {
-      apikey: supabaseAnonKey,
-      Authorization: `Bearer ${supabaseAnonKey}`,
-    },
-  });
+  const baseUrl = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? '';
+  const response = await fetch(`${baseUrl}/api/news`, { method: 'GET', signal });
 
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {

@@ -4,10 +4,8 @@ export {};
 
 declare global {
   interface ImportMetaEnv {
-    readonly VITE_SUPABASE_URL: string;
-    readonly VITE_SUPABASE_ANON_KEY: string;
-    readonly VITE_SUPABASE_SCHEMA?: string;
-    readonly VITE_DEBUG_SUPABASE?: string;
+    readonly VITE_FLOYD_DFS_API_URL?: string;
+    readonly VITE_FLOYD_DFS_DEV_URL?: string;
     readonly VITE_SENTRY_DSN?: string;
     readonly VITE_CLAUDE_API_KEY?: string;
     readonly VITE_OPENAI_API_KEY?: string;

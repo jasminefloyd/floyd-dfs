@@ -56,7 +56,7 @@ export function validateScanInput(input: ScanValidationInput): string[] {
   if (!CONTEST_TYPES.has(input.contestType)) errors.push('Choose a supported contest type.');
   if (!input.contestDate || Number.isNaN(selectedDate.getTime())) errors.push('Choose a valid contest date.');
   if (hasValidStartTime) {
-    const latestAllowedTime = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    const latestAllowedTime = new Date(Date.now() + 72 * 60 * 60 * 1000);
     if (selectedStartTime < new Date()) errors.push('Contest date must be today or later.');
     if (selectedStartTime > latestAllowedTime) errors.push('Contest date is outside the supported slate window.');
   } else {

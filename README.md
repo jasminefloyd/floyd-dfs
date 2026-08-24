@@ -1,6 +1,6 @@
-# Fantasy AI
+# Fantasy AI client
 
-Fantasy AI builds DraftKings-focused DFS lineups from a MIOS scan manifest and a PIOS lineup generator. The supported sports are NBA, WNBA, MLB, and NFL, with both Showdown and Classic contest styles.
+This repository preserves the Fantasy AI mobile-first DFS interface. Its backend and lineup logic are provided by the Floyd DFS agentic system in the sibling `floyd-dfs` project.
 
 ## Local Setup
 
@@ -9,67 +9,32 @@ npm install
 npm run dev
 ```
 
-The Vite app runs locally at the URL printed by Vite, usually `http://127.0.0.1:5173/`.
+The Vite app runs locally at `http://127.0.0.1:5177/`.
 
 ## Environment
 
 Frontend and API clients expect:
 
 ```bash
-VITE_SUPABASE_URL=
-VITE_SUPABASE_ANON_KEY=
-SUPABASE_URL=
-SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+VITE_FLOYD_DFS_API_URL=https://dfs-engine-kappa.vercel.app
+VITE_FLOYD_DFS_DEV_URL=https://dfs-engine-kappa.vercel.app
 ```
 
-Optional data providers:
+`VITE_FLOYD_DFS_API_URL` is the deployed Floyd DFS web URL. The Vite `/api` proxy also forwards requests to `VITE_FLOYD_DFS_DEV_URL` during local development.
 
-```bash
-ODDS_API_KEY=
-ODDS_API_BASE_URL=
-ODDS_API_MONTHLY_BUDGET=
-FIRECRAWL_API_KEY=
-```
-
-## Useful Commands
-
-```bash
-npm run build
-npm run lint
-npm run import:dk
-npm run import:results
-npm run import:mlb-actuals
-node scripts/sync-dk-scoring.mjs
-```
-
-Deno is required for Supabase function tests:
-
-```bash
-deno test supabase/functions
-```
-
-## Supabase Functions
-
-Core functions:
-
-- `fantasy-mios-scan`: collects slate data, salaries, projections, news, ownership, and context.
-- `fantasy-pios-lineups`: builds and simulates lineups from a MIOS manifest.
-- `scrape-ownership`: stores ownership projections.
-- `scrape-confirmed-lineups`: stores confirmed or expected lineups.
-- `ingest-actual-results`: ingests completed contest/player results for scorecards.
-
-Apply migrations before using live persistence. The app uses the `tenant_fantasy_ai` schema and RLS policies in the migration files.
-
-## Deployment
-
-The Vercel cron in `vercel.json` calls `/api/cron/ingest-actual-results` daily at 11:00 UTC and again at 15:00 UTC for late stat/result settling.
-
-Before deploying:
+## Verification commands
 
 ```bash
 npm run build
 npm run lint
 ```
 
-Verify the Supabase function environment has the service-role key before enabling persistence or cron ingestion.
+Start both applications locally:
+
+```bash
+cd ../floyd-dfs
+corepack pnpm dev
+
+cd ../fantasy-ai
+npm run dev
+```
