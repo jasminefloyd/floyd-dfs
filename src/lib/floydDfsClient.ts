@@ -18,7 +18,7 @@ function apiUrl(path: string): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  headers.set('Content-Type', 'application/json');
+  if (init.body) headers.set('Content-Type', 'application/json');
   const response = await fetch(apiUrl(path), { ...init, headers });
   const body = await response.json().catch(() => ({})) as JsonRecord;
   if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Floyd DFS request failed (${response.status}).`);
