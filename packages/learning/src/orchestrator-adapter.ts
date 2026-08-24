@@ -1,0 +1,6 @@
+import type { StageExecutionResult } from "@sports-engine/contracts";
+import type { StageHandler } from "@sports-engine/orchestrator";
+import { DeterministicLearningService } from "./service";
+
+export function createLearningStageHandler(service = new DeterministicLearningService()): StageHandler { return async (input): Promise<StageExecutionResult> => { if (!isRecord(input) || typeof input.action !== "string") return { status: "BLOCKED", errors: ["Learning requires an action: PRE_LOCK, MEASURE, or DIAGNOSE."] }; if (input.action === "PRE_LOCK" && Array.isArray(input.enteredLineups) && Array.isArray(input.changeEvents)) return { status: "COMPLETE", output: service.preLock({ enteredLineups: input.enteredLineups as never, changeEvents: input.changeEvents as never }) }; if (input.action === "MEASURE" && isRecord(input.measurementInput)) return { status: "COMPLETE", output: service.measure(input.measurementInput as never) }; if (input.action === "DIAGNOSE" && isRecord(input.diagnosisInput)) return { status: "COMPLETE", output: service.diagnose(input.diagnosisInput as never) }; return { status: "BLOCKED", errors: [`Unsupported or incomplete learning action: ${input.action}.`] }; }; }
+function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }

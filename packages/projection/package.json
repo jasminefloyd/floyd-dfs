@@ -1,0 +1,11 @@
+{
+  "name": "@sports-engine/projection",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": { "check": "tsc --noEmit", "typecheck": "tsc --noEmit", "test": "vitest run" },
+  "dependencies": { "@sports-engine/contracts": "workspace:*", "@sports-engine/orchestrator": "workspace:*" },
+  "devDependencies": { "typescript": "5.8.3", "vitest": "3.2.4" }
+}

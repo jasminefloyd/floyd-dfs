@@ -1,0 +1,11 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { SelectionPackage, SelectionRunRecord } from "@sports-engine/contracts";
+
+export interface SelectionRepository { save(run: Omit<SelectionRunRecord, "id">): Promise<SelectionRunRecord>; getLatest(generationRunId: string, tenantId: string): Promise<SelectionRunRecord | undefined>; }
+
+export class SupabaseSelectionRepository implements SelectionRepository {
+  constructor(private readonly client: SupabaseClient) {}
+  async save(run: Omit<SelectionRunRecord, "id">): Promise<SelectionRunRecord> { const { data, error } = await this.client.from("floyd_dfs_selection_runs").insert({ tenant_id: run.tenantId, generation_run_id: run.generationRunId, version: run.version, selection_package: run.selectionPackage, status: run.status, created_at: run.createdAt }).select("*").single(); if (error) throw error; const record = mapRun(data); const rows = run.selectionPackage.selectedLineups.map((lineup) => ({ tenant_id: run.tenantId, generation_run_id: run.generationRunId, selection_run_id: record.id, candidate_key: lineup.candidateId, bullet_number: lineup.bulletNumber, selection_type: lineup.selectionType, lineup_payload: lineup, projection_snapshot: { median: lineup.median, ceiling: lineup.ceiling }, research_version: 1, adjustment_version: 1, projection_version: 1, optimizer_version: 1, selection_version: run.version, status: "GENERATED" })); if (rows.length) { const result = await this.client.from("floyd_dfs_generated_lineups").insert(rows); if (result.error) throw result.error; } return record; }
+  async getLatest(generationRunId: string, tenantId: string): Promise<SelectionRunRecord | undefined> { const { data, error } = await this.client.from("floyd_dfs_selection_runs").select("*").eq("generation_run_id", generationRunId).eq("tenant_id", tenantId).order("version", { ascending: false }).limit(1).maybeSingle(); if (error) throw error; return data ? mapRun(data) : undefined; }
+}
+function mapRun(row: Record<string, unknown>): SelectionRunRecord { return { id: String(row.id), tenantId: String(row.tenant_id), generationRunId: String(row.generation_run_id), version: Number(row.version), selectionPackage: row.selection_package as SelectionPackage, status: row.status as SelectionPackage["status"], createdAt: String(row.created_at) }; }

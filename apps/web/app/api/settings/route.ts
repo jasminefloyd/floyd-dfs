@@ -1,0 +1,2 @@
+import { authErrorResponse, publicTenantContext } from "../../../lib/server-auth";
+export async function GET(request: Request) { try { const context = await publicTenantContext(); const { data, error } = await context.client.from("tenants").select("id,name,slug,plan,settings").eq("id", context.tenantId).single(); if (error) throw error; return Response.json({ tenant: data, public: true }); } catch (error) { return authErrorResponse(error); } }

@@ -1,0 +1,16 @@
+node_modules
+.next
+dist
+coverage
+.turbo
+*.tsbuildinfo
+.DS_Store
+supabase/.temp/
+test-results/
+.env
+.env.local
+.env.*.local
+!.env.example
+.env.development
+.env.staging
+.env.production

@@ -1,0 +1,32 @@
+{
+  "name": "@sports-engine/web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "next build",
+    "check": "tsc --noEmit",
+    "dev": "next dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sports-engine/contracts": "workspace:*",
+    "@sports-engine/database": "workspace:*",
+    "@sports-engine/draftkings": "workspace:*",
+    "@sports-engine/optimizer": "workspace:*",
+    "@sports-engine/orchestrator": "workspace:*",
+    "@sports-engine/projection": "workspace:*",
+    "@sports-engine/research": "workspace:*",
+    "@sports-engine/selection": "workspace:*",
+    "@sports-engine/sport-adjustment": "workspace:*",
+    "@supabase/supabase-js": "2.57.4",
+    "next": "15.5.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.0",
+    "@types/react": "19.1.0",
+    "@types/react-dom": "19.1.0",
+    "typescript": "5.8.3"
+  }
+}

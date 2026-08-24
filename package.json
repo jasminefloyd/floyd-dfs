@@ -1,0 +1,15 @@
+{
+  "name": "floyd-dfs",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "corepack pnpm --recursive build",
+    "check": "corepack pnpm --recursive check",
+    "dev": "corepack pnpm --filter @sports-engine/web dev",
+    "typecheck": "corepack pnpm --recursive typecheck"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
+  }
+}

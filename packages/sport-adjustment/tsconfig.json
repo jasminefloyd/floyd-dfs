@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "baseUrl": ".", "paths": { "@sports-engine/contracts": ["../contracts/src/index.ts"], "@sports-engine/orchestrator": ["../orchestrator/src/index.ts"] } },
+  "include": ["src/**/*.ts"]
+}

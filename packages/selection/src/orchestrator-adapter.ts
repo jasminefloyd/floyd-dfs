@@ -1,0 +1,6 @@
+import type { StageExecutionResult } from "@sports-engine/contracts";
+import type { StageHandler } from "@sports-engine/orchestrator";
+import { DeterministicSelectionService } from "./service";
+
+export function createSelectionStageHandler(service = new DeterministicSelectionService()): StageHandler { return async (input): Promise<StageExecutionResult> => { if (!isRecord(input) || !isRecord(input.validatedSlate) || !isRecord(input.researchPackage) || !isRecord(input.adjustmentPackage) || !isRecord(input.projectionPackage) || !isRecord(input.optimizerPackage)) return { status: "BLOCKED", errors: ["Selection requires validatedSlate, researchPackage, adjustmentPackage, projectionPackage, and optimizerPackage inputs."] }; const output = service.select({ validatedSlate: input.validatedSlate as never, researchPackage: input.researchPackage as never, adjustmentPackage: input.adjustmentPackage as never, projectionPackage: input.projectionPackage as never, optimizerPackage: input.optimizerPackage as never }); return { status: output.status, output, errors: output.optimizerGap ? [output.optimizerGap] : undefined }; }; }
+function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
