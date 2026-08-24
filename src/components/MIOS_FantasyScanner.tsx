@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
-import { getFloydContestFieldSize } from '../lib/floydDfsClient';
 import { validateScanInput } from '../lib/validation';
 
 export interface ScanParams {
@@ -134,19 +133,9 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   function selectSlate(contestId: string, availableSlates = slates) {
     selectedContestIdRef.current = contestId;
     setSelectedContestId(contestId);
+    if (!contestId) return;
     const slate = availableSlates.find((item) => item.contest_id === contestId);
     if (slate?.field_size !== undefined) setFieldSize(slate.field_size);
-    else void hydrateFieldSize(contestId);
-  }
-
-  async function hydrateFieldSize(contestId: string) {
-    try {
-      const value = await getFloydContestFieldSize(contestId);
-      if (value !== undefined && selectedContestIdRef.current === contestId) setFieldSize(value);
-    } catch {
-      // Keep the editable value when DraftKings does not expose contest size
-      // for the detail response.
-    }
   }
 
   useEffect(() => {
