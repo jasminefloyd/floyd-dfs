@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createResearchStageHandler, ResearchAgent, createDefaultRssProviders, SportsDataIoClient, SportsDataIoResearchProvider, OpenAiResearchSynthesizer, createResearchPlan } from "@sports-engine/research";
+import { createResearchStageHandler, ResearchAgent, createDefaultRssProviders, SportsDataIoClient, SportsDataIoResearchProvider, OpenAiResearchSynthesizer, createResearchPlan, refreshSlateAvailability } from "@sports-engine/research";
 import { createSportAdjustmentStageHandler } from "@sports-engine/sport-adjustment";
 import { createProjectionStageHandler } from "@sports-engine/projection";
 import { createOptimizeStageHandler } from "@sports-engine/optimizer";
@@ -14,8 +14,13 @@ export function createGenerationOrchestrator(client: SupabaseClient) {
   const repository = new SupabaseOrchestratorRepository(client);
   const synthesizer = process.env.OPENAI_API_KEY ? new OpenAiResearchSynthesizer({ apiKey: process.env.OPENAI_API_KEY, model: process.env.AI_MODEL ?? process.env.OPENAI_MODEL }) : undefined;
   const stages = ["SLATE", "RESEARCH", "SPORT_ADJUSTMENT", "PROJECTION", "OPTIMIZE", "SELECTION"] as const;
+  const sportsDataClient = process.env.SPORTS_DATA_IO_KEY ? new SportsDataIoClient({ apiKey: process.env.SPORTS_DATA_IO_KEY, baseUrl: process.env.SPORTS_DATA_IO_BASE_URL }) : undefined;
   return { repository, orchestrator: new SportsEngineOrchestrator({ repository, handlers: {
-    SLATE: async (input) => ({ status: "COMPLETE", output: input }),
+    SLATE: async (input) => {
+      if (!sportsDataClient) return { status: "COMPLETE", output: input };
+      const refreshed = await refreshSlateAvailability(sportsDataClient, input as ValidatedSlate);
+      return { status: "COMPLETE", output: refreshed, warnings: refreshed.validation.warnings };
+    },
     RESEARCH: createResearchStageHandler(new ResearchAgent({ providers, synthesizer })),
     SPORT_ADJUSTMENT: createSportAdjustmentStageHandler(), PROJECTION: createProjectionStageHandler(), OPTIMIZE: createOptimizeStageHandler(), SELECTION: createSelectionStageHandler(),
   }, contracts: Object.fromEntries(stages.map((stage) => [stage, { parse: (value: unknown) => parseStageOutput(stage, value) }])) as never }) };

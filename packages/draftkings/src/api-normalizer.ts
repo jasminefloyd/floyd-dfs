@@ -39,6 +39,8 @@ export function buildSlateFromApiBundle(bundle: DraftKingsApiBundle, context: Dr
   const rules = unwrapRecord(bundle.gameTypeRules.data, "gameTypeRules");
   const draftables = unwrapRecord(bundle.draftables.data, "draftables");
 
+  const rosterRules = mapRosterRules(rules);
+  const playerPool = mapDraftables(draftables, context.contestFormat);
   const slateInput: SlateInput = {
     tenantId: context.tenantId,
     userId: context.userId,
@@ -57,9 +59,9 @@ export function buildSlateFromApiBundle(bundle: DraftKingsApiBundle, context: Dr
       maxEntriesAllowed: readOptionalNumber(contest, ["maxEntriesAllowed", "maxEntries", "max_entries"]),
     },
     salaryCap: readRequiredNumber(rules, ["salaryCap", "salary_cap"], "salaryCap", ["maxValue"]),
-    rosterRules: mapRosterRules(rules),
+    rosterRules,
     scoringRules: mapScoringRules(rules, context.sport),
-    playerPool: mapDraftables(draftables, context.contestFormat),
+    playerPool: applyVerifiedSlotSalaries(playerPool, rosterRules, context.contestFormat),
     sourceManifest: [
       sourceManifest(bundle.contest, ["contest"], "contest"),
       sourceManifest(bundle.draftGroup, ["event", "contest", "lockTime"], "draftGroup"),
@@ -74,6 +76,19 @@ export function buildSlateFromApiBundle(bundle: DraftKingsApiBundle, context: Dr
     validatedSlate: normalizeAndValidateSlate(slateInput, now),
     rawResponses: bundle,
   };
+}
+
+function applyVerifiedSlotSalaries(players: SlateInput["playerPool"], rosterRules: NonNullable<SlateInput["rosterRules"]>, contestFormat: ContestFormat): SlateInput["playerPool"] {
+  if (contestFormat !== "SHOWDOWN") return players;
+  const captainMultiplier = rosterRules.slots.CPT?.salaryMultiplier ?? 1.5;
+  return players.map((player) => ({
+    ...player,
+    // DraftKings supplies the base salary and/or slot-specific rows. When a
+    // slot-specific value is absent, derive it only from the DraftKings rules
+    // response—not from a third-party projection or a UI assumption.
+    utilitySalary: player.utilitySalary ?? player.salary,
+    captainSalary: player.captainSalary ?? player.salary * captainMultiplier,
+  }));
 }
 
 function mapEvent(record: JsonRecord, draftables: JsonRecord, fallbackId: string): SlateInput["event"] {

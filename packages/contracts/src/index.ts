@@ -2,7 +2,7 @@ export type Sport = "WNBA" | "NBA" | "MLB" | "GOLF" | "NFL";
 
 export type ContestFormat = "SHOWDOWN" | "CLASSIC";
 
-export type SlateSource = "DRAFTKINGS_API" | "DRAFTKINGS_RSS" | "DRAFTKINGS_RULES_REGISTRY";
+export type SlateSource = "DRAFTKINGS_API" | "DRAFTKINGS_RSS" | "DRAFTKINGS_RULES_REGISTRY" | "SPORTSDATAIO";
 
 export type StageStatus = "VALID" | "WARNING" | "BLOCKED";
 

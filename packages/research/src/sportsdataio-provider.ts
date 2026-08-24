@@ -1,4 +1,5 @@
 import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, SourceTier, Sport, ValidatedSlate } from "@sports-engine/contracts";
+import { parseAvailabilityRecords, type AvailabilitySnapshot } from "./availability";
 
 export interface SportsDataIoClientOptions {
   apiKey: string;
@@ -31,6 +32,22 @@ export class SportsDataIoClient {
       throw new Error(`SportsDataIO ${sport} ${feed}/${resource} returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}.`);
     }
     return await response.json() as T;
+  }
+
+  async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
+    const date = slate.event.eventDate.slice(0, 10);
+    if (slate.sport === "MLB") {
+      const payload = await this.get<unknown>("MLB", "projections", "StartingLineupsByDate", date, signal);
+      return parseAvailabilityRecords(payload, slate.sport, new Date().toISOString());
+    }
+    // SportsDataIO documents that WNBA has no confirmed pregame lineup feed
+    // and NFL has no single confirmed-lineup endpoint. Optional configured
+    // feeds may still provide active/inactive data without inventing a source.
+    const configured = slate.sport === "WNBA" ? process.env.SPORTS_DATA_IO_WNBA_AVAILABILITY_RESOURCE : process.env.SPORTS_DATA_IO_NFL_AVAILABILITY_RESOURCE;
+    const feed = slate.sport === "WNBA" ? process.env.SPORTS_DATA_IO_WNBA_AVAILABILITY_FEED : process.env.SPORTS_DATA_IO_NFL_AVAILABILITY_FEED;
+    if (!configured || !feed) return { source: "SPORTSDATAIO", retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured provider availability feed.` };
+    const payload = await this.get<unknown>(slate.sport, feed, configured, date, signal);
+    return parseAvailabilityRecords(payload, slate.sport, new Date().toISOString());
   }
 }
 

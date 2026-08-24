@@ -47,6 +47,16 @@ export interface SlatePlayer {
   teamLogoUrl?: string;
   /** Explicit quantitative opportunity/rate inputs supplied by a trusted model or provider. */
   projectionInputs?: Record<string, number>;
+  /** Availability is separate from DraftKings eligibility and is never inferred from a projection. */
+  availability?: {
+    status: "CONFIRMED_STARTER" | "PROJECTED" | "ACTIVE" | "INACTIVE" | "OUT" | "UNKNOWN";
+    confirmed: boolean;
+    source: string;
+    retrievedAt: string;
+    providerPlayerId?: string;
+    mappedBy?: "NAME_AND_TEAM" | "UNMAPPED";
+    note?: string;
+  };
 }
 
 export interface SourceManifestItem {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ValidatedSlate } from "@sports-engine/contracts";
 import { ResearchAgent, RssResearchProvider, createResearchPlan, parseRss } from "./index";
+import { applyAvailabilitySnapshot } from "./availability";
 
 const slate: ValidatedSlate = {
   slateId: "slate-1", tenantId: "tenant-1", userId: "user-1", requestId: "request-1", receivedAt: "2026-08-23T12:00:00.000Z",
@@ -76,5 +77,35 @@ describe("ResearchAgent", () => {
     const result = await agent.run({ validatedSlate: { ...slate, sport: "MLB", league: "MLB" } });
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.finding).toContain("Alex Example");
+  });
+});
+
+describe("availability reconciliation", () => {
+  it("keeps only mapped confirmed MLB starters once a confirmed lineup exists", () => {
+    const mlbSlate: ValidatedSlate = {
+      ...slate,
+      sport: "MLB",
+      league: "MLB",
+      playerPool: [
+        { playerId: "p1", playerName: "Alex Example", team: "AAA", salary: 5000, eligibility: { UTIL: true } },
+        { playerId: "p2", playerName: "Unverified Player", team: "AAA", salary: 5000, eligibility: { UTIL: true } },
+      ],
+    };
+    const result = applyAvailabilitySnapshot(mlbSlate, {
+      source: "SPORTSDATAIO",
+      retrievedAt: "2026-08-23T18:00:00.000Z",
+      confirmedLineupAvailable: true,
+      records: [{ playerName: "Alex Example", team: "AAA", providerPlayerId: "42", status: "CONFIRMED_STARTER", confirmed: true, battingOrder: 1 }],
+    });
+    expect(result.playerPool.map((player) => player.playerId)).toEqual(["p1"]);
+    expect(result.playerPool[0]?.availability).toMatchObject({ confirmed: true, providerPlayerId: "42", mappedBy: "NAME_AND_TEAM" });
+  });
+
+  it("does not label projected WNBA data as confirmed", () => {
+    const result = applyAvailabilitySnapshot({ ...slate, sport: "WNBA", league: "WNBA" }, {
+      source: "SPORTSDATAIO", retrievedAt: "2026-08-23T18:00:00.000Z", confirmedLineupAvailable: false,
+      records: [{ playerName: "Alex Example", status: "PROJECTED", confirmed: false }],
+    });
+    expect(result.playerPool[0]?.availability).toMatchObject({ status: "PROJECTED", confirmed: false });
   });
 });
