@@ -1,0 +1,4 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
+import { cors, method, respondError } from '../server/runtime.js';
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> { if (!method(req, res, ['GET'])) return; try { const feeds = createDefaultRssProviders(); const articles = (await Promise.all(feeds.slice(0, 6).map(async (provider) => { try { return await provider.fetch({ slate: {} as never, plan: { slateId: 'news', generatedAt: new Date().toISOString(), questions: [] } }); } catch { return []; } }))).flat().slice(0, 40); cors(req, res); res.status(200).json({ articles, retrievedAt: new Date().toISOString() }); } catch (error) { respondError(req, res, error); } }

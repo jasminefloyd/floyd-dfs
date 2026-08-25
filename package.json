@@ -7,6 +7,8 @@
     "dev": "vite",
     "dev:full": "vercel dev",
     "build": "tsc -b && vite build",
+    "check:server": "tsc -p tsconfig.server.json",
+    "test:parity": "node scripts/run-engine-parity.mjs",
     "lint": "oxlint",
     "import:dk": "node scripts/import-draftkings-slate.mjs",
     "import:mlb-actuals": "node scripts/import-mlb-actual-results.mjs",
@@ -25,12 +27,14 @@
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1",
     "shadcn": "^4.13.0",
-    "tailwindcss": "^4.3.2"
+    "tailwindcss": "^4.3.2",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "@vercel/node": "^5.8.24",
     "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",

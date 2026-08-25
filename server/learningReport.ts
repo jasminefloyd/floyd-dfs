@@ -1,0 +1,37 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+type Row = Record<string, unknown>;
+function escape(value: unknown): string { return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function number(value: unknown): number { return typeof value === 'number' ? value : Number(value ?? 0) || 0; }
+function date(value: unknown): string { const parsed = Date.parse(String(value ?? '')); return Number.isNaN(parsed) ? '—' : new Date(parsed).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+function table(rows: Row[], columns: Array<[string, (row: Row) => unknown]>): string {
+  if (!rows.length) return '<p class="empty">No activity recorded in this period.</p>';
+  return `<table><thead><tr>${columns.map(([label]) => `<th>${escape(label)}</th>`).join('')}</tr></thead><tbody>${rows.slice(0, 8).map((row) => `<tr>${columns.map(([, get]) => `<td>${escape(get(row))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+function metric(label: string, value: string | number, note: string): string { return `<div class="metric"><div class="metric-label">${escape(label)}</div><div class="metric-value">${escape(value)}</div><div class="metric-note">${escape(note)}</div></div>`; }
+
+export interface WeeklyReportData { since: string; until: string; runs: Row[]; measurements: Row[]; diagnostics: Row[]; lessons: Row[]; }
+export async function loadWeeklyReport(db: SupabaseClient, tenantId: string, now = new Date()): Promise<WeeklyReportData> {
+  const until = now.toISOString(); const sinceDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); const since = sinceDate.toISOString();
+  const query = async (tableName: string, tenantColumn = 'tenant_id'): Promise<Row[]> => { const result = await db.from(tableName).select('*').eq(tenantColumn, tenantId).gte('created_at', since).lte('created_at', until).order('created_at', { ascending: false }).limit(500); if (result.error) throw result.error; return (result.data ?? []) as Row[]; };
+  const [runs, measurements, diagnostics, lessons] = await Promise.all([query('generation_runs'), query('floyd_dfs_player_measurements'), query('floyd_dfs_learning_diagnostics'), query('floyd_dfs_lesson_candidates')]);
+  return { since, until, runs, measurements, diagnostics, lessons };
+}
+
+export function renderWeeklyLearningReport(data: WeeklyReportData): { subject: string; html: string; text: string } {
+  const completeRuns = data.runs.filter((row) => String(row.state).toLowerCase() === 'complete').length;
+  const inRange = data.measurements.filter((row) => row.within_expected_range === true).length;
+  const averageError = data.measurements.length ? data.measurements.reduce((sum, row) => sum + Math.abs(number(row.projection_error)), 0) / data.measurements.length : 0;
+  const subject = `Floyd DFS learning report · ${date(data.until)}`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#eef3f8;color:#102744;font-family:Arial,sans-serif}.wrap{max-width:720px;margin:0 auto;padding:28px 16px}.hero{background:#0b203c;color:#fff;border-radius:18px;padding:28px}.eyebrow{color:#52d9f2;font-size:12px;font-weight:700;letter-spacing:2px}.hero h1{margin:10px 0 6px;font-size:30px}.hero p{color:#c6d6e8;margin:0}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}.metric,.card{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 10px #10274412}.metric-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#607894;font-weight:700}.metric-value{font-size:25px;font-weight:800;margin-top:8px}.metric-note,.empty{font-size:12px;color:#70839a;margin-top:5px}.card{margin-top:14px}.card h2{margin:0 0 12px;font-size:18px}table{width:100%;border-collapse:collapse;font-size:12px}th{text-align:left;color:#607894;text-transform:uppercase;font-size:10px;letter-spacing:.7px}td,th{padding:9px 6px;border-bottom:1px solid #e6edf4}td{vertical-align:top}.footer{padding:20px 4px;color:#73869c;font-size:11px}@media(max-width:600px){.metrics{grid-template-columns:repeat(2,1fr)}} </style></head><body><div class="wrap"><div class="hero"><div class="eyebrow">FLOYD DFS · LEARNING</div><h1>Weekly learning report</h1><p>${escape(date(data.since))} – ${escape(date(data.until))} · Evidence from completed app activity</p></div><div class="metrics">${metric('Runs', data.runs.length, `${completeRuns} complete`)}${metric('Measurements', data.measurements.length, `${inRange} in expected range`)}${metric('Avg abs error', averageError.toFixed(2), 'DraftKings points')}${metric('Diagnostics', data.diagnostics.length, `${data.lessons.length} lesson candidates`)}</div><div class="card"><h2>Run health</h2>${table(data.runs, [['Date', (row) => date(row.created_at)], ['Sport', (row) => row.sport ?? (row.request_payload as Row | undefined)?.sport ?? '—'], ['State', (row) => row.state], ['Stage', (row) => row.current_stage]])}</div><div class="card"><h2>Where projections missed</h2>${table(data.measurements.filter((row) => row.within_expected_range === false || number(row.projection_error) !== 0), [['Date', (row) => date(row.created_at)], ['Player', (row) => row.player_id], ['Error', (row) => number(row.projection_error).toFixed(2)], ['In range', (row) => row.within_expected_range === true ? 'Yes' : 'No']])}</div><div class="card"><h2>Diagnostics and lessons</h2>${table(data.diagnostics, [['Date', (row) => date(row.created_at)], ['Stage', (row) => row.error_stage], ['Severity', (row) => row.severity], ['Diagnosis', (row) => row.diagnosis]])}${data.lessons.length ? `<h2 style="margin-top:18px">Learning queue</h2>${table(data.lessons, [['Sport', (row) => row.sport], ['Stage', (row) => row.stage], ['Status', (row) => row.status], ['Observation', (row) => row.observation]])}` : ''}</div><div class="footer">This report summarizes observed evidence. It does not promote a lesson to a model rule automatically.</div></div></body></html>`;
+  const text = `FLOYD DFS WEEKLY LEARNING REPORT\n${date(data.since)} – ${date(data.until)}\n\nRuns: ${data.runs.length} (${completeRuns} complete)\nMeasurements: ${data.measurements.length} (${inRange} in expected range)\nAverage absolute projection error: ${averageError.toFixed(2)}\nDiagnostics: ${data.diagnostics.length}\nLesson candidates: ${data.lessons.length}\n\nThis report summarizes observed evidence; it does not promote lessons automatically.`;
+  return { subject, html, text };
+}
+
+export async function sendWeeklyLearningReport(db: SupabaseClient, tenantId: string, options: { apiKey: string; to: string; from: string }): Promise<{ subject: string; report: WeeklyReportData; resendId?: string }> {
+  const data = await loadWeeklyReport(db, tenantId); const report = renderWeeklyLearningReport(data);
+  const response = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { authorization: `Bearer ${options.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ from: options.from, to: [options.to], subject: report.subject, html: report.html, text: report.text }) });
+  if (!response.ok) throw new Error(`Resend returned HTTP ${response.status}.`);
+  const payload = await response.json() as Row;
+  return { subject: report.subject, report: data, resendId: typeof payload.id === 'string' ? payload.id : undefined };
+}

@@ -1,0 +1,3 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { method, respondError, tenantContext } from '../../../server/runtime.js';
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> { if (!method(req, res, ['GET'])) return; try { const context = await tenantContext(); const id = String(req.query.runId ?? ''); const result = await context.db.from('floyd_dfs_generated_lineups').select('*,floyd_dfs_selection_runs!inner(generation_run_id)').eq('tenant_id', context.tenantId).eq('floyd_dfs_selection_runs.generation_run_id', id).order('bullet_number'); if (result.error) throw result.error; res.status(200).json({ lineups: result.data ?? [] }); } catch (error) { respondError(req, res, error); } }

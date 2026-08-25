@@ -3,7 +3,7 @@ import type { FloydPipelineContext, MIOS_FantasyManifest, Player } from './MIOS_
 import type { Lineup } from '../components/LineupDisplay';
 
 type JsonRecord = Record<string, unknown>;
-const DEFAULT_FLOYD_DFS_API_URL = 'https://dfs-engine-kappa.vercel.app';
+const DEFAULT_FLOYD_DFS_API_URL = '';
 
 export interface FloydGenerationResult {
   manifest: MIOS_FantasyManifest;
@@ -33,14 +33,32 @@ export async function listFloydContests(params: { sport: string; contestType: st
   const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}`), { signal });
   const body = await response.json().catch(() => ({})) as JsonRecord;
   if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
-  const contests = Array.isArray(body.contests) ? body.contests as JsonRecord[] : [];
-  return contests.map((contest) => {
-    const matchup = contest.matchup as JsonRecord | null | undefined;
-    const lockTime = String(contest.lockTime ?? '');
+  const contests = flattenSlateResponse(body);
+  return contests.map(({ contest, group }) => {
+    const matchup = (contest.matchup ?? group?.matchup) as JsonRecord | null | undefined;
+    const lockTime = String(contest.lockTime ?? group?.lockTime ?? '');
+    const sport = String(contest.sport ?? group?.sport ?? params.sport);
+    const format = String(contest.format ?? group?.format ?? params.contestType);
     return {
-      contest_id: String(contest.id), external_contest_id: String(contest.id), sport: String(contest.sport ?? params.sport).toLowerCase(), contest_type: String(contest.format ?? params.contestType).toLowerCase(), contest_date: lockTime.slice(0, 10), slate_name: String(contest.name ?? 'DraftKings contest'), game_ids: matchup ? [String(matchup.away ?? ''), String(matchup.home ?? '')].filter(Boolean) : [], salary_cap: 50000, field_size: positiveInteger(contest.contestSize), status: 'draftkings_live', start_time: lockTime, salary_count: 0, data: { source: 'floyd-dfs', matchup, sport_logo_url: sportLogoUrl(String(contest.sport ?? params.sport)) }, updated_at: String(body.retrievedAt ?? new Date().toISOString()),
+      contest_id: String(contest.id), external_contest_id: String(contest.id), sport: sport.toLowerCase(), contest_type: format.toLowerCase(), contest_date: lockTime.slice(0, 10), slate_name: String(contest.name ?? group?.name ?? 'DraftKings contest'), game_ids: matchup ? [String(matchup.away ?? ''), String(matchup.home ?? '')].filter(Boolean) : [], salary_cap: 50000, field_size: positiveInteger(contest.contestSize), status: 'draftkings_live', start_time: lockTime, salary_count: 0, data: { source: 'floyd-dfs', matchup, slate_id: group?.id, sport_logo_url: sportLogoUrl(sport) }, updated_at: String(body.retrievedAt ?? new Date().toISOString()),
     } satisfies DraftKingsSlate;
   });
+}
+
+function flattenSlateResponse(body: JsonRecord): Array<{ contest: JsonRecord; group?: JsonRecord }> {
+  if (Array.isArray(body.contests)) {
+    return body.contests.filter(isJsonRecord).map((contest) => ({ contest }));
+  }
+  if (!Array.isArray(body.slates)) return [];
+
+  return body.slates.filter(isJsonRecord).flatMap((group) => {
+    if (!Array.isArray(group.contests)) return [];
+    return group.contests.filter(isJsonRecord).map((contest) => ({ contest, group }));
+  });
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 export async function getFloydContestFieldSize(contestId: string): Promise<number | undefined> {
