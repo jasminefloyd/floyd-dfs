@@ -92,6 +92,7 @@ export interface ValidatedSlate {
     requestedEntryCount: number;
     contestSize?: number;
     maxEntriesAllowed?: number;
+    cashLine?: number;
   };
   salaryCap: number;
   rosterRules: RosterRules;
@@ -196,7 +197,7 @@ export interface LineupCandidate {
   rosterSlots: Record<string, string>;
   salaryUsed: number;
   salaryRemaining: number;
-  floor: number;
+  floor?: number;
   median: number;
   ceiling: number;
   correlationScore: number;
@@ -335,6 +336,7 @@ export interface SelectedLineup {
   salaryUsed: number;
   salaryRemaining: number;
   median: number;
+  floor?: number;
   ceiling: number;
 }
 

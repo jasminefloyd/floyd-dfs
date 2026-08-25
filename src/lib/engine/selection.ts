@@ -40,7 +40,7 @@ function explain(candidate: LineupCandidate, bulletNumber: number, input: Select
     candidate.candidateTypes.length ? `Profile: ${candidate.candidateTypes.join(', ').replaceAll('_', ' ').toLowerCase()}.` : "Selected from the optimizer's ranked candidate set.",
     candidate.riskFlags.length ? `Watch: ${candidate.riskFlags[0]}` : 'No projection risk flag was attached to this candidate.',
   ];
-  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: "This lineup balances the slate's strongest quantified path with the contest context. The Selection Agent chose it from the optimizer candidates and did not alter the roster.", newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, median: candidate.median, ceiling: candidate.ceiling };
+  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: "This lineup balances the slate's strongest quantified path with the contest context. The Selection Agent chose it from the optimizer candidates and did not alter the roster.", newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling };
 }
 
 function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }

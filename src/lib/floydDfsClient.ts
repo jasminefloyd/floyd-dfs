@@ -136,7 +136,8 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown): 
       const captain = isCaptainSlot(rosterSlot);
       return [{ ...player, roster_slot: rosterSlot, base_salary: player.salary, salary: captain ? player.captain_salary ?? Math.round(player.salary * 1.5) : player.utility_salary ?? player.salary, salary_multiplier: captain ? 1.5 : 1 }];
     });
-    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), salary_used: Number(payload.salaryUsed ?? 0), confidence_score: 0.5, ceiling_score: Number(payload.ceiling ?? 0), simulation_ev: Number(payload.median ?? 0), narrative: String(payload.explanation ?? 'Selected from the verified optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], lineup_type: 'high_ev' };
+    const calibrated = typeof (row as JsonRecord).cash_line_probability === 'number' ? Number((row as JsonRecord).cash_line_probability) : undefined;
+    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), salary_used: Number(payload.salaryUsed ?? 0), confidence_score: calibrated ?? 0, ceiling_score: Number(payload.ceiling ?? 0), simulation_ev: Number(payload.median ?? 0), narrative: String(payload.explanation ?? 'Selected from the verified optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], lineup_type: 'high_ev' };
   });
 }
 

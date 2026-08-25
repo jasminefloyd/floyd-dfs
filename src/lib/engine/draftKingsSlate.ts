@@ -1,7 +1,7 @@
 import type { ContestFormat, RosterRules, SlatePlayer, Sport, ValidatedSlate } from './contracts.js';
 import type { DraftKingsApiBundle } from './draftKings.js';
 
-export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; }
+export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; cashLine?: number; }
 export class DraftKingsSlateMappingError extends Error { constructor(message: string) { super(message); this.name = 'DraftKingsSlateMappingError'; } }
 
 export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, context: DraftKingsSlateContext): ValidatedSlate {
@@ -28,7 +28,7 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   return {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
     event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate(draftGroup, ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
-    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate(draftGroup, ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']) },
+    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate(draftGroup, ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
     salaryCap: readNestedNumber(rules, ['salaryCap', 'salary_cap', 'maxValue']) ?? 0, rosterRules, scoringRules: resolvedScoringRules, playerPool, sourceManifest, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors },
   };
 }

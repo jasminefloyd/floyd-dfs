@@ -160,7 +160,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     </div>
                     <h3 className="mt-3 truncate text-xl font-black tracking-tight text-white sm:text-2xl">{lineup.win_condition || lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
                     <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.1em] text-blue-200">
-                      {lineup.confidence_score ? `${(lineup.confidence_score * 100).toFixed(0)}% model confidence` : 'Model confidence unavailable'}
+                      {lineup.confidence_score > 0 ? `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability` : 'Cash-line probability uncalibrated'}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-start gap-2 text-right">

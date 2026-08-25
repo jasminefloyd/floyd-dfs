@@ -20,6 +20,7 @@ import { OpenAiResearchSynthesizer } from '../src/lib/engine/openAiSynthesizer.j
 import { ballDontLieProvider, espnProvider } from '../src/lib/engine/structuredSportsProvider.js';
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
+import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
 import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
 
 type Json = Record<string, unknown>;
@@ -191,12 +192,31 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const selectionRun = await db.from('floyd_dfs_selection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: 1, selection_package: selection, status: selection.status }).select('id').single();
   if (selectionRun.error) throw selectionRun.error;
   if (selection.selectedLineups.length) {
-    const lineups = selection.selectedLineups.map((lineup) => ({ tenant_id: run.tenant_id, selection_run_id: selectionRun.data.id, candidate_key: lineup.candidateId, bullet_number: lineup.bulletNumber, selection_type: lineup.selectionType, lineup_payload: lineup, status: 'GENERATED' }));
+    const calibration = await loadCashLineCalibration(db, String(run.tenant_id));
+    const lineups = selection.selectedLineups.map((lineup) => {
+      const cashLine = workingSlate.contest.cashLine;
+      const rawProbability = cashLine ? rawCashLineProbability({ median: lineup.median, floor: lineup.floor, ceiling: lineup.ceiling, cashLine }) : null;
+      const calibratedProbability = calibratedCashLineProbability(rawProbability, calibration);
+      return { tenant_id: run.tenant_id, selection_run_id: selectionRun.data.id, candidate_key: lineup.candidateId, bullet_number: lineup.bulletNumber, selection_type: lineup.selectionType, lineup_payload: lineup, status: 'GENERATED', cash_line: cashLine ?? null, raw_cash_line_probability: rawProbability, cash_line_probability: calibratedProbability, cash_line_calibration_status: calibration.status, cash_line_calibration_version: CASH_LINE_CALIBRATION_VERSION };
+    });
     const inserted = await db.from('floyd_dfs_generated_lineups').insert(lineups);
     if (inserted.error) throw inserted.error;
   }
   await db.from('generation_runs').update({ state: selection.status === 'BLOCKED' ? 'blocked' : 'complete', current_stage: 'SELECTION' }).eq('id', run.id);
   return { ...run, state: selection.status === 'BLOCKED' ? 'blocked' : 'complete', stages, lineups: selection.selectedLineups };
+}
+
+async function loadCashLineCalibration(db: SupabaseClient, tenantId: string) {
+  const lineups = await db.from('floyd_dfs_generated_lineups').select('id,raw_cash_line_probability').eq('tenant_id', tenantId).not('raw_cash_line_probability', 'is', null).limit(5000);
+  if (lineups.error) throw lineups.error;
+  const results = await db.from('floyd_dfs_contest_results').select('generated_lineup_id,beat_cash_line').eq('tenant_id', tenantId).not('beat_cash_line', 'is', null).limit(5000);
+  if (results.error) throw results.error;
+  const rawById = new Map((lineups.data ?? []).map((row) => [String(row.id), Number(row.raw_cash_line_probability)]));
+  const observations: CashLineObservation[] = (results.data ?? []).flatMap((row) => {
+    const raw = rawById.get(String(row.generated_lineup_id));
+    return raw === undefined ? [] : [{ rawProbability: raw, beatCashLine: row.beat_cash_line === true }];
+  });
+  return buildCashLineCalibration(observations);
 }
 async function persistConfiguration(db: SupabaseClient, tenantId: string): Promise<void> {
   const models = [
