@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { applyAvailabilitySnapshot } from '../src/lib/engine/availability';
+import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { selectLineups } from '../src/lib/engine/selection';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
@@ -44,9 +45,18 @@ const testOptimizerParity = (): void => {
   assert.equal(showdown.status, 'BLOCKED');
 };
 
+const testUnprojectedPlayerExclusion = (): void => {
+  const slateWithExtraPlayer: ValidatedSlate = { ...baseSlate, playerPool: [...baseSlate.playerPool, { playerId: 'p4', playerName: 'Four', team: 'B', salary: 100, eligibility: { G: true, F: true } }] };
+  const result = optimizeLineups({ validatedSlate: slateWithExtraPlayer, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(result.status, 'COMPLETE');
+  assert.ok(result.candidates.every((candidate) => !candidate.playerIds.includes('p4')));
+  assert.ok(result.warnings.some((warning) => warning.includes('Four')));
+};
+
 const testSalarySlotParity = (): void => {
   const slate = showdownSlate();
-  const playerPool = slate.playerPool.map((player) => ({ ...player, playerId: player.playerId.replace('home-', 'p') }));
+  const idMap: Record<string, string> = { 'home-1': 'p1', 'home-2': 'p2', 'away-1': 'p3' };
+  const playerPool = slate.playerPool.map((player) => ({ ...player, playerId: idMap[player.playerId] ?? player.playerId }));
   const result = optimizeLineups({ validatedSlate: { ...slate, playerPool, salaryCap: 15000 }, projectionPackage: { ...projection, players: projection.players } });
   assert.equal(result.status, 'COMPLETE');
   assert.ok(result.candidates.some((item) => item.rosterSlots.CPT === 'p1' && item.salaryUsed === 10500));
@@ -58,10 +68,32 @@ const testSelectionParity = (): void => {
   assert.equal(result.status, 'COMPLETE'); assert.equal(result.selectedLineups.length, 1); assert.ok(optimizer.candidates.some((candidate) => candidate.id === result.selectedLineups[0].candidateId));
 };
 
+const testSelectionWatchItemsParity = (): void => {
+  const optimizer = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: projection });
+  const researchWithWatch: ResearchPackage = { ...research, watchItems: [{ subjectId: 'p1', importance: 'CRITICAL', reason: 'Confirmed starting lineup not yet posted.', expectedChangeBeforeLock: true }] };
+  const result = selectLineups({ validatedSlate: baseSlate, researchPackage: researchWithWatch, optimizerPackage: optimizer }, now);
+  assert.equal(result.status, 'COMPLETE');
+  const lineup = result.selectedLineups[0];
+  assert.ok(lineup.playerIds.includes('p1'));
+  assert.equal(lineup.readinessStatus, 'READY_WITH_WATCH');
+  assert.ok(lineup.watchItems.some((item) => item.includes('starting lineup')));
+};
+
 const testAvailabilityParity = (): void => {
   const mlb = { ...baseSlate, sport: 'MLB' as const, league: 'MLB' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player One', team: 'CWS' }, { ...baseSlate.playerPool[1], playerName: 'Player Two', team: 'NYY' }] };
   const result = applyAvailabilitySnapshot(mlb, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: true, records: [{ playerName: 'Player One', team: 'CWS', status: 'CONFIRMED_STARTER', confirmed: true, battingOrder: 1 }] });
   assert.equal(result.playerPool.length, 1); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
+};
+
+const testCashLineCalibrationBoundaryParity = (): void => {
+  const observations = Array.from({ length: 120 }, (_, index) => ({ rawProbability: 0.85, beatCashLine: index % 20 !== 0 }));
+  const calibration = buildCashLineCalibration(observations);
+  assert.equal(calibration.status, 'APPROVED');
+  const probability = calibratedCashLineProbability(0.85, calibration);
+  assert.ok(probability !== null);
+  const bin = calibration.bins.find((item) => item.lower === 0.85);
+  assert.ok(bin);
+  assert.equal(probability, bin?.observedRate);
 };
 
 const testContractParity = (): void => {
@@ -70,5 +102,5 @@ const testContractParity = (): void => {
   assert.throws(() => assertSlate({ ...baseSlate, scoringRules: {} }), /scoring rules are required/);
 };
 
-testOptimizerParity(); testSalarySlotParity(); testSelectionParity(); testAvailabilityParity(); testContractParity();
+testOptimizerParity(); testUnprojectedPlayerExclusion(); testSalarySlotParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
 console.log('engine parity tests passed');

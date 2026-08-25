@@ -1,5 +1,7 @@
 import type { ContestFormat, RosterRules, SlatePlayer, Sport, ValidatedSlate } from './contracts.js';
 import type { DraftKingsApiBundle } from './draftKings.js';
+import { parseDraftKingsDateValue } from './draftKings.js';
+import { validateSlate } from './validation.js';
 
 export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; cashLine?: number; }
 export class DraftKingsSlateMappingError extends Error { constructor(message: string) { super(message); this.name = 'DraftKingsSlateMappingError'; } }
@@ -20,21 +22,63 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const scoringRules = mapScoringRules(rules);
   const scoringWarnings = Object.keys(scoringRules).length ? [] : [`DraftKings game-type rules did not return scoring values; applied the verified standard ${context.sport} scoring profile.`];
   const resolvedScoringRules = Object.keys(scoringRules).length ? scoringRules : standardScoringRules(context.sport);
-  const validationErrors = [
-    ...(playerPool.length ? [] : ['DraftKings draftables response did not contain eligible players.']),
-    ...(Object.keys(resolvedScoringRules).length ? [] : ['DraftKings scoring rules are missing; generation is blocked.']),
-    ...(Object.keys(rosterRules.slots).length ? [] : ['DraftKings roster rules are missing; generation is blocked.']),
-  ];
-  return {
+  const slate: ValidatedSlate = {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
-    event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate(draftGroup, ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
-    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate(draftGroup, ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
-    salaryCap: readNestedNumber(rules, ['salaryCap', 'salary_cap', 'maxValue']) ?? 0, rosterRules, scoringRules: resolvedScoringRules, playerPool, sourceManifest, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors },
+    event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate([draftGroup], ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
+    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate([contest, draftGroup], ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
+    salaryCap: readNestedNumber(rules, ['salaryCap', 'salary_cap', 'maxValue']) ?? 0, rosterRules, scoringRules: resolvedScoringRules, playerPool, sourceManifest, validation: { status: 'VALID', warnings: [], errors: [] },
   };
+  const validationErrors = validateSlate(slate);
+  return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors } };
+}
+
+export interface DraftKingsScreenshotExtraction {
+  sport?: string | null;
+  contestName?: string | null;
+  contestFormat?: string | null;
+  lockTime?: string | null;
+  salaryCap?: number | null;
+  scoringRules?: Record<string, number>;
+  players: Array<{ playerId?: string | null; playerName: string; team?: string | null; salary?: number | null; captainSalary?: number | null; utilitySalary?: number | null; eligibility: string[] }>;
+}
+
+export interface DraftKingsScreenshotContext { tenantId: string; userId: string; requestId: string; assetId: string; sport: Sport; league: Sport; contestFormat: ContestFormat; userEntryCount: number; receivedAt: string; }
+
+export function buildValidatedSlateFromScreenshot(extracted: DraftKingsScreenshotExtraction, context: DraftKingsScreenshotContext): ValidatedSlate {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  if (context.contestFormat !== 'SHOWDOWN') errors.push('Screenshot ingestion only supports DraftKings Showdown contests; Classic roster rules cannot be reliably read from an image, and DraftKings-provided data is required instead.');
+  const rosterRules: RosterRules = { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } };
+  const scoringRulesFromImage = Object.fromEntries(Object.entries(extracted.scoringRules ?? {}).flatMap(([key, value]) => Number.isFinite(value) ? [[key, { value }]] : []));
+  const scoringRules = Object.keys(scoringRulesFromImage).length ? scoringRulesFromImage : standardScoringRules(context.sport);
+  if (!Object.keys(scoringRulesFromImage).length) warnings.push(`Screenshot did not contain readable scoring rules; applied the verified standard ${context.sport} scoring profile.`);
+  const players: SlatePlayer[] = [];
+  (extracted.players ?? []).forEach((player, index) => {
+    if (!player.playerName || !Number.isFinite(player.salary ?? NaN) || Number(player.salary) <= 0) { warnings.push(`Skipped screenshot player at index ${index}: name or salary was not readable.`); return; }
+    const utilitySalary = Number.isFinite(player.utilitySalary ?? NaN) ? Number(player.utilitySalary) : Number(player.salary);
+    const captainSalary = Number.isFinite(player.captainSalary ?? NaN) ? Number(player.captainSalary) : Math.round(utilitySalary * rosterRules.slots.CPT.salaryMultiplier!);
+    players.push({ playerId: player.playerId?.trim() ? player.playerId.trim() : stableId(`${context.requestId}:${player.playerName}:${index}`), playerName: player.playerName, team: player.team ?? undefined, salary: utilitySalary, captainSalary, utilitySalary, eligibility: { CPT: true, UTIL: true } });
+  });
+  if (!players.length) errors.push('Screenshot did not contain any readable players.');
+  if (!Number.isFinite(extracted.salaryCap ?? NaN) || Number(extracted.salaryCap) <= 0) errors.push('Screenshot did not contain a readable salary cap.');
+  const lockTime = extracted.lockTime ? parseDraftKingsDateValue(extracted.lockTime) : undefined;
+  if (!lockTime) errors.push('Screenshot did not contain a readable lock time.');
+  const now = context.receivedAt;
+  const slate: ValidatedSlate = {
+    slateId: stableId(`${context.tenantId}:${context.requestId}:${context.assetId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt: now, createdAt: now, sport: context.sport, league: context.league,
+    event: { eventId: context.assetId, name: extracted.contestName ?? 'DraftKings event (screenshot)', eventDate: lockTime ?? now, participants: [] },
+    contest: { draftKingsContestId: context.assetId, name: extracted.contestName ?? 'DraftKings contest (screenshot)', format: context.contestFormat, lockTime: lockTime ?? now, contestSize: undefined, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: undefined },
+    salaryCap: Number.isFinite(extracted.salaryCap ?? NaN) ? Number(extracted.salaryCap) : 0,
+    rosterRules, scoringRules, playerPool: players,
+    sourceManifest: [{ source: 'DRAFTKINGS_SCREENSHOT', receivedAt: now, fields: ['players', 'salaryCap', 'scoringRules', 'lockTime'] }],
+    validation: { status: 'VALID', warnings, errors },
+  };
+  const validationErrors = [...errors, ...validateSlate(slate).filter((error) => !errors.includes(error))];
+  return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings, errors: validationErrors } };
 }
 
 function mapRosterRules(record: Record<string, unknown>, format: ContestFormat): RosterRules {
-  if (format === 'SHOWDOWN') return { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } };
+  if (format === 'SHOWDOWN') { const multiplier = resolveShowdownCaptainMultiplier(record) ?? 1.5; return { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: multiplier, fantasyMultiplier: multiplier }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } }; }
   const source = asRecord(record.rosterRules) ?? record;
   const slotsSource = asRecord(source.slots);
   const template = Array.isArray(source.lineupTemplate) ? source.lineupTemplate.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
@@ -45,11 +89,24 @@ function mapRosterRules(record: Record<string, unknown>, format: ContestFormat):
   return { rosterSize: readNumber(source, ['rosterSize', 'roster_size']) ?? Object.values(slots).reduce((sum, slot) => sum + slot.count, 0), slots, uniquePlayersRequired: readBoolean(source, ['uniquePlayersRequired', 'unique_players_required'], true), teamConstraints: asRecord(source.teamConstraints) as RosterRules['teamConstraints'] };
 }
 
+function resolveShowdownCaptainMultiplier(record: Record<string, unknown>): number | undefined {
+  const source = asRecord(record.rosterRules) ?? record;
+  const template = Array.isArray(source.lineupTemplate) ? source.lineupTemplate.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
+  for (const item of template) {
+    const slot = asRecord(item.rosterSlot) ?? item;
+    const name = readOptionalString(slot, ['name'])?.toUpperCase() ?? '';
+    if (!name.includes('CPT') && !name.includes('CAPTAIN') && !name.includes('MVP')) continue;
+    const multiplier = readMultiplier(slot, ['positionTip', 'positionTipSubtext']) ?? readNumber(slot, ['salaryMultiplier', 'salary_multiplier', 'fantasyMultiplier', 'fantasy_multiplier']);
+    if (multiplier) return multiplier;
+  }
+  return readNumber(source, ['captainMultiplier', 'captain_multiplier']);
+}
+
 function mapDraftables(record: Record<string, unknown>, format: ContestFormat, rules: RosterRules): { players: SlatePlayer[]; warnings: string[] } {
   const values = Array.isArray(record.draftables) ? record.draftables : Array.isArray(record.players) ? record.players : [];
-  const warnings: string[] = []; const mapped = values.flatMap((value, index) => { const player = asRecord(value); if (!player) { warnings.push(`Skipped DraftKings draftable at index ${index}: record was not an object.`); return []; } const nested = asRecord(player.player) ?? asRecord(player.athlete) ?? asRecord(player.competitor) ?? asRecord(player.draftable); const source = nested ? { ...player, ...nested } : player; const salary = readNumber(source, ['salary', 'draftKingsSalary']); if (!salary) { warnings.push(`Skipped DraftKings draftable at index ${index}: salary was missing.`); return []; } const playerId = readStringOrNumber(source, ['playerId', 'playerID', 'PlayerId', 'playerDkId', 'draftableId', 'draftableID', 'id', 'Id', 'ID']); const playerName = readOptionalString(source, ['playerName', 'displayName', 'name', 'Name']); if (!playerId || !playerName) { warnings.push(`Skipped DraftKings draftable at index ${index}: player identity was missing.`); return []; } const eligibility = format === 'SHOWDOWN' ? { CPT: true, UTIL: true } : Object.fromEntries(readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']).map((slot) => [slot, true])); const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const captainSalary = format === 'SHOWDOWN' ? Math.round(utilitySalary * 1.5) : (readNumber(source, ['captainSalary', 'captain_salary']) ?? Math.round(salary * (rules.slots.CPT?.salaryMultiplier ?? 1.5))); return [{ playerId, playerName, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position: readOptionalString(source, ['position']), salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
+  const warnings: string[] = []; const mapped = values.flatMap((value, index) => { const player = asRecord(value); if (!player) { warnings.push(`Skipped DraftKings draftable at index ${index}: record was not an object.`); return []; } const nested = asRecord(player.player) ?? asRecord(player.athlete) ?? asRecord(player.competitor) ?? asRecord(player.draftable); const source = nested ? { ...player, ...nested } : player; const salary = readNumber(source, ['salary', 'draftKingsSalary']); if (!salary) { warnings.push(`Skipped DraftKings draftable at index ${index}: salary was missing.`); return []; } const playerId = readStringOrNumber(source, ['playerId', 'playerID', 'PlayerId', 'playerDkId', 'draftableId', 'draftableID', 'id', 'Id', 'ID']); const playerName = readOptionalString(source, ['playerName', 'displayName', 'name', 'Name']); if (!playerId || !playerName) { warnings.push(`Skipped DraftKings draftable at index ${index}: player identity was missing.`); return []; } const eligibility = format === 'SHOWDOWN' ? { CPT: true, UTIL: true } : Object.fromEntries(readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']).map((slot) => [slot, true])); const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const captainMultiplier = rules.slots.CPT?.salaryMultiplier ?? 1.5; const captainSalary = format === 'SHOWDOWN' ? Math.round(utilitySalary * captainMultiplier) : (readNumber(source, ['captainSalary', 'captain_salary']) ?? Math.round(salary * captainMultiplier)); return [{ playerId, playerName, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position: readOptionalString(source, ['position']), salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
   const merged = new Map<string, SlatePlayer>();
-  for (const player of mapped) { const existing = merged.get(player.playerId); if (!existing) merged.set(player.playerId, player); else { const utilitySalary = Math.min(existing.utilitySalary ?? existing.salary, player.utilitySalary ?? player.salary); merged.set(player.playerId, { ...existing, salary: utilitySalary, utilitySalary, captainSalary: format === 'SHOWDOWN' ? Math.round(utilitySalary * 1.5) : Math.max(existing.captainSalary ?? 0, player.captainSalary ?? 0), providerFppg: existing.providerFppg ?? player.providerFppg }); } }
+  for (const player of mapped) { const existing = merged.get(player.playerId); if (!existing) merged.set(player.playerId, player); else { const utilitySalary = Math.min(existing.utilitySalary ?? existing.salary, player.utilitySalary ?? player.salary); const eligibility = { ...existing.eligibility, ...player.eligibility }; merged.set(player.playerId, { ...existing, salary: utilitySalary, utilitySalary, eligibility, captainSalary: format === 'SHOWDOWN' ? Math.round(utilitySalary * (rules.slots.CPT?.salaryMultiplier ?? 1.5)) : Math.max(existing.captainSalary ?? 0, player.captainSalary ?? 0), providerFppg: existing.providerFppg ?? player.providerFppg }); } }
   return { players: [...merged.values()], warnings };
 }
 
@@ -71,6 +128,6 @@ function readStringArray(record: Record<string, unknown>, keys: string[]): strin
 function readNumber(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'number' && Number.isFinite(value)) return value; if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value); } return undefined; }
 function readNestedNumber(record: Record<string, unknown>, keys: string[]): number | undefined { const direct = readNumber(record, keys); if (direct !== undefined) return direct; for (const key of keys) { const nested = asRecord(record[key]); const value = nested ? readNumber(nested, ['maxValue', 'value', 'maximum', 'amount']) : undefined; if (value !== undefined) return value; } return undefined; }
 function readBoolean(record: Record<string, unknown>, keys: string[], fallback: boolean): boolean { for (const key of keys) { const value = record[key]; if (typeof value === 'boolean') return value; if (value === 'true' || value === 1) return true; if (value === 'false' || value === 0) return false; } return fallback; }
-function readDate(record: Record<string, unknown>, keys: string[], fallback?: string): string { const value = readOptionalString(record, keys) ?? fallback; if (value) { const parsed = new Date(value); if (!Number.isNaN(parsed.getTime())) return parsed.toISOString(); } throw new DraftKingsSlateMappingError(`Missing required date field: ${keys.join(' / ')}.`); }
+function readDate(records: Record<string, unknown>[], keys: string[], fallback?: string): string { for (const record of records) { const value = readOptionalString(record, keys); const parsed = value ? parseDraftKingsDateValue(value) : undefined; if (parsed) return parsed; } const fallbackParsed = fallback ? parseDraftKingsDateValue(fallback) : undefined; if (fallbackParsed) return fallbackParsed; throw new DraftKingsSlateMappingError(`Missing required date field: ${keys.join(' / ')}.`); }
 function readMultiplier(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const match = String(record[key] ?? '').match(/([0-9]+(?:\.[0-9]+)?)\s*x/i); if (match) return Number(match[1]); } return undefined; }
 function stableId(value: string): string { let hash = 2166136261; for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); } return (hash >>> 0).toString(16).padStart(8, '0').repeat(4).slice(0, 32); }

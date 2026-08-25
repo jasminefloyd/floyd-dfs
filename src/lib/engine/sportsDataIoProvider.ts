@@ -35,6 +35,17 @@ export class SportsDataIoClient {
     if (!Array.isArray(payload)) return [];
     return payload.flatMap((value) => { const row = value && typeof value === 'object' ? value as Record<string, unknown> : undefined; if (!row || typeof row.Name !== 'string') return []; const fantasy = typeof row.FantasyPointsDraftKings === 'number' ? row.FantasyPointsDraftKings : Number(row.FantasyPointsDraftKings); return [{ name: row.Name, team: typeof row.Team === 'string' ? row.Team : undefined, providerPlayerId: row.PlayerID === undefined ? undefined : String(row.PlayerID), fantasyPointsDraftKings: Number.isFinite(fantasy) ? fantasy : undefined, updatedAt: typeof row.Updated === 'string' ? row.Updated : undefined }]; });
   }
+  /**
+   * Raw per-player projected box-score rows for the slate's sport/date, used to derive
+   * rate-based projectionInputs (see projectionInputs.ts). Covers NBA/WNBA/MLB/NFL; the
+   * exact stat fields present vary by sport and are read defensively downstream since
+   * this repo cannot verify SportsDataIO's field names against a live subscription.
+   */
+  async getPlayerGameProjectionStats(slate: ValidatedSlate, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
+    const payload = await this.get<unknown>(slate.sport, 'projections', 'PlayerGameProjectionStatsByDate', sportsDataDate(slate), signal);
+    if (!Array.isArray(payload)) return [];
+    return payload.flatMap((value) => (value && typeof value === 'object' ? [value as Record<string, unknown>] : []));
+  }
 }
 
 export interface SportsDataIoResearchProviderOptions { client: SportsDataIoClient; feed?: string; resource?: string; tier?: SourceTier; }

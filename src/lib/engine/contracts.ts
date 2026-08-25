@@ -179,7 +179,7 @@ export interface ProjectionPackage {
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
 }
 
-export type CandidateType = 'HIGHEST_MEDIAN' | 'HIGHEST_CEILING' | 'BEST_TOURNAMENT_EV' | 'LEVERAGE' | 'LOW_DUPLICATION';
+export type CandidateType = 'HIGHEST_MEDIAN' | 'HIGHEST_CEILING' | 'BEST_TOURNAMENT_EV' | 'LEVERAGE' | 'LOW_DUPLICATION' | 'ALTERNATE_GAME_SCRIPT';
 export type DuplicationRisk = 'LOW' | 'MEDIUM' | 'HIGH';
 
 export interface ObjectiveProfile {
@@ -290,9 +290,10 @@ export interface ResearchPackage {
   generatedAt: string;
   freshThrough: string;
   findings: ResearchFinding[];
-  unknowns?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string }>;
+  unknowns?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>;
   providerResults?: Array<{ provider: string; tier?: SourceTier; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; articleCount: number; acceptedArticleCount?: number; rejectedArticleCount?: number; rejectionSamples?: string[]; error?: string }>;
   conflicts?: ResearchConflict[];
+  watchItems?: Array<{ subjectId?: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; expectedChangeBeforeLock: boolean }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
 }
 
@@ -338,6 +339,8 @@ export interface SelectedLineup {
   median: number;
   floor?: number;
   ceiling: number;
+  watchItems: string[];
+  readinessStatus: 'READY' | 'READY_WITH_WATCH';
 }
 
 export interface SelectionPackage {
@@ -348,5 +351,6 @@ export interface SelectionPackage {
   generatedAt: string;
   selectedLineups: SelectedLineup[];
   optimizerGap?: string;
+  warnings: string[];
   status: 'COMPLETE' | 'BLOCKED';
 }

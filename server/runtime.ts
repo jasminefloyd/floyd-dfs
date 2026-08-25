@@ -10,7 +10,7 @@ import { selectLineups } from '../src/lib/engine/selection.js';
 import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
 import { SportsDataIoClient, SportsDataIoResearchProvider } from '../src/lib/engine/sportsDataIoProvider.js';
-import { applyAvailabilitySnapshot } from '../src/lib/engine/availability.js';
+import { applyAvailabilitySnapshot, normalizeTeamCode } from '../src/lib/engine/availability.js';
 import { assertAdjustment, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection.js';
 import { OddsResearchProvider } from '../src/lib/engine/oddsProvider.js';
@@ -21,6 +21,7 @@ import { ballDontLieProvider, espnProvider } from '../src/lib/engine/structuredS
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
+import { deriveProjectionInputs } from '../src/lib/engine/projectionInputs.js';
 import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
 
 type Json = Record<string, unknown>;
@@ -82,7 +83,7 @@ export async function saveStage(db: SupabaseClient, run: Json, stage: EngineStag
 export async function recordEvent(db: SupabaseClient, event: { tenant_id: string; generation_run_id?: string; event_type: string; stage?: string; payload?: unknown }): Promise<void> { const result = await db.from('engine_events').insert({ ...event, payload: event.payload ?? {} }); if (result.error) throw result.error; }
 function stateForStage(stage: EngineStage): string { return ({ SLATE: 'slate_validated', RESEARCH: 'researching', SPORT_ADJUSTMENT: 'adjusting', PROJECTION: 'projecting', OPTIMIZE: 'optimizing', SELECTION: 'selecting' } as Record<string, string>)[stage] ?? 'created'; }
 
-function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient; espnProjection?: EspnProjectionClient } {
+export function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient; espnProjection?: EspnProjectionClient } {
   const providers = [...createDefaultRssProviders() as import('../src/lib/engine/contracts.js').ResearchSourceProvider[]];
   const sportsKey = env('SPORTS_DATA_IO_KEY');
   let availability: SportsDataIoClient | undefined;
@@ -116,22 +117,30 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (availability) {
     try { workingSlate = applyAvailabilitySnapshot(workingSlate, await availability.getAvailabilitySnapshot(workingSlate)); }
     catch (error) { stages.availabilityWarning = error instanceof Error ? error.message : 'Availability refresh failed.'; }
+    // Providers may not return a matching row for every player. That no longer removes the
+    // player from the slate here — projectSlate's own gap logic (which also checks
+    // projectionInputs, populated below) is the single source of truth for whether a player
+    // is quantitatively projectable; excluding them upstream would silently drop a player who
+    // could still be projected from rate stats even without a raw FPPG number.
     if (workingSlate.sport === 'MLB') {
       try {
         const projections = await availability.getProjectionSnapshot(workingSlate);
         const byNameAndTeam = new Map(projections.map((projection) => [`${normalizeProjectionName(projection.name)}:${String(projection.team ?? '').toUpperCase()}`, projection]));
         const missingProjectionPlayers: string[] = [];
-        const refreshedPlayers = workingSlate.playerPool.flatMap((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${String(player.team ?? '').toUpperCase()}`); if (!projection || projection.fantasyPointsDraftKings === undefined) { missingProjectionPlayers.push(player.playerName); return []; } return [{ ...player, providerFppg: projection.fantasyPointsDraftKings }]; });
+        const refreshedPlayers = workingSlate.playerPool.map((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${String(player.team ?? '').toUpperCase()}`); if (!projection || projection.fantasyPointsDraftKings === undefined) { missingProjectionPlayers.push(player.playerName); return player; } return { ...player, providerFppg: projection.fantasyPointsDraftKings }; });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
-        if (missingProjectionPlayers.length) stages.projectionWarning = `SportsDataIO did not return a DraftKings projection for ${missingProjectionPlayers.length} MLB players; excluded them from quantitative projection until a provider projection is available: ${missingProjectionPlayers.join(', ')}.`;
+        if (missingProjectionPlayers.length) stages.projectionWarning = `SportsDataIO did not return a DraftKings projection for ${missingProjectionPlayers.length} MLB players: ${missingProjectionPlayers.join(', ')}.`;
       } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'SportsDataIO projection refresh failed.'; }
     }
     if (workingSlate.sport === 'NFL') {
       const missingProjectionPlayers = workingSlate.playerPool.filter((player) => !Number.isFinite(player.providerFppg)).map((player) => player.playerName);
-      if (missingProjectionPlayers.length) {
-        workingSlate = { ...workingSlate, playerPool: workingSlate.playerPool.filter((player) => Number.isFinite(player.providerFppg)) };
-        stages.projectionWarning = `DraftKings did not provide native FPPG projections for ${missingProjectionPlayers.length} NFL players; excluded them from quantitative projection: ${missingProjectionPlayers.join(', ')}.`;
-      }
+      if (missingProjectionPlayers.length) stages.projectionWarning = `DraftKings did not provide native FPPG projections for ${missingProjectionPlayers.length} NFL players: ${missingProjectionPlayers.join(', ')}.`;
+    }
+    if (['NBA', 'WNBA', 'MLB', 'NFL'].includes(workingSlate.sport)) {
+      try {
+        const rows = await availability.getPlayerGameProjectionStats(workingSlate);
+        if (rows.length) workingSlate = { ...workingSlate, playerPool: workingSlate.playerPool.map((player) => { const inputs = deriveProjectionInputs(workingSlate.sport, player, rows); return inputs ? { ...player, projectionInputs: inputs } : player; }) };
+      } catch (error) { stages.projectionInputsWarning = error instanceof Error ? error.message : 'SportsDataIO projection-stats refresh failed.'; }
     }
   }
   if (espnProjection && (workingSlate.sport === 'NBA' || workingSlate.sport === 'WNBA')) {
@@ -139,9 +148,9 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       const projections = await espnProjection.getBasketballProjectionSnapshot(workingSlate);
       const byNameAndTeam = new Map(projections.map((projection) => [`${normalizeProjectionName(projection.name)}:${normalizeProjectionTeam(projection.team)}`, projection]));
       const missingProjectionPlayers: string[] = [];
-      const refreshedPlayers = workingSlate.playerPool.flatMap((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${normalizeProjectionTeam(String(player.team ?? ''))}`); if (!projection) { missingProjectionPlayers.push(player.playerName); return []; } return [{ ...player, providerFppg: projection.providerFppg }]; });
+      const refreshedPlayers = workingSlate.playerPool.map((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${normalizeProjectionTeam(String(player.team ?? ''))}`); if (!projection) { missingProjectionPlayers.push(player.playerName); return player; } return { ...player, providerFppg: projection.providerFppg }; });
       workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
-      if (missingProjectionPlayers.length) stages.projectionWarning = `ESPN did not return season-average projections for ${missingProjectionPlayers.length} ${workingSlate.sport} players; excluded them from quantitative projection: ${missingProjectionPlayers.join(', ')}.`;
+      if (missingProjectionPlayers.length) stages.projectionWarning = `ESPN did not return season-average projections for ${missingProjectionPlayers.length} ${workingSlate.sport} players: ${missingProjectionPlayers.join(', ')}.`;
     } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'ESPN projection refresh failed.'; }
   }
   await saveStage(db, run, 'SLATE', { contestId: workingSlate.contest.draftKingsContestId }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
@@ -188,7 +197,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   }
   assertSelection(selection, optimizer);
   stages.selection = selection;
-  await saveStage(db, run, 'SELECTION', optimizer, selection, selection.status);
+  await saveStage(db, run, 'SELECTION', optimizer, selection, selection.status, selection.warnings ?? []);
   const selectionRun = await db.from('floyd_dfs_selection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: 1, selection_package: selection, status: selection.status }).select('id').single();
   if (selectionRun.error) throw selectionRun.error;
   if (selection.selectedLineups.length) {
@@ -235,7 +244,7 @@ async function persistConfiguration(db: SupabaseClient, tenantId: string): Promi
 export function parseBody(req: VercelRequest): Json { if (!req.body) return {}; if (typeof req.body === 'string') return JSON.parse(req.body) as Json; return req.body as Json; }
 function openAiModel(): string | undefined { return env('OPENAI_MODEL') ?? env('AI_MODEL') ?? ((env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY')) ? 'gpt-5' : undefined); }
 function normalizeProjectionName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]/g, ''); }
-function normalizeProjectionTeam(value: string): string { return ({ WAS: 'WSH', PDX: 'POR' } as Record<string, string>)[value.toUpperCase()] ?? value.toUpperCase(); }
+function normalizeProjectionTeam(value: string): string { return normalizeTeamCode(value); }
 export function asFormat(value: unknown): ContestFormat { return String(value ?? 'SHOWDOWN').toUpperCase() === 'CLASSIC' ? 'CLASSIC' : 'SHOWDOWN'; }
 export function asSport(value: unknown): 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' { const sport = String(value ?? '').toUpperCase(); if (['WNBA', 'NBA', 'MLB', 'GOLF', 'NFL'].includes(sport)) return sport as 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL'; throw new Error(`Unsupported sport: ${sport}.`); }
 export type { Json };

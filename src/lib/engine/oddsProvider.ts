@@ -2,7 +2,7 @@ import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, ValidatedSl
 
 export interface OddsResearchProviderOptions { apiKey: string; baseUrl?: string; sportKey?: string; fetcher?: typeof fetch; }
 export class OddsResearchProvider implements ResearchSourceProvider {
-  readonly name = 'The Odds API'; readonly tier = 2 as const;
+  readonly name = 'The Odds API'; readonly tier = 1 as const;
   private readonly options: OddsResearchProviderOptions; private readonly fetcher: typeof fetch;
   constructor(options: OddsResearchProviderOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; }
   async fetch(input: { slate: ValidatedSlate; plan: ResearchPlan; signal?: AbortSignal }): Promise<ResearchArticle[]> {
@@ -17,5 +17,5 @@ export class OddsResearchProvider implements ResearchSourceProvider {
 }
 
 function oddsApiSportKey(sport: ValidatedSlate['sport']): string | undefined {
-  return ({ MLB: 'baseball_mlb', NBA: 'basketball_nba', WNBA: undefined, NFL: 'americanfootball_nfl', GOLF: 'golf_pga' } as const)[sport];
+  return ({ MLB: 'baseball_mlb', NBA: 'basketball_nba', WNBA: 'basketball_wnba', NFL: 'americanfootball_nfl', GOLF: 'golf_pga' } as const)[sport];
 }

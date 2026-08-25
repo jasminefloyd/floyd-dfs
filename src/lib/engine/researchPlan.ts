@@ -10,7 +10,7 @@ const BASE_QUESTIONS: Array<[ResearchBucket, string, ResearchPriority, SourceTie
   ['COMPETITIVE_CONTEXT', 'Are playoff, seeding, elimination, advancement, qualification, rest, or similar conditions relevant?', 'MEDIUM', [1, 2, 3], 1440],
 ];
 
-export function createResearchPlan(slate: ValidatedSlate, now = new Date()): ResearchPlan {
+export function createResearchPlan(slate: ValidatedSlate, now = new Date(), gaps: Array<{ question: string; importance: string; reason: string }> = []): ResearchPlan {
   const questions: ResearchQuestion[] = BASE_QUESTIONS.map(([bucket, question, priority, tiers, freshness]) => ({
     id: `${slate.slateId}:${bucket.toLowerCase()}`,
     bucket,
@@ -28,5 +28,13 @@ export function createResearchPlan(slate: ValidatedSlate, now = new Date()): Res
     freshnessRequirementMinutes: 180,
     subjectId: player.playerId,
   });
+  gaps.forEach((gap, index) => questions.push({
+    id: `${slate.slateId}:gap:${index}`,
+    bucket: 'AVAILABILITY',
+    question: gap.question,
+    priority: 'CRITICAL',
+    preferredSourceTiers: [1, 2],
+    freshnessRequirementMinutes: 60,
+  }));
   return { slateId: slate.slateId, generatedAt: now.toISOString(), questions };
 }

@@ -59,7 +59,10 @@ export function buildCashLineCalibration(observations: CashLineObservation[]): C
 
 export function calibratedCashLineProbability(rawProbability: number | null, calibration: CashLineCalibration): number | null {
   if (rawProbability === null || calibration.status !== 'APPROVED') return null;
-  const bin = calibration.bins.find((item) => rawProbability >= item.lower && rawProbability <= item.upper && item.samples >= CASH_LINE_MIN_BUCKET_SAMPLES);
+  // Bin construction uses a half-open interval [lower, upper) except for the final bin
+  // (upper === 1), which is closed on both ends — the lookup must match exactly, or a
+  // probability sitting on a 0.05 boundary can resolve to the wrong neighboring bin.
+  const bin = calibration.bins.find((item) => rawProbability >= item.lower && (item.upper >= 1 ? rawProbability <= item.upper : rawProbability < item.upper) && item.samples >= CASH_LINE_MIN_BUCKET_SAMPLES);
   if (!bin || bin.lower < CASH_LINE_TARGET_PROBABILITY || bin.lowerConfidenceBound < CASH_LINE_TARGET_PROBABILITY) return null;
   return clamp(bin.observedRate);
 }

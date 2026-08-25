@@ -3,6 +3,8 @@ import type {
   ObjectiveProfile,
   OptimizerPackage,
   ProjectionPackage,
+  SlatePlayer,
+  Sport,
   ValidatedSlate,
 } from './contracts.js';
 
@@ -21,28 +23,42 @@ export interface OptimizerOptions {
 }
 
 export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions = {}, now = new Date()): OptimizerPackage {
-  const profile = options.objectiveProfile ?? objectiveProfileForContest(input.validatedSlate.contest.contestSize);
+  const contest = input.validatedSlate.contest;
+  const profile = options.objectiveProfile ?? objectiveProfileForContest({ contestSize: contest.contestSize, userEntryCount: contest.userEntryCount, maxEntriesAllowed: contest.maxEntriesAllowed, format: input.validatedSlate.contest.format });
   const maxCandidates = options.maxCandidates ?? 500;
   const warnings = [...input.validatedSlate.validation.warnings];
-  if (input.validatedSlate.contest.contestSize === undefined) warnings.push('contest.contestSize is unavailable; optimizer used the configured fallback objective profile.');
+  if (contest.contestSize === undefined) warnings.push('contest.contestSize is unavailable; optimizer used the configured fallback objective profile.');
   if (input.projectionPackage.status === 'BLOCKED') return blocked(input.validatedSlate, profile, now, ['ProjectionPackage is BLOCKED; no legal lineup can be evaluated.']);
 
   const projectionByPlayer = new Map(input.projectionPackage.players.map((player) => [player.playerId, player]));
-  const slots = slotOrder(input.validatedSlate.rosterRules.slots);
-  if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
-  const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, new Set(), input, generated, maxCandidates * 4);
-  if (!generated.length) return blocked(input.validatedSlate, profile, now, ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
+  const excludedPlayers = input.validatedSlate.playerPool.filter((player) => !projectionByPlayer.has(player.playerId));
+  if (excludedPlayers.length) { const names = excludedPlayers.map((player) => player.playerName); warnings.push(`${excludedPlayers.length} player(s) have no projection and were excluded from lineup generation: ${names.slice(0, 10).join(', ')}${names.length > 10 ? `, and ${names.length - 10} more` : ''}.`); }
+  const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId)) } };
 
-  const ranked = rankCandidates(generated.map((lineup) => scoreCandidate(lineup, input, projectionByPlayer, profile)), maxCandidates);
+  const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
+  if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
+  const limit = maxCandidates * 4;
+  const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => (projectionByPlayer.get(b.playerId)?.salaryEfficiency.medianPer1k ?? 0) - (projectionByPlayer.get(a.playerId)?.salaryEfficiency.medianPer1k ?? 0));
+  const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
+  const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
+  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit);
+  if (!generated.length) return blocked(input.validatedSlate, profile, now, ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
+  if (generated.length >= limit) warnings.push(`Lineup enumeration stopped at ${limit} candidates (a search budget, not exhaustive enumeration); results reflect the highest-value combinations found within that budget, prioritized by salary efficiency.`);
+
+  const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile));
+  const ranked = rankCandidates(scored, maxCandidates);
+  applyFieldHeuristic(ranked);
+  applyStrategicSimilarity(ranked);
   assignTypes(ranked);
   return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE' };
 }
 
-function objectiveProfileForContest(contestSize?: number): ObjectiveProfile {
-  if (contestSize === undefined) return DEFAULT_PROFILE;
-  if (contestSize < 1_000) return SMALL_FIELD_PROFILE;
-  if (contestSize >= 10_000) return LARGE_FIELD_PROFILE;
+interface ContestObjectiveContext { contestSize?: number; userEntryCount: number; maxEntriesAllowed?: number; format: string; }
+function objectiveProfileForContest(context: ContestObjectiveContext): ObjectiveProfile {
+  const singleEntrySmallField = context.userEntryCount <= 1 && (context.contestSize === undefined || context.contestSize < 1_000);
+  if (singleEntrySmallField) return SMALL_FIELD_PROFILE;
+  const largeField = (context.contestSize ?? 0) >= 10_000 || (context.maxEntriesAllowed ?? 0) > 20 || context.userEntryCount > 20;
+  if (largeField) return LARGE_FIELD_PROFILE;
   return DEFAULT_PROFILE;
 }
 
@@ -50,7 +66,19 @@ function slotOrder(slots: Record<string, { count: number }>): string[] {
   return Object.entries(slots).flatMap(([slot, rule]) => Array.from({ length: rule.count }, (_, index) => rule.count > 1 ? `${slot}_${index + 1}` : slot));
 }
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number): void {
+// An optimistic (lowest-possible) salary needed to fill every OTHER slot besides the one
+// currently being assigned, used to prune branches that can never fit under the cap instead
+// of only discovering that at the leaf.
+function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<string, { salaryMultiplier?: number }>): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [slot, rule] of Object.entries(slots)) {
+    const salaries = players.map((player) => salaryForSlot(player, slot, rule)).filter((value): value is number => value !== undefined);
+    result[slot] = salaries.length ? Math.min(...salaries) : cap;
+  }
+  return result;
+}
+
+function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number): void {
   if (output.length >= limit) return;
   if (index === slots.length) {
     const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
@@ -63,18 +91,20 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
   const ruleSlot = baseSlot(slot);
   const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
   const selectedTeams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
-  for (const player of input.validatedSlate.playerPool) {
+  const remainingMinCost = slots.slice(index + 1).reduce((sum, remainingSlot) => sum + (minSalaryBySlot[baseSlot(remainingSlot)] ?? 0), 0);
+  for (const player of playersByValue) {
+    if (output.length >= limit) return;
     if (used.has(player.playerId) && input.validatedSlate.rosterRules.uniquePlayersRequired) continue;
     if (!player.eligibility[ruleSlot]) continue;
     const salary = salaryForSlot(player, ruleSlot, input.validatedSlate.rosterRules.slots[ruleSlot]);
-    if (salary === undefined || salaryUsed + salary > input.validatedSlate.salaryCap) continue;
+    if (salary === undefined || salaryUsed + salary + remainingMinCost > input.validatedSlate.salaryCap) continue;
     const maxPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
     if (maxPerTeam && player.team && Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)?.team).filter((team) => team === player.team).length >= maxPerTeam) continue;
     if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
     if (minimumTeams && minimumTeams > 1 && slots.length === 6 && index === 1 && selectedTeams.size === 1 && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, output, limit);
+    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit);
     delete rosterSlots[slot];
     used.delete(player.playerId);
   }
@@ -88,6 +118,22 @@ function salaryForSlot(player: { salary: number; captainSalary?: number; utility
 
 function baseSlot(slot: string): string { return slot.replace(/_\d+$/, ''); }
 
+// Small, honest correlation model: only same-team pairings can correlate. Sport-specific
+// position pairings get a stronger weight (e.g. NFL QB + pass-catcher); any other same-team
+// pairing gets a modest default. This is not a simulated joint distribution — it's a
+// directional heuristic, same spirit as the rest of the deterministic engine.
+const POSITION_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; weight: number }>>> = {
+  NFL: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.18 }, { a: /^RB$/i, b: /^DST$/i, weight: -0.05 }],
+  NBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
+  WNBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
+};
+function pairCorrelation(sport: Sport, a: SlatePlayer, b: SlatePlayer): number {
+  if (!a.team || a.team !== b.team) return 0;
+  const rules = POSITION_CORRELATION[sport] ?? [];
+  for (const rule of rules) if ((rule.a.test(a.position ?? '') && rule.b.test(b.position ?? '')) || (rule.a.test(b.position ?? '') && rule.b.test(a.position ?? ''))) return rule.weight;
+  return 0.03;
+}
+
 function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUsed: number }, input: OptimizerInput, projectionByPlayer: Map<string, OptimizerInput['projectionPackage']['players'][number]>, profile: ObjectiveProfile): LineupCandidate {
   const players = Object.values(lineup.rosterSlots).map((id) => projectionByPlayer.get(id)).filter((player): player is NonNullable<typeof player> => Boolean(player));
   const projected = (key: 'floorP20' | 'medianP50' | 'ceilingP90') => Object.entries(lineup.rosterSlots).reduce((sum, [slot, id]) => sum + scaledProjection(projectionByPlayer.get(id)?.projectedOutcomes[key] ?? 0, input.validatedSlate.rosterRules.slots[baseSlot(slot)]?.fantasyMultiplier), 0);
@@ -97,16 +143,58 @@ function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUse
   const playerRows = Object.values(lineup.rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)).filter((player): player is NonNullable<typeof player> => Boolean(player));
   const teamCounts = new Map<string, number>();
   for (const player of playerRows) if (player.team) teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
-  const correlationScore = [...teamCounts.values()].reduce((score, count) => score + Math.max(0, count - 1) * 0.05, 0);
+  let correlationScore = 0;
+  for (let i = 0; i < playerRows.length; i += 1) for (let j = i + 1; j < playerRows.length; j += 1) correlationScore += pairCorrelation(input.validatedSlate.sport, playerRows[i], playerRows[j]);
   const ownershipEstimate = players.reduce((sum, player) => sum + 1 / Math.max(1, player.salaryEfficiency.medianPer1k), 0) / Math.max(1, players.length);
   const leverageScore = Math.max(0, 1 - ownershipEstimate);
   const objective = median * profile.medianWeight + ceiling * profile.ceilingWeight + leverageScore * profile.leverageWeight + correlationScore * profile.correlationWeight;
   const id = stableId(JSON.stringify(lineup.rosterSlots));
-  return { id, playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed, salaryRemaining: input.validatedSlate.salaryCap - lineup.salaryUsed, floor, median, ceiling, correlationScore, optimalLineupFrequency: objective, topOnePercentFrequency: objective, ownershipEstimate, leverageScore, duplicationRisk: ownershipEstimate > 0.5 ? 'HIGH' : ownershipEstimate > 0.25 ? 'MEDIUM' : 'LOW', estimatedDuplicates: Math.round(ownershipEstimate * 100), medianRank: 0, ceilingRank: 0, tournamentRank: 0, candidateTypes: [], gameScriptCluster: teamCounts.size > 1 ? 'MULTI_TEAM' : 'SINGLE_TEAM_OR_UNKNOWN', strategicSimilarity: 0, riskFlags: players.flatMap((player) => player.uncertaintyFactors) };
+  const dominantTeam = [...teamCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const gameScriptCluster = teamCounts.size > 1 ? (dominantTeam ? `MULTI_TEAM_${dominantTeam}_LEAN` : 'MULTI_TEAM') : (dominantTeam ? `${dominantTeam}_HEAVY` : 'SINGLE_TEAM_OR_UNKNOWN');
+  return { id, playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed, salaryRemaining: input.validatedSlate.salaryCap - lineup.salaryUsed, floor, median, ceiling, correlationScore, optimalLineupFrequency: objective, topOnePercentFrequency: objective, ownershipEstimate, leverageScore, duplicationRisk: ownershipEstimate > 0.5 ? 'HIGH' : ownershipEstimate > 0.25 ? 'MEDIUM' : 'LOW', estimatedDuplicates: Math.round(ownershipEstimate * 100), medianRank: 0, ceilingRank: 0, tournamentRank: 0, candidateTypes: [], gameScriptCluster, strategicSimilarity: 0, riskFlags: players.flatMap((player) => player.uncertaintyFactors) };
 }
+
+// No real field-ownership data source exists in this repo (no historical contest-entry feed),
+// so this remains a heuristic proxy, not a simulated/trained field model: lineups ranked
+// near the top on median/ceiling are assumed more likely to be widely drafted ("chalk").
+function applyFieldHeuristic(candidates: LineupCandidate[]): void {
+  const total = candidates.length;
+  if (total <= 1) return;
+  for (const candidate of candidates) {
+    const medianPercentile = 1 - (candidate.medianRank - 1) / (total - 1);
+    const chalkProxy = candidate.ownershipEstimate * 0.6 + medianPercentile * 0.4;
+    candidate.ownershipEstimate = Math.max(0, Math.min(1, chalkProxy));
+    candidate.leverageScore = Math.max(0, 1 - candidate.ownershipEstimate);
+    candidate.duplicationRisk = candidate.ownershipEstimate > 0.5 ? 'HIGH' : candidate.ownershipEstimate > 0.25 ? 'MEDIUM' : 'LOW';
+    candidate.estimatedDuplicates = Math.round(candidate.ownershipEstimate * 100);
+  }
+}
+
+function applyStrategicSimilarity(candidates: LineupCandidate[]): void {
+  for (const candidate of candidates) {
+    const others = candidates.filter((other) => other.id !== candidate.id);
+    candidate.strategicSimilarity = others.length ? others.reduce((sum, other) => sum + overlapRatio(candidate.playerIds, other.playerIds), 0) / others.length : 0;
+  }
+}
+function overlapRatio(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }
 
 function scaledProjection(value: number, multiplier?: number): number { return value * (multiplier ?? 1); }
 function rankCandidates(candidates: LineupCandidate[], maxCandidates: number): LineupCandidate[] { const median = [...candidates].sort((a, b) => b.median - a.median); const ceiling = [...candidates].sort((a, b) => b.ceiling - a.ceiling); const tournament = [...candidates].sort((a, b) => b.optimalLineupFrequency - a.optimalLineupFrequency); return candidates.sort((a, b) => b.optimalLineupFrequency - a.optimalLineupFrequency).slice(0, maxCandidates).map((candidate) => ({ ...candidate, medianRank: median.findIndex((item) => item.id === candidate.id) + 1, ceilingRank: ceiling.findIndex((item) => item.id === candidate.id) + 1, tournamentRank: tournament.findIndex((item) => item.id === candidate.id) + 1 })); }
-function assignTypes(candidates: LineupCandidate[]): void { if (!candidates.length) return; const highestMedian = [...candidates].sort((a, b) => b.median - a.median)[0]; const highestCeiling = [...candidates].sort((a, b) => b.ceiling - a.ceiling)[0]; const leverage = [...candidates].sort((a, b) => b.leverageScore - a.leverageScore)[0]; const lowDup = [...candidates].sort((a, b) => a.estimatedDuplicates - b.estimatedDuplicates)[0]; for (const candidate of candidates) { if (candidate.id === highestMedian.id) candidate.candidateTypes.push('HIGHEST_MEDIAN'); if (candidate.id === highestCeiling.id) candidate.candidateTypes.push('HIGHEST_CEILING'); if (candidate.tournamentRank === 1) candidate.candidateTypes.push('BEST_TOURNAMENT_EV'); if (candidate.id === leverage.id) candidate.candidateTypes.push('LEVERAGE'); if (candidate.id === lowDup.id) candidate.candidateTypes.push('LOW_DUPLICATION'); } }
+function assignTypes(candidates: LineupCandidate[]): void {
+  if (!candidates.length) return;
+  const highestMedian = [...candidates].sort((a, b) => b.median - a.median)[0];
+  const highestCeiling = [...candidates].sort((a, b) => b.ceiling - a.ceiling)[0];
+  const leverage = [...candidates].sort((a, b) => b.leverageScore - a.leverageScore)[0];
+  const lowDup = [...candidates].sort((a, b) => a.estimatedDuplicates - b.estimatedDuplicates)[0];
+  const alternateScript = [...candidates].filter((candidate) => candidate.gameScriptCluster !== highestMedian.gameScriptCluster).sort((a, b) => b.optimalLineupFrequency - a.optimalLineupFrequency)[0];
+  for (const candidate of candidates) {
+    if (candidate.id === highestMedian.id) candidate.candidateTypes.push('HIGHEST_MEDIAN');
+    if (candidate.id === highestCeiling.id) candidate.candidateTypes.push('HIGHEST_CEILING');
+    if (candidate.tournamentRank === 1) candidate.candidateTypes.push('BEST_TOURNAMENT_EV');
+    if (candidate.id === leverage.id) candidate.candidateTypes.push('LEVERAGE');
+    if (candidate.id === lowDup.id) candidate.candidateTypes.push('LOW_DUPLICATION');
+    if (alternateScript && candidate.id === alternateScript.id) candidate.candidateTypes.push('ALTERNATE_GAME_SCRIPT');
+  }
+}
 function blocked(slate: ValidatedSlate, profile: ObjectiveProfile, now: Date, gaps: string[]): OptimizerPackage { return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: [], warnings: [], gaps, status: 'BLOCKED' }; }
 function stableId(value: string): string { let hash = 2166136261; for (let index = 0; index < value.length; index += 1) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); } return (hash >>> 0).toString(16).padStart(8, '0').repeat(4).slice(0, 32); }

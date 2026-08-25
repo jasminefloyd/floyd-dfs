@@ -4,7 +4,7 @@ import { createResearchPlan } from './researchPlan.js';
 import { explainArticleRejection, filterArticlesForSlate, findConflicts, linkConflicts, normalizeArticles } from './researchEvidence.js';
 
 export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]> }; now?: () => Date; version?: number; }
-export interface ResearchAgentInput { validatedSlate: ValidatedSlate; researchGaps?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string }>; }
+export interface ResearchAgentInput { validatedSlate: ValidatedSlate; researchGaps?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>; }
 
 export class ResearchAgent {
   private readonly now: () => Date;
@@ -14,11 +14,11 @@ export class ResearchAgent {
 
   async run(input: ResearchAgentInput): Promise<ResearchPackage> {
     const now = this.now();
-    const plan = createResearchPlan(input.validatedSlate, now);
+    const plan = createResearchPlan(input.validatedSlate, now, input.researchGaps ?? []);
     if (!this.options.providers.length) return blockedPackage(input.validatedSlate, plan, now, 'No research source providers are configured.');
     const articles = [] as Awaited<ReturnType<ResearchSourceProvider['fetch']>>;
     const providerResults: NonNullable<ResearchPackage['providerResults']> = [];
-    const unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string }> = [];
+    const unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }> = [];
     for (const provider of this.options.providers) {
       try {
         const fetched = await provider.fetch({ slate: input.validatedSlate, plan });
@@ -33,7 +33,6 @@ export class ResearchAgent {
         // contract incomplete when other evidence or synthesis succeeded.
       }
     }
-    for (const gap of input.researchGaps ?? []) unknowns.push(gap);
     const slateArticles = filterArticlesForSlate(articles, input.validatedSlate);
     let findings = normalizeArticles(slateArticles, input.validatedSlate, now);
     if (this.options.synthesizer) {
@@ -48,6 +47,19 @@ export class ResearchAgent {
       }
     }
     if (!findings.length) unknowns.push({ question: `Retrieve evidence for the ${input.validatedSlate.sport} slate.`, importance: 'HIGH', reason: 'No research evidence matched the selected slate; downstream decisions must treat the research layer as incomplete.' });
+    // Only re-raise a prior gap if it is still unresolved after this pass — a gap tied to a
+    // specific player is resolved once that player has an AVAILABILITY finding; an untargeted
+    // gap is resolved once any new evidence exists.
+    for (const gap of input.researchGaps ?? []) {
+      const stillUnresolved = gap.subjectId
+        ? !findings.some((finding) => finding.subjectId === gap.subjectId && finding.bucket === 'AVAILABILITY')
+        : !findings.length;
+      if (stillUnresolved) unknowns.push(gap);
+    }
+    const availabilityGaps = input.validatedSlate.playerPool
+      .filter((player) => !findings.some((finding) => finding.subjectId === player.playerId && finding.bucket === 'AVAILABILITY'))
+      .map((player) => ({ question: `Is ${player.playerName} available with an unrestricted role for this slate?`, importance: 'CRITICAL' as const, reason: `No AVAILABILITY-bucket evidence was retrieved for ${player.playerName}.`, subjectId: player.playerId }));
+    unknowns.push(...availabilityGaps);
     const conflicts = findConflicts(findings);
     const linked = linkConflicts(findings, conflicts);
     // A provider outage is retained in providerResults for diagnostics, but it is
@@ -59,7 +71,7 @@ export class ResearchAgent {
   }
 }
 
-function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[], conflicts: ReturnType<typeof findConflicts>, unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string }>, providerResults: NonNullable<ResearchPackage['providerResults']>, status: 'COMPLETE' | 'PARTIAL', now: Date, version: number): ResearchPackage {
+function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[], conflicts: ReturnType<typeof findConflicts>, unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>, providerResults: NonNullable<ResearchPackage['providerResults']>, status: 'COMPLETE' | 'PARTIAL', now: Date, version: number): ResearchPackage {
   const availability = slate.playerPool.map((player) => { const evidence = findings.filter((finding) => finding.subjectId === player.playerId && finding.bucket === 'AVAILABILITY'); const text = evidence.map((finding) => finding.finding).join(' ').toLowerCase(); return { playerId: player.playerId, status: /out|inactive|ruled out|scratched/.test(text) ? 'OUT' as const : /questionable|limited|game-time/.test(text) ? 'QUESTIONABLE' as const : evidence.length ? 'AVAILABLE' as const : 'UNKNOWN' as const, evidenceFindingIds: evidence.map((finding) => finding.id) }; });
   const roleFindings = findings.filter((finding) => finding.bucket === 'RECENT_ROLE_FORM');
   const summary = (bucket: string) => { const selected = findings.filter((finding) => finding.bucket === bucket); return { summary: selected.map((finding) => finding.finding).join(' ') || 'No evidence retrieved.', evidenceFindingIds: selected.map((finding) => finding.id) }; };
@@ -67,7 +79,7 @@ function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[]
     slateId: slate.slateId, tenantId: slate.tenantId, version, generatedAt: now.toISOString(), freshThrough: new Date(Math.min(Date.parse(slate.contest.lockTime), now.getTime() + 180 * 60_000)).toISOString(), findings,
     availability, recentRoleForm: slate.playerPool.map((player) => { const evidence = roleFindings.filter((finding) => finding.subjectId === player.playerId); return { playerId: player.playerId, summary: evidence.map((finding) => finding.finding).join(' ') || 'No role/form evidence retrieved.', evidenceFindingIds: evidence.map((finding) => finding.id) }; }),
     matchupEnvironment: summary('MATCHUP_ENVIRONMENT'), marketSignals: summary('MARKET_SIGNALS'), newsExternalContext: findings.filter((finding) => finding.bucket === 'NEWS_EXTERNAL_CONTEXT'), fieldSentiment: findings.filter((finding) => finding.bucket === 'FIELD_SENTIMENT').map((finding) => ({ subjectId: finding.subjectId, summary: finding.finding, evidenceFindingIds: [finding.id] })), competitiveContext: [{ summary: findings.filter((finding) => finding.bucket === 'COMPETITIVE_CONTEXT').map((finding) => finding.finding).join(' ') || 'No competitive context evidence retrieved.', evidenceFindingIds: findings.filter((finding) => finding.bucket === 'COMPETITIVE_CONTEXT').map((finding) => finding.id) }],
-    playerEvidence: slate.playerPool.map((player) => ({ playerId: player.playerId, findingIds: findings.filter((finding) => finding.subjectId === player.playerId).map((finding) => finding.id), unresolved: false })), conflicts, unknowns, providerResults, watchItems: unknowns.map((unknown) => ({ reason: unknown.reason, expectedChangeBeforeLock: true })), status,
+    playerEvidence: slate.playerPool.map((player) => ({ playerId: player.playerId, findingIds: findings.filter((finding) => finding.subjectId === player.playerId).map((finding) => finding.id), unresolved: false })), conflicts, unknowns, providerResults, watchItems: unknowns.map((unknown) => ({ subjectId: unknown.subjectId, importance: unknown.importance, reason: unknown.reason, expectedChangeBeforeLock: true })), status,
   } as ResearchPackage;
 }
 

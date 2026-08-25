@@ -1,4 +1,5 @@
 import type { ValidatedSlate } from './contracts.js';
+import { normalizeTeamCode } from './availability.js';
 
 export interface BasketballProjectionRecord { name: string; team: string; providerFppg: number; source: string; }
 
@@ -66,4 +67,3 @@ function asRecord(value: unknown): Record<string, unknown> | undefined { return 
 function text(value: unknown): string { return typeof value === 'string' || typeof value === 'number' ? String(value) : ''; }
 function number(value: unknown): number { return typeof value === 'number' ? value : Number(value); }
 function teamCode(value: unknown): string { return normalizeTeamCode(text(asRecord(value)?.abbreviation ?? asRecord(value)?.shortDisplayName)); }
-function normalizeTeamCode(value: string): string { return ({ WAS: 'WSH', PDX: 'POR' } as Record<string, string>)[value.toUpperCase()] ?? value.toUpperCase(); }

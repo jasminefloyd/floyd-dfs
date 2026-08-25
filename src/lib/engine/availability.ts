@@ -4,7 +4,8 @@ export interface AvailabilityRecord { playerName: string; team?: string; provide
 export interface AvailabilitySnapshot { source: string; retrievedAt: string; records: AvailabilityRecord[]; confirmedLineupAvailable: boolean; note?: string; }
 
 export function normalizeProviderName(value: string): string { return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
-export function normalizeTeamCode(value?: string): string { const code = (value ?? '').trim().toUpperCase(); return code === 'CHW' ? 'CWS' : code; }
+const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR' };
+export function normalizeTeamCode(value?: string): string { const code = (value ?? '').trim().toUpperCase(); return TEAM_CODE_ALIASES[code] ?? code; }
 
 export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot): ValidatedSlate {
   const byKey = new Map<string, AvailabilityRecord[]>();

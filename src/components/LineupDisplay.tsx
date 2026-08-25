@@ -96,6 +96,8 @@ export interface Lineup {
   salary_left_unused?: number;
   captain_rationale?: string;
   narrative: string;
+  watch_items?: string[];
+  readiness_status?: 'READY' | 'READY_WITH_WATCH';
 }
 
 interface LineupDisplayProps {
@@ -157,6 +159,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="rounded-full bg-cyan-300 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-[#06213d]">Lineup #{lineup.rank}</span>
                       <span className="rounded-full border border-white/20 bg-white/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-blue-100">{lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</span>
+                      {lineup.readiness_status === 'READY_WITH_WATCH' ? (
+                        <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Watch items</span>
+                      ) : null}
                     </div>
                     <h3 className="mt-3 truncate text-xl font-black tracking-tight text-white sm:text-2xl">{lineup.win_condition || lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
                     <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.1em] text-blue-200">
@@ -330,6 +335,7 @@ function LineupAlerts({ lineup }: { lineup: Lineup }) {
     ...(lineup.exposure_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
     ...(lineup.portfolio_correlation_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
     ...(lineup.late_swap_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
+    ...(lineup.watch_items ?? []).map((text) => ({ text: `Watch before lock: ${text}`, tone: 'warning' as const })),
   ];
   if (!alerts.length) return null;
 

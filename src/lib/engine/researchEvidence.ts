@@ -36,8 +36,10 @@ function teamAliases(team: string | undefined): string[] {
 export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedSlate, now = new Date()): ResearchFinding[] {
   return articles.map((article, index) => {
     const text = `${article.title} ${article.summary ?? ''}`.toLowerCase();
-    const player = slate.playerPool.find((candidate) => text.includes(candidate.playerName.toLowerCase()));
-    const bucket: ResearchBucket = /injur|out|questionable|available|lineup|starting|scratch/.test(text) ? 'AVAILABILITY' : /role|minutes|snap|usage|starter|form|recent/.test(text) ? 'RECENT_ROLE_FORM' : /odds|line|spread|total|market/.test(text) ? 'MARKET_SIGNALS' : /sentiment|chalk|ownership|popular/.test(text) ? 'FIELD_SENTIMENT' : /weather|wind|pace|matchup|defense|course|venue/.test(text) ? 'MATCHUP_ENVIRONMENT' : /playoff|seed|eliminat|qualif|advanc|rest|standings/.test(text) ? 'COMPETITIVE_CONTEXT' : 'NEWS_EXTERNAL_CONTEXT';
+    const player = slate.playerPool.find((candidate) => termMatchesText(candidate.playerName, text));
+    const keywordBucket: ResearchBucket = /injur|out|questionable|available|lineup|starting|scratch/.test(text) ? 'AVAILABILITY' : /role|minutes|snap|usage|starter|form|recent/.test(text) ? 'RECENT_ROLE_FORM' : /odds|line|spread|total|market/.test(text) ? 'MARKET_SIGNALS' : /sentiment|chalk|ownership|popular/.test(text) ? 'FIELD_SENTIMENT' : /weather|wind|pace|matchup|defense|course|venue/.test(text) ? 'MATCHUP_ENVIRONMENT' : /playoff|seed|eliminat|qualif|advanc|rest|standings/.test(text) ? 'COMPETITIVE_CONTEXT' : 'NEWS_EXTERNAL_CONTEXT';
+    // Tier 4 (Reddit/social/unverified) sources may only ever populate FIELD_SENTIMENT — never a factual bucket, regardless of keyword match.
+    const bucket: ResearchBucket = article.sourceTier === 4 ? 'FIELD_SENTIMENT' : keywordBucket;
     const publishedAt = article.publishedAt;
     const ageMinutes = publishedAt ? Math.max(0, Math.floor((now.getTime() - Date.parse(publishedAt)) / 60_000)) : undefined;
     return {
@@ -61,10 +63,9 @@ export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedS
 export function findConflicts(findings: ResearchFinding[]): ResearchConflict[] {
   const conflicts: ResearchConflict[] = [];
   for (const group of groupBy(findings, (finding) => `${finding.subjectId}:${finding.bucket}`)) {
-    if (group[0]?.subjectType === 'EVENT') continue;
-    const tiers = new Set(group.map((finding) => finding.sourceTier));
+    if (group[0]?.bucket === 'FIELD_SENTIMENT') continue;
     const contradictory = group.some((left, index) => group.slice(index + 1).some((right) => claimsConflict(left, right)));
-    if (group.length > 1 && tiers.size > 1 && contradictory) conflicts.push({ findingIds: group.map((finding) => finding.id), subjectId: group[0].subjectId, summary: 'Multiple source tiers reported contradictory evidence for the same subject and bucket; authority, recency, and specificity must remain visible.', resolved: false });
+    if (group.length > 1 && contradictory) conflicts.push({ findingIds: group.map((finding) => finding.id), subjectId: group[0].subjectId, summary: 'Sources reported contradictory evidence for the same subject and bucket; authority, recency, and specificity must remain visible.', resolved: false });
   }
   return conflicts;
 }
