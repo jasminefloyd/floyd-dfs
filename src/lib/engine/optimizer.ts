@@ -61,6 +61,8 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
   }
   const slot = slots[index];
   const ruleSlot = baseSlot(slot);
+  const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
+  const selectedTeams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
   for (const player of input.validatedSlate.playerPool) {
     if (used.has(player.playerId) && input.validatedSlate.rosterRules.uniquePlayersRequired) continue;
     if (!player.eligibility[ruleSlot]) continue;
@@ -68,6 +70,8 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     if (salary === undefined || salaryUsed + salary > input.validatedSlate.salaryCap) continue;
     const maxPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
     if (maxPerTeam && player.team && Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)?.team).filter((team) => team === player.team).length >= maxPerTeam) continue;
+    if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
+    if (minimumTeams && minimumTeams > 1 && slots.length === 6 && index === 1 && selectedTeams.size === 1 && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);
     enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, output, limit);

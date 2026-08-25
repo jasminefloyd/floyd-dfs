@@ -19,6 +19,7 @@ import { ConfiguredResearchProvider } from '../src/lib/engine/configuredResearch
 import { OpenAiResearchSynthesizer } from '../src/lib/engine/openAiSynthesizer.js';
 import { ballDontLieProvider, espnProvider } from '../src/lib/engine/structuredSportsProvider.js';
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
+import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
 
 type Json = Record<string, unknown>;
@@ -80,7 +81,7 @@ export async function saveStage(db: SupabaseClient, run: Json, stage: EngineStag
 export async function recordEvent(db: SupabaseClient, event: { tenant_id: string; generation_run_id?: string; event_type: string; stage?: string; payload?: unknown }): Promise<void> { const result = await db.from('engine_events').insert({ ...event, payload: event.payload ?? {} }); if (result.error) throw result.error; }
 function stateForStage(stage: EngineStage): string { return ({ SLATE: 'slate_validated', RESEARCH: 'researching', SPORT_ADJUSTMENT: 'adjusting', PROJECTION: 'projecting', OPTIMIZE: 'optimizing', SELECTION: 'selecting' } as Record<string, string>)[stage] ?? 'created'; }
 
-function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient } {
+function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient; espnProjection?: EspnProjectionClient } {
   const providers = [...createDefaultRssProviders() as import('../src/lib/engine/contracts.js').ResearchSourceProvider[]];
   const sportsKey = env('SPORTS_DATA_IO_KEY');
   let availability: SportsDataIoClient | undefined;
@@ -102,13 +103,13 @@ function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClien
   }
   const openAiKey = env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY');
   const synthesizer = openAiKey ? new OpenAiResearchSynthesizer({ apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }) : undefined;
-  return { agent: new ResearchAgent({ providers, synthesizer }), availability };
+  return { agent: new ResearchAgent({ providers, synthesizer }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined };
 }
 
 export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate): Promise<Json> {
   assertSlate(slate);
   await persistConfiguration(db, String(run.tenant_id));
-  const { agent, availability } = providerSet();
+  const { agent, availability, espnProjection } = providerSet();
   const stages: Record<string, unknown> = {};
   let workingSlate = slate;
   if (availability) {
@@ -124,6 +125,23 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         if (missingProjectionPlayers.length) stages.projectionWarning = `SportsDataIO did not return a DraftKings projection for ${missingProjectionPlayers.length} MLB players; excluded them from quantitative projection until a provider projection is available: ${missingProjectionPlayers.join(', ')}.`;
       } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'SportsDataIO projection refresh failed.'; }
     }
+    if (workingSlate.sport === 'NFL') {
+      const missingProjectionPlayers = workingSlate.playerPool.filter((player) => !Number.isFinite(player.providerFppg)).map((player) => player.playerName);
+      if (missingProjectionPlayers.length) {
+        workingSlate = { ...workingSlate, playerPool: workingSlate.playerPool.filter((player) => Number.isFinite(player.providerFppg)) };
+        stages.projectionWarning = `DraftKings did not provide native FPPG projections for ${missingProjectionPlayers.length} NFL players; excluded them from quantitative projection: ${missingProjectionPlayers.join(', ')}.`;
+      }
+    }
+  }
+  if (espnProjection && (workingSlate.sport === 'NBA' || workingSlate.sport === 'WNBA')) {
+    try {
+      const projections = await espnProjection.getBasketballProjectionSnapshot(workingSlate);
+      const byNameAndTeam = new Map(projections.map((projection) => [`${normalizeProjectionName(projection.name)}:${normalizeProjectionTeam(projection.team)}`, projection]));
+      const missingProjectionPlayers: string[] = [];
+      const refreshedPlayers = workingSlate.playerPool.flatMap((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${normalizeProjectionTeam(String(player.team ?? ''))}`); if (!projection) { missingProjectionPlayers.push(player.playerName); return []; } return [{ ...player, providerFppg: projection.providerFppg }]; });
+      workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
+      if (missingProjectionPlayers.length) stages.projectionWarning = `ESPN did not return season-average projections for ${missingProjectionPlayers.length} ${workingSlate.sport} players; excluded them from quantitative projection: ${missingProjectionPlayers.join(', ')}.`;
+    } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'ESPN projection refresh failed.'; }
   }
   await saveStage(db, run, 'SLATE', { contestId: workingSlate.contest.draftKingsContestId }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
   let research = await agent.run({ validatedSlate: workingSlate });
@@ -197,6 +215,7 @@ async function persistConfiguration(db: SupabaseClient, tenantId: string): Promi
 export function parseBody(req: VercelRequest): Json { if (!req.body) return {}; if (typeof req.body === 'string') return JSON.parse(req.body) as Json; return req.body as Json; }
 function openAiModel(): string | undefined { return env('OPENAI_MODEL') ?? env('AI_MODEL') ?? ((env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY')) ? 'gpt-5' : undefined); }
 function normalizeProjectionName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function normalizeProjectionTeam(value: string): string { return ({ WAS: 'WSH', PDX: 'POR' } as Record<string, string>)[value.toUpperCase()] ?? value.toUpperCase(); }
 export function asFormat(value: unknown): ContestFormat { return String(value ?? 'SHOWDOWN').toUpperCase() === 'CLASSIC' ? 'CLASSIC' : 'SHOWDOWN'; }
 export function asSport(value: unknown): 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' { const sport = String(value ?? '').toUpperCase(); if (['WNBA', 'NBA', 'MLB', 'GOLF', 'NFL'].includes(sport)) return sport as 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL'; throw new Error(`Unsupported sport: ${sport}.`); }
 export type { Json };

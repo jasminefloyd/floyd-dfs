@@ -15,7 +15,7 @@ function summarize(row: JsonObject): string {
   const values = preferred.flatMap((key) => row[key] === undefined ? [] : [`${key}: ${typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key])}`]);
   return (values.length ? values.join('; ') : JSON.stringify(row)).slice(0, 1400);
 }
-function dateForSlate(slate: ValidatedSlate): string { return slate.event.eventDate.slice(0, 10); }
+function dateForSlate(slate: ValidatedSlate): string { const date = new Date(slate.event.eventDate); if (date.getUTCHours() < 6) date.setUTCDate(date.getUTCDate() - 1); return date.toISOString().slice(0, 10).replaceAll('-', ''); }
 function sportPath(sport: Sport): string { return ({ NBA: 'basketball/nba', WNBA: 'basketball/wnba', MLB: 'baseball/mlb', NFL: 'football/nfl', GOLF: 'golf/pga' } as Record<Sport, string>)[sport]; }
 function withTimeout(signal?: AbortSignal): AbortSignal | undefined { return signal; }
 

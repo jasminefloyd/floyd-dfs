@@ -12,7 +12,7 @@ function articleSlateMatch(article: ResearchArticle, slate: ValidatedSlate): { a
   const target = slate.sport.toUpperCase();
   const acceptedSports = target === 'WNBA' ? ['WNBA', 'NBA'] : [target];
   const foreignSports = ['NBA', 'WNBA', 'NFL', 'MLB', 'GOLF'].filter((sport) => !acceptedSports.includes(sport));
-  const targetTerms = [...slate.event.participants, ...slate.playerPool.flatMap((player) => [player.playerName, player.team ?? '', player.opponent ?? ''])]
+  const targetTerms = [...slate.event.participants, ...slate.playerPool.flatMap((player) => [player.playerName, player.team ?? '', player.opponent ?? '', ...teamAliases(player.team), ...teamAliases(player.opponent)])]
     .map((term) => term.trim()).filter((term) => term.length >= 3);
   const text = `${article.title} ${article.summary ?? ''} ${article.content ?? ''} ${article.sourceName} ${(article.tags ?? []).join(' ')}`;
   const taggedSports = (article.tags ?? []).map((tag) => tag.toUpperCase()).filter((tag) => ['NBA', 'WNBA', 'NFL', 'MLB', 'GOLF'].includes(tag));
@@ -26,6 +26,11 @@ function termMatchesText(term: string, text: string): boolean {
   if (new RegExp(`\\b${escapeRegExp(term)}\\b`, 'i').test(text)) return true;
   const compactTerm = term.toLowerCase().replace(/[^a-z0-9]/g, ''); const compactText = text.toLowerCase().replace(/[^a-z0-9]/g, '');
   return compactTerm.length >= 4 && compactText.includes(compactTerm);
+}
+
+function teamAliases(team: string | undefined): string[] {
+  const aliases: Record<string, string[]> = { PDX: ['Portland'], POR: ['Portland'], DAL: ['Dallas'], WAS: ['Washington'], WSH: ['Washington'], PHX: ['Phoenix'], CON: ['Connecticut'], CHI: ['Chicago'] };
+  return aliases[String(team ?? '').toUpperCase()] ?? [];
 }
 
 export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedSlate, now = new Date()): ResearchFinding[] {
