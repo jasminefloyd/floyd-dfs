@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
-import { listDraftKingsSlates, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
+import { listDraftKingsGameGroups, listDraftKingsSlates, type DraftKingsGameGroup, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
 import { validateScanInput } from '../lib/validation';
 
 export interface ScanParams {
@@ -81,6 +81,10 @@ const SLATES_PER_PAGE = 7;
 export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
   const [contestType, setContestType] = useState('showdown');
+  const [groups, setGroups] = useState<DraftKingsGameGroup[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
   const [slates, setSlates] = useState<DraftKingsSlate[]>([]);
   const [selectedContestId, setSelectedContestId] = useState('');
   const selectedContestIdRef = useRef('');
@@ -138,16 +142,49 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
     if (slate?.field_size !== undefined) setFieldSize(slate.field_size);
   }
 
+  // Step 1 of the picker funnel: which game (DraftKings draft group) is this? A game can have
+  // 50+ individual DK contests behind it, so this narrows the field before the user ever sees a
+  // slate list. Re-fetches whenever sport or contest type changes; auto-selects the first game,
+  // mirroring the same "sensible default, user can override" convention the slate step already
+  // used before this step existed.
   useEffect(() => {
     const controller = new AbortController();
-    setSlateLoading(true);
-    setSlateError(null);
+    setGroupLoading(true);
+    setGroupError(null);
+    setGroups([]);
+    setSelectedGroupId('');
+
+    listDraftKingsGameGroups({ sport, contestType }, controller.signal)
+      .then((nextGroups) => {
+        setGroups(nextGroups);
+        setSelectedGroupId(nextGroups[0]?.draftGroupId ?? '');
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setGroupError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGroupLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [sport, contestType]);
+
+  // Step 2: once a game is selected, list only the DK contests for that specific game (still an
+  // explicit pick — selecting one auto-populates Field Size below, unchanged from before this
+  // step existed). Deliberately does not fetch until a group is selected, so switching sport/
+  // contest type doesn't briefly show the previous game's slates.
+  useEffect(() => {
+    const controller = new AbortController();
     setSlates([]);
     selectedContestIdRef.current = '';
     setSelectedContestId('');
     setSlatePage(1);
+    if (!selectedGroupId) { setSlateLoading(false); setSlateError(null); return; }
+    setSlateLoading(true);
+    setSlateError(null);
 
-    listDraftKingsSlates({ sport, contestType }, controller.signal)
+    listDraftKingsSlates({ sport, contestType, draftGroupId: selectedGroupId }, controller.signal)
       .then((nextSlates) => {
         const eligibleSlates = nextSlates.filter(isWithinScanWindow);
         setSlates(eligibleSlates);
@@ -163,7 +200,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
       });
 
     return () => controller.abort();
-  }, [sport, contestType]);
+  }, [sport, contestType, selectedGroupId]);
 
   const handleScan = () => {
     const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId) ?? null;
@@ -245,7 +282,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
   const selectedSlate = slates.find((slate) => slate.contest_id === selectedContestId);
   const slatePageCount = Math.max(1, Math.ceil(slates.length / SLATES_PER_PAGE));
   const visibleSlates = slates.slice((slatePage - 1) * SLATES_PER_PAGE, slatePage * SLATES_PER_PAGE);
-  const scanDisabled = loading || slateLoading || !selectedSlate;
+  const scanDisabled = loading || groupLoading || slateLoading || !selectedSlate;
   const fieldClass = 'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 shadow-[var(--shadow-subtle)] transition-colors duration-[var(--transition-fast)] placeholder:text-slate-400 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/30';
   const labelClass = 'block text-[11px] font-black uppercase tracking-wide text-slate-500';
   const optionClass = (active: boolean) => `flex min-h-10 cursor-pointer items-center justify-center rounded-md border px-3 py-2 text-xs font-black uppercase transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cyan-500 ${
@@ -381,6 +418,48 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
       <div>
         <div className="mb-3 flex items-center justify-between gap-3">
+          <label className="block text-[11px] font-black uppercase tracking-wide text-slate-500">Game</label>
+          {groupLoading ? <span className="rounded-md border border-cyan-500/30 bg-cyan-50 px-2 py-1 text-xs font-black text-cyan-800">Loading</span> : null}
+        </div>
+
+        {groupError ? (
+          <div className="rounded-md border border-error/30 bg-red-50 p-3 text-sm font-medium text-error">
+            {groupError}
+          </div>
+        ) : null}
+
+        {!groupLoading && !groupError && groups.length === 0 ? (
+          <div className="rounded-md border border-warning/30 bg-amber-50 p-3 text-sm font-medium text-warning">
+            <p>{availabilityMessage(sport, contestType)}</p>
+          </div>
+        ) : null}
+
+        <div className="space-y-2">
+          {groups.map((group) => (
+            <label
+              key={group.draftGroupId}
+              onClick={() => setSelectedGroupId(group.draftGroupId)}
+              className={`block cursor-pointer rounded-md border p-3 transition-colors duration-[var(--transition-fast)] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cyan-500 ${
+                selectedGroupId === group.draftGroupId ? 'border-[#0b1f3a] bg-blue-50 ring-2 ring-cyan-500/20' : 'border-slate-200 bg-white hover:border-cyan-500'
+              }`}
+            >
+              <input
+                type="radio"
+                name="selectedGroup"
+                value={group.draftGroupId}
+                checked={selectedGroupId === group.draftGroupId}
+                onChange={(e) => setSelectedGroupId(e.target.value)}
+                disabled={loading}
+                className="sr-only"
+              />
+              <span className="block text-sm font-black text-[#0b1f3a]">{group.matchupLabel}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-3 flex items-center justify-between gap-3">
           <label className="block text-[11px] font-black uppercase tracking-wide text-slate-500">DraftKings Slate</label>
           {slateLoading ? <span className="rounded-md border border-cyan-500/30 bg-cyan-50 px-2 py-1 text-xs font-black text-cyan-800">Loading</span> : null}
         </div>
@@ -393,7 +472,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
 
         {!slateLoading && !slateError && slates.length === 0 ? (
           <div className="rounded-md border border-warning/30 bg-amber-50 p-3 text-sm font-medium text-warning">
-            <p>{availabilityMessage(sport, contestType)}</p>
+            <p>{selectedGroupId ? 'No DraftKings contests were found for this game.' : 'Choose a game above to see its contests.'}</p>
           </div>
         ) : null}
 

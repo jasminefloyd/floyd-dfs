@@ -143,6 +143,14 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       } catch (error) { stages.projectionInputsWarning = error instanceof Error ? error.message : 'SportsDataIO projection-stats refresh failed.'; }
     }
   }
+  // No dedicated confirmed-lineup feed exists for NBA/WNBA/NFL (SportsDataIO's is MLB-only on
+  // this plan), so ESPN's roster status/injuries endpoint is the availability source for these
+  // sports -- applied after the SportsDataIO pass above so it overwrites that pass's empty,
+  // "no configured feed" result for these sports with real per-player status.
+  if (espnProjection && ['NBA', 'WNBA', 'NFL'].includes(workingSlate.sport)) {
+    try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate)); }
+    catch (error) { stages.availabilityWarning = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; }
+  }
   if (espnProjection && (workingSlate.sport === 'NBA' || workingSlate.sport === 'WNBA')) {
     try {
       const projections = await espnProjection.getBasketballProjectionSnapshot(workingSlate);

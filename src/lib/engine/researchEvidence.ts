@@ -60,6 +60,42 @@ export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedS
   });
 }
 
+const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
+  CONFIRMED_STARTER: 'confirmed as a starter',
+  ACTIVE: 'active',
+  PROJECTED: 'projected to play, not yet confirmed',
+  INACTIVE: 'inactive',
+  OUT: 'ruled out',
+};
+
+// Converts the confirmed-lineup/availability data already fetched onto the slate (before
+// Research runs — see server/runtime.ts's processRun) into real AVAILABILITY findings, so
+// Research's own gap-detection can see evidence we already have instead of reporting a gap
+// for a player we've already confirmed. Skips ambiguous provider matches (UNMAPPED) and
+// players with no real signal (UNKNOWN) rather than fabricating a finding from nothing.
+export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding[] {
+  return slate.playerPool.flatMap((player, index) => {
+    const availability = player.availability;
+    if (!availability || availability.mappedBy === 'UNMAPPED' || availability.status === 'UNKNOWN') return [];
+    const statusText = AVAILABILITY_STATUS_TEXT[availability.status] ?? availability.status.toLowerCase();
+    const finding = `${player.playerName} is ${statusText} per ${availability.source}${availability.note ? ` (${availability.note})` : ''}.`;
+    return [{
+      id: stableId(`${slate.slateId}:availability-seed:${player.playerId}:${index}`),
+      bucket: 'AVAILABILITY' as ResearchBucket,
+      subjectType: 'PLAYER' as const,
+      subjectId: player.playerId,
+      finding,
+      sourceName: availability.source,
+      sourceTier: 1 as const,
+      sourcePurpose: 'Directly fetched confirmed-lineup/availability data for this exact slate.',
+      publishedAt: availability.retrievedAt,
+      retrievedAt: availability.retrievedAt,
+      confidence: availability.confirmed ? 'HIGH' as const : 'MEDIUM' as const,
+      metadata: { mappedBy: availability.mappedBy },
+    }];
+  });
+}
+
 export function findConflicts(findings: ResearchFinding[]): ResearchConflict[] {
   const conflicts: ResearchConflict[] = [];
   for (const group of groupBy(findings, (finding) => `${finding.subjectId}:${finding.bucket}`)) {

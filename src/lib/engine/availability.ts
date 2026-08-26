@@ -4,7 +4,10 @@ export interface AvailabilityRecord { playerName: string; team?: string; provide
 export interface AvailabilitySnapshot { source: string; retrievedAt: string; records: AvailabilityRecord[]; confirmedLineupAvailable: boolean; note?: string; }
 
 export function normalizeProviderName(value: string): string { return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
-const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR' };
+// Both DraftKings and provider (SportsDataIO/ESPN) team codes pass through this same function
+// before comparison, so it only matters that every known variant for one real team collapses
+// to the same value -- not which specific variant is picked as "canonical."
+const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR', SDP: 'SD', SFG: 'SF', TBR: 'TB', AZ: 'ARI', OAK: 'ATH' };
 export function normalizeTeamCode(value?: string): string { const code = (value ?? '').trim().toUpperCase(); return TEAM_CODE_ALIASES[code] ?? code; }
 
 export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot): ValidatedSlate {

@@ -1,7 +1,13 @@
 import type { ValidatedSlate } from './contracts.js';
-import { normalizeTeamCode } from './availability.js';
+import { normalizeTeamCode, type AvailabilityRecord, type AvailabilitySnapshot } from './availability.js';
 
 export interface BasketballProjectionRecord { name: string; team: string; providerFppg: number; source: string; }
+
+const ESPN_AVAILABILITY_SPORT_PATH: Partial<Record<ValidatedSlate['sport'], { sportGroup: string; league: string }>> = {
+  NBA: { sportGroup: 'basketball', league: 'nba' },
+  WNBA: { sportGroup: 'basketball', league: 'wnba' },
+  NFL: { sportGroup: 'football', league: 'nfl' },
+};
 
 export class EspnProjectionClient {
   private readonly fetcher: typeof fetch;
@@ -53,6 +59,33 @@ export class EspnProjectionClient {
     return rosterRows.flat();
   }
 
+  // NBA/WNBA/NFL availability, sourced from ESPN's team roster endpoint (already reachable via
+  // this.baseUrl; no dedicated confirmed-lineup feed like MLB's SportsDataIO integration exists
+  // for these sports). Each athlete carries a `status` object and an `injuries` array; the exact
+  // non-"active" status.type/injury-status taxonomy wasn't verified against a real
+  // injured/questionable player during implementation, so unrecognized values fall back to
+  // UNKNOWN (never guessed as OUT) rather than risk excluding a healthy player.
+  async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
+    const sportPath = ESPN_AVAILABILITY_SPORT_PATH[slate.sport];
+    if (!sportPath) return { source: 'ESPN', retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured ESPN availability mapping.` };
+    const teams = [...new Set(slate.playerPool.map((player) => normalizeTeamCode(player.team)).filter(Boolean))];
+    const rosterRows = await Promise.all(teams.map(async (team) => {
+      try {
+        const roster = await this.getJson(`${this.baseUrl}/sports/${sportPath.sportGroup}/${sportPath.league}/teams/${team.toLowerCase()}/roster`, signal);
+        const groups = listRecords(roster.athletes);
+        const athletes = groups.length && groups[0].items !== undefined ? groups.flatMap((group) => listRecords(group.items)) : groups;
+        return athletes.flatMap((athlete): AvailabilityRecord[] => {
+          const name = text(athlete.fullName ?? athlete.displayName);
+          if (!name) return [];
+          return [{ playerName: name, team, status: espnAvailabilityStatus(athlete), confirmed: true, updatedAt: new Date().toISOString() }];
+        });
+      } catch { return []; }
+    }));
+    const records = rosterRows.flat();
+    const teamsWithRecords = new Set(records.map((record) => record.team));
+    return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: teams.length > 0 && teams.every((team) => teamsWithRecords.has(team)), note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
+  }
+
   private async getJson(url: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const response = await this.fetcher(url, { signal, headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`ESPN projection endpoint returned HTTP ${response.status}.`);
@@ -67,3 +100,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined { return 
 function text(value: unknown): string { return typeof value === 'string' || typeof value === 'number' ? String(value) : ''; }
 function number(value: unknown): number { return typeof value === 'number' ? value : Number(value); }
 function teamCode(value: unknown): string { return normalizeTeamCode(text(asRecord(value)?.abbreviation ?? asRecord(value)?.shortDisplayName)); }
+function espnAvailabilityStatus(athlete: Record<string, unknown>): AvailabilityRecord['status'] {
+  const injuries = listRecords(athlete.injuries);
+  const injuryText = injuries.map((injury) => text(injury.status ?? asRecord(injury.details)?.type)).join(' ').toLowerCase();
+  if (/out|inactive|suspend|injured.reserve|\bil\b/.test(injuryText)) return 'OUT';
+  if (/day.to.day|questionable|probable|game.time/.test(injuryText)) return 'PROJECTED';
+  const statusType = text(asRecord(athlete.status)?.type).toLowerCase();
+  if (statusType === 'active') return injuries.length ? 'PROJECTED' : 'ACTIVE';
+  if (/out|inactive|suspend/.test(statusType)) return 'OUT';
+  return 'UNKNOWN';
+}

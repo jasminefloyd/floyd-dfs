@@ -1,4 +1,13 @@
-import { listFloydContests } from './floydDfsClient';
+import { listFloydContests, listFloydGameGroups, type FloydGameGroup } from './floydDfsClient';
+
+export type DraftKingsGameGroup = FloydGameGroup;
+
+export async function listDraftKingsGameGroups(
+  params: { sport: string; contestType: string },
+  signal?: AbortSignal,
+): Promise<DraftKingsGameGroup[]> {
+  return listFloydGameGroups(params, signal);
+}
 
 export interface DraftKingsSlate {
   contest_id: string;
@@ -18,7 +27,7 @@ export interface DraftKingsSlate {
 }
 
 export async function listDraftKingsSlates(
-  params: { sport: string; contestType: string },
+  params: { sport: string; contestType: string; draftGroupId?: string },
   signal?: AbortSignal,
 ): Promise<DraftKingsSlate[]> {
   return listFloydContests(params, signal);

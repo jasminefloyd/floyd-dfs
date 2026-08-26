@@ -1,7 +1,7 @@
 import type { ResearchPlan, ResearchSourceProvider, ResearchFinding, ResearchPackage, ValidatedSlate } from './contracts.js';
 import type { ResearchSynthesizerInput } from './openAiTypes.js';
 import { createResearchPlan } from './researchPlan.js';
-import { explainArticleRejection, filterArticlesForSlate, findConflicts, linkConflicts, normalizeArticles } from './researchEvidence.js';
+import { explainArticleRejection, filterArticlesForSlate, findConflicts, findingsFromAvailability, linkConflicts, normalizeArticles } from './researchEvidence.js';
 
 export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]> }; now?: () => Date; version?: number; }
 export interface ResearchAgentInput { validatedSlate: ValidatedSlate; researchGaps?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>; }
@@ -34,7 +34,10 @@ export class ResearchAgent {
       }
     }
     const slateArticles = filterArticlesForSlate(articles, input.validatedSlate);
-    let findings = normalizeArticles(slateArticles, input.validatedSlate, now);
+    // Availability data already fetched onto the slate (e.g. SportsDataIO's confirmed-lineup
+    // feed, applied before Research runs) is seeded in first so the per-player gap check below
+    // sees it as real evidence, instead of reporting a gap for a player we've already confirmed.
+    let findings: ResearchFinding[] = [...findingsFromAvailability(input.validatedSlate), ...normalizeArticles(slateArticles, input.validatedSlate, now)];
     if (this.options.synthesizer) {
       try {
         const synthesized = await this.options.synthesizer.synthesize({ slate: input.validatedSlate, plan, articles: slateArticles });

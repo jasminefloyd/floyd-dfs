@@ -4,7 +4,8 @@ export const DRAFTKINGS_API_BASE_URL = 'https://api.draftkings.com';
 export const DRAFTKINGS_LOBBY_BASE_URL = 'https://www.draftkings.com';
 export const DEFAULT_DRAFTKINGS_API_ENDPOINTS = { sports: '/sites/US-DK/sports/v1/sports', contests: '/lobby/getcontests', contest: '/contests/v1/contests/{contestId}', draftGroup: '/draftgroups/v1/{draftGroupId}', gameTypeRules: '/lineups/v1/gametypes/{gameTypeId}/rules', draftables: '/draftgroups/v1/draftgroups/{draftGroupId}/draftables' } as const;
 
-export interface DraftKingsContestSummary { draftKingsContestId: string; sport: Sport; format: ContestFormat; name: string; lockTime: string; contestSize?: number; maxEntriesAllowed?: number; }
+export interface DraftKingsContestSummary { draftKingsContestId: string; draftGroupId?: string; sport: Sport; format: ContestFormat; name: string; lockTime: string; contestSize?: number; maxEntriesAllowed?: number; }
+export interface DraftKingsGameGroup { draftGroupId: string; matchupLabel: string; gameCount?: number; }
 export interface DraftKingsSportSummary { sportId: number; fullName: string; abbreviatedName: string; hasPublicContests: boolean; isEnabled: boolean; }
 export interface DraftKingsHttpResponse<T = unknown> { data: T; url: string; retrievedAt: string; status: number; }
 export interface DraftKingsApiBundle { contest: DraftKingsHttpResponse; draftGroup: DraftKingsHttpResponse; gameTypeRules: DraftKingsHttpResponse; draftables: DraftKingsHttpResponse; }
@@ -22,6 +23,7 @@ export class DraftKingsClient {
   constructor(options: DraftKingsClientOptions) { this.fetcher = options.fetcher ?? fetch; this.apiBaseUrl = (options.apiBaseUrl ?? DRAFTKINGS_API_BASE_URL).replace(/\/+$/, ''); this.lobbyBaseUrl = (options.lobbyBaseUrl ?? DRAFTKINGS_LOBBY_BASE_URL).replace(/\/+$/, ''); this.sportCodes = options.sportCodes; this.headers = { accept: 'application/json', ...options.headers }; }
   async listSports(): Promise<DraftKingsSportSummary[]> { const response = await this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.sports, this.apiBaseUrl, { format: 'json' }); const sports = asRecord(response.data)?.sports; if (!Array.isArray(sports)) throw new DraftKingsApiError('DraftKings sports response did not contain a sports array.', { url: response.url, body: response.data }); return sports.map((value) => { const sport = asRecord(value); if (!sport) throw new DraftKingsApiError('DraftKings sports response contained an invalid sport record.', { url: response.url, body: value }); return { sportId: Number(sport.sportId), fullName: String(sport.fullName ?? ''), abbreviatedName: String(sport.regionAbbreviatedSportName ?? ''), hasPublicContests: Boolean(sport.hasPublicContests), isEnabled: Boolean(sport.isEnabled) }; }); }
   async listContests(sport: Sport): Promise<DraftKingsContestSummary[]> { const sportCode = this.sportCodes[sport]; if (!sportCode) throw new DraftKingsApiError(`No DraftKings sport code configured for ${sport}.`, { url: this.lobbyBaseUrl }); const response = await this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.contests, this.lobbyBaseUrl, { sport: sportCode }); return extractContestSummaries(response.data, sport); }
+  async listContestsAndGroups(sport: Sport, format: ContestFormat): Promise<{ contests: DraftKingsContestSummary[]; groups: DraftKingsGameGroup[] }> { const sportCode = this.sportCodes[sport]; if (!sportCode) throw new DraftKingsApiError(`No DraftKings sport code configured for ${sport}.`, { url: this.lobbyBaseUrl }); const response = await this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.contests, this.lobbyBaseUrl, { sport: sportCode }); return { contests: extractContestSummaries(response.data, sport), groups: extractGameGroups(response.data, sport, format) }; }
   async getContest(contestId: string): Promise<DraftKingsHttpResponse> { return this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.contest.replace('{contestId}', encodeURIComponent(contestId)), this.apiBaseUrl, { format: 'json' }); }
   async getDraftGroup(draftGroupId: string): Promise<DraftKingsHttpResponse> { return this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.draftGroup.replace('{draftGroupId}', encodeURIComponent(draftGroupId)), this.apiBaseUrl); }
   async getGameTypeRules(gameTypeId: string): Promise<DraftKingsHttpResponse> { return this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.gameTypeRules.replace('{gameTypeId}', encodeURIComponent(gameTypeId)), this.apiBaseUrl); }
@@ -42,8 +44,41 @@ export function extractContestSummaries(payload: unknown, sport: Sport): DraftKi
     const format = parseContestFormat(formatValue);
     if (!format) return [];
     const contestId = readRequiredString(contest, ['contestId', 'contestID', 'id', 'ContestId'], `contests[${index}].contestId`);
-    return [{ draftKingsContestId: contestId, sport, format, name: readRequiredString(contest, ['name', 'contestName', 'ContestName', 'n'], `contests[${index}].name`), lockTime: readDateString(contest, ['lockTime', 'startTime', 'startDate', 'sd'], `contests[${index}].lockTime`), contestSize: readNumber(contest, ['contestSize', 'totalEntries', 'entryCount', 'ec', 'cs']), maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntries', 'maximumEntries', 'mec']) }];
+    const draftGroupId = readNumber(contest, ['dg', 'draftGroupId']);
+    return [{ draftKingsContestId: contestId, draftGroupId: draftGroupId !== undefined ? String(draftGroupId) : undefined, sport, format, name: readRequiredString(contest, ['name', 'contestName', 'ContestName', 'n'], `contests[${index}].name`), lockTime: readDateString(contest, ['lockTime', 'startTime', 'startDate', 'sd'], `contests[${index}].lockTime`), contestSize: readNumber(contest, ['contestSize', 'totalEntries', 'entryCount', 'ec', 'cs']), maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntries', 'maximumEntries', 'mec']) }];
   });
+}
+
+// DraftKings' lobby response separately carries a `DraftGroups` array (one entry per underlying
+// game/draft group, with a ready-made matchup label) alongside the flat `Contests` array (one
+// entry per contest -- many contests can share one game). `DraftGroups[].GameType` is often null,
+// so group membership is derived from which draft group IDs actually appear among contests that
+// already passed the same sport/format matching used by extractContestSummaries, rather than
+// trusting a possibly-absent field on the group itself.
+export function extractGameGroups(payload: unknown, sport: Sport, format: ContestFormat): DraftKingsGameGroup[] {
+  const root = asRecord(payload);
+  const contests = root && (Array.isArray(root.Contests) ? root.Contests : Array.isArray(root.contests) ? root.contests : undefined);
+  const groups = root && (Array.isArray(root.DraftGroups) ? root.DraftGroups : Array.isArray(root.draftGroups) ? root.draftGroups : undefined);
+  if (!contests || !groups) return [];
+  const matchingDraftGroupIds = new Set(contests.flatMap((value) => {
+    const contest = asRecord(value);
+    if (!contest || !contestMatchesSport(contest, sport)) return [];
+    const formatValue = readString(contest, ['format', 'contestFormat', 'gameTypeName', 'gameType'], 'CLASSIC');
+    if (parseContestFormat(formatValue) !== format) return [];
+    const draftGroupId = readNumber(contest, ['dg', 'draftGroupId']);
+    return draftGroupId !== undefined ? [String(draftGroupId)] : [];
+  }));
+  const byId = new Map<string, DraftKingsGameGroup>();
+  for (const value of groups) {
+    const group = asRecord(value);
+    if (!group) continue;
+    const draftGroupId = readNumber(group, ['DraftGroupId', 'draftGroupId']);
+    if (draftGroupId === undefined || !matchingDraftGroupIds.has(String(draftGroupId))) continue;
+    const suffix = readOptionalString(group, ['ContestStartTimeSuffix']);
+    const matchupLabel = suffix ? suffix.replace(/^[\s(]+|[\s)]+$/g, '').trim() : readOptionalString(group, ['DraftGroupTag']) ?? `Group ${draftGroupId}`;
+    byId.set(String(draftGroupId), { draftGroupId: String(draftGroupId), matchupLabel, gameCount: readNumber(group, ['GameCount']) });
+  }
+  return [...byId.values()];
 }
 export function extractContestReference(payload: unknown, contestId: string): DraftKingsContestReference { const root = asRecord(payload); const contest = root ? asRecord(root.contest) ?? asRecord(root.Contest) ?? asRecord(root.contestDetail) ?? asRecord(root.ContestDetail) ?? root : undefined; if (!contest) throw new DraftKingsApiError('DraftKings contest response was not a JSON object.', { url: 'contest', body: payload }); return { contestId, draftGroupId: readRequiredString(contest, ['draftGroupId', 'draftGroupID', 'draftGroup', 'dg'], 'draftGroupId'), gameTypeId: readRequiredString(contest, ['gameTypeId', 'gameTypeID', 'gameType', 'gt'], 'gameTypeId') }; }
 function parseContestFormat(value: string): ContestFormat | undefined { const normalized = value.toUpperCase(); if (normalized.includes('SHOWDOWN') || normalized.includes('CAPTAIN') || normalized.includes('MVP')) return 'SHOWDOWN'; if (normalized.includes('CLASSIC')) return 'CLASSIC'; return undefined; }

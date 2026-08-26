@@ -29,8 +29,18 @@ export async function floydRequest<T>(path: string, init: RequestInit = {}): Pro
   return request<T>(path, init);
 }
 
-export async function listFloydContests(params: { sport: string; contestType: string }, signal?: AbortSignal): Promise<DraftKingsSlate[]> {
+export interface FloydGameGroup { draftGroupId: string; matchupLabel: string; gameCount?: number; }
+
+export async function listFloydGameGroups(params: { sport: string; contestType: string }, signal?: AbortSignal): Promise<FloydGameGroup[]> {
   const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}`), { signal });
+  const body = await response.json().catch(() => ({})) as JsonRecord;
+  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
+  return Array.isArray(body.groups) ? body.groups.filter(isJsonRecord).map((group) => ({ draftGroupId: String(group.draftGroupId ?? ''), matchupLabel: String(group.matchupLabel ?? 'Game'), gameCount: typeof group.gameCount === 'number' ? group.gameCount : undefined })).filter((group) => group.draftGroupId) : [];
+}
+
+export async function listFloydContests(params: { sport: string; contestType: string; draftGroupId?: string }, signal?: AbortSignal): Promise<DraftKingsSlate[]> {
+  const groupQuery = params.draftGroupId ? `&draftGroupId=${encodeURIComponent(params.draftGroupId)}` : '';
+  const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}${groupQuery}`), { signal });
   const body = await response.json().catch(() => ({})) as JsonRecord;
   if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
   const contests = flattenSlateResponse(body);
@@ -99,9 +109,7 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   const payload = payloadValue as JsonRecord;
   const research = asRecord(payload.research);
   const pipeline = buildPipeline(payload.stages, research, payload.lineups);
-  const availability = Array.isArray(research?.availability) ? research.availability as JsonRecord[] : [];
-  const availabilityByPlayer = new Map(availability.map((item) => [String(item.playerId), String(item.status)]));
-  const playerPool = Array.isArray(slate?.playerPool) ? slate.playerPool.map((player) => mapPlayer(player, input.sport, availabilityByPlayer.get(String((player as JsonRecord).playerId)))) : [];
+  const playerPool = Array.isArray(slate?.playerPool) ? slate.playerPool.map((player) => mapPlayer(player, input.sport)) : [];
   const blocked = pipeline.stages.some((stage) => ['BLOCKED', 'FAILED'].includes(stage.status.toUpperCase()));
   const cautions = pipeline.stages.filter((stage) => !['COMPLETE', 'READY', 'SUCCEEDED'].includes(stage.status.toUpperCase())).map((stage) => `${stage.stage} stage: ${stage.status}`);
   return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : cautions.length ? 'caution' : 'ready', eligible_for_lineups: !blocked, eligible_for_tournament: !blocked && !cautions.length, hard_blocks: blocked ? cautions : [], cautions }, model_version: 'floyd-dfs', data_warnings: cautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
@@ -141,11 +149,16 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown): 
   });
 }
 
-function mapPlayer(value: unknown, sport: string, availability?: string): Player {
+function mapPlayer(value: unknown, sport: string): Player {
   const player = value as JsonRecord;
   const team = String(player.team ?? '');
-  const confirmed = player.confirmedStarter === true || player.lineupStatus === 'CONFIRMED' || typeof player.battingOrder === 'number';
-  return { id: String(player.playerId), name: String(player.playerName), team, position: String(player.position ?? Object.keys((player.eligibility as JsonRecord | undefined) ?? {})[0] ?? 'UTIL'), salary: Number(player.salary ?? 0), base_salary: Number(player.salary ?? 0), captain_salary: positiveNumber(player.captainSalary), utility_salary: positiveNumber(player.utilitySalary), lineup_status: sport.toLowerCase() === 'mlb' ? confirmed ? 'confirmed' : 'unconfirmed' : undefined, injury_status: mapAvailability(availability), image_url: typeof player.imageUrl === 'string' ? player.imageUrl : undefined, team_logo_url: typeof player.teamLogoUrl === 'string' ? player.teamLogoUrl : teamLogoUrl(sport, team), projected_points: undefined };
+  // The authoritative availability data lives at player.availability (set by
+  // applyAvailabilitySnapshot server-side before the slate is returned) — not on flat
+  // top-level fields, which never exist on a SlatePlayer.
+  const availability = asRecord(player.availability);
+  const availabilityStatus = typeof availability?.status === 'string' ? availability.status : undefined;
+  const confirmed = availabilityStatus === 'CONFIRMED_STARTER' || availability?.confirmed === true;
+  return { id: String(player.playerId), name: String(player.playerName), team, position: String(player.position ?? Object.keys((player.eligibility as JsonRecord | undefined) ?? {})[0] ?? 'UTIL'), salary: Number(player.salary ?? 0), base_salary: Number(player.salary ?? 0), captain_salary: positiveNumber(player.captainSalary), utility_salary: positiveNumber(player.utilitySalary), lineup_status: sport.toLowerCase() === 'mlb' ? confirmed ? 'confirmed' : 'unconfirmed' : undefined, injury_status: mapAvailability(availabilityStatus), image_url: typeof player.imageUrl === 'string' ? player.imageUrl : undefined, team_logo_url: typeof player.teamLogoUrl === 'string' ? player.teamLogoUrl : teamLogoUrl(sport, team), projected_points: undefined };
 }
 
 function isCaptainSlot(slot?: string): boolean {
@@ -160,20 +173,31 @@ function positiveNumber(value: unknown): number | undefined {
 
 function asRecord(value: unknown): JsonRecord | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : undefined; }
 
+// The engine reports a richer status vocabulary per stage (Slate uses VALID/WARNING/BLOCKED;
+// the rest use COMPLETE/PARTIAL/BLOCKED) because those distinctions matter for diagnostics.
+// User-facing display only supports two states: a stage either delivered everything it needed
+// (COMPLETE) or delivered something usable but incomplete (PARTIAL). BLOCKED shouldn't reach
+// this code path in practice -- a genuinely blocked run fails before the lineup screen renders
+// -- but is mapped defensively rather than left to display a raw, unrecognized value.
+const READY_STAGE_STATUSES = new Set(['COMPLETE', 'VALID', 'READY', 'SUCCEEDED']);
+function displayStageStatus(rawStatus: string): 'COMPLETE' | 'PARTIAL' {
+  return READY_STAGE_STATUSES.has(rawStatus.toUpperCase()) ? 'COMPLETE' : 'PARTIAL';
+}
+
 function buildPipeline(stagesValue: unknown, research: JsonRecord | undefined, lineups: unknown): FloydPipelineContext {
   const stages = Array.isArray(stagesValue) ? stagesValue.map((value) => {
     const stage = value as JsonRecord;
-    return { stage: String(stage.stage ?? 'UNKNOWN'), status: String(stage.status ?? 'UNKNOWN'), version: typeof stage.version === 'number' ? stage.version : undefined, output_payload: asRecord(stage.output_payload ?? stage.output), error: asRecord(stage.error) };
+    return { stage: String(stage.stage ?? 'UNKNOWN'), status: displayStageStatus(String(stage.status ?? 'UNKNOWN')), version: typeof stage.version === 'number' ? stage.version : undefined, output_payload: asRecord(stage.output_payload ?? stage.output), error: asRecord(stage.error) };
   }) : [];
   const outputFor = (name: string) => stages.find((stage) => stage.stage.toUpperCase() === name)?.output_payload;
-  const completeStatuses = new Set(['COMPLETE', 'READY', 'SUCCEEDED']);
-  return { stages, research, adjustment: outputFor('SPORT_ADJUSTMENT') ?? outputFor('ADJUSTMENT'), projection: outputFor('PROJECTION'), optimizer: outputFor('OPTIMIZE') ?? outputFor('OPTIMIZER'), selection: outputFor('SELECTION'), completedCount: stages.filter((stage) => completeStatuses.has(stage.status.toUpperCase())).length, totalCount: stages.length || (Array.isArray(lineups) ? 1 : 0) };
+  return { stages, research, adjustment: outputFor('SPORT_ADJUSTMENT') ?? outputFor('ADJUSTMENT'), projection: outputFor('PROJECTION'), optimizer: outputFor('OPTIMIZE') ?? outputFor('OPTIMIZER'), selection: outputFor('SELECTION'), completedCount: stages.filter((stage) => stage.status === 'COMPLETE').length, totalCount: stages.length || (Array.isArray(lineups) ? 1 : 0) };
 }
 
+// Maps SlatePlayer.availability.status ('CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' |
+// 'INACTIVE' | 'OUT' | 'UNKNOWN') onto the UI's narrower Player['injury_status'] vocabulary.
 function mapAvailability(value?: string): Player['injury_status'] {
-  if (value === 'OUT') return 'out';
-  if (value === 'QUESTIONABLE') return 'questionable';
-  if (value === 'AVAILABLE') return 'active';
+  if (value === 'OUT' || value === 'INACTIVE') return 'out';
+  if (value === 'CONFIRMED_STARTER' || value === 'ACTIVE' || value === 'PROJECTED') return 'active';
   return 'unknown';
 }
 

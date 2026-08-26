@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { applyAvailabilitySnapshot } from '../src/lib/engine/availability';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
+import { ResearchAgent } from '../src/lib/engine/researchAgent';
+import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
 import { selectLineups } from '../src/lib/engine/selection';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
 import type { ProjectionPackage, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
@@ -85,6 +87,19 @@ const testAvailabilityParity = (): void => {
   assert.equal(result.playerPool.length, 1); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
 };
 
+const testAvailabilitySeedsResearchParity = async (): Promise<void> => {
+  const slateWithAvailability: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player, index) => index === 0 ? { ...player, availability: { status: 'CONFIRMED_STARTER', confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' } } : player) };
+  const seeds = findingsFromAvailability(slateWithAvailability);
+  assert.equal(seeds.length, 1);
+  assert.equal(seeds[0].subjectId, 'p1');
+  assert.equal(seeds[0].sourceTier, 1);
+
+  const agent = new ResearchAgent({ providers: [{ name: 'stub', tier: 3, fetch: async () => [] }], now: () => now });
+  const result = await agent.run({ validatedSlate: slateWithAvailability });
+  assert.ok(!(result.unknowns ?? []).some((unknown) => unknown.subjectId === 'p1'), 'a confirmed player should not raise an availability gap');
+  assert.ok((result.unknowns ?? []).some((unknown) => unknown.subjectId === 'p2'), 'an unconfirmed player should still raise a gap');
+};
+
 const testCashLineCalibrationBoundaryParity = (): void => {
   const observations = Array.from({ length: 120 }, (_, index) => ({ rawProbability: 0.85, beatCashLine: index % 20 !== 0 }));
   const calibration = buildCashLineCalibration(observations);
@@ -102,5 +117,8 @@ const testContractParity = (): void => {
   assert.throws(() => assertSlate({ ...baseSlate, scoringRules: {} }), /scoring rules are required/);
 };
 
-testOptimizerParity(); testUnprojectedPlayerExclusion(); testSalarySlotParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
-console.log('engine parity tests passed');
+(async () => {
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testSalarySlotParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
+  await testAvailabilitySeedsResearchParity();
+  console.log('engine parity tests passed');
+})().catch((error) => { console.error(error); process.exit(1); });
