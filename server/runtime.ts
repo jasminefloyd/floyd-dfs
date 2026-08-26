@@ -9,7 +9,7 @@ import { optimizeLineups } from '../src/lib/engine/optimizer.js';
 import { selectLineups } from '../src/lib/engine/selection.js';
 import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
-import { SportsDataIoClient, SportsDataIoResearchProvider } from '../src/lib/engine/sportsDataIoProvider.js';
+import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor } from '../src/lib/engine/sportsDataIoProvider.js';
 import { applyAvailabilitySnapshot, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
 import { assertAdjustment, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection.js';
@@ -21,7 +21,7 @@ import { ballDontLieProvider, espnProvider } from '../src/lib/engine/structuredS
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
-import { deriveProjectionInputs } from '../src/lib/engine/projectionInputs.js';
+import { deriveSeasonBasedInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs.js';
 import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
 
 type Json = Record<string, unknown>;
@@ -122,26 +122,41 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     // projectionInputs, populated below) is the single source of truth for whether a player
     // is quantitatively projectable; excluding them upstream would silently drop a player who
     // could still be projected from rate stats even without a raw FPPG number.
-    if (workingSlate.sport === 'MLB') {
+    //
+    // MLB/NBA/NFL use real season-to-date stats (PlayerSeasonStats) rather than SportsDataIO's
+    // PlayerGameProjectionStatsByDate -- verified live that the latter is obfuscated/scaled down
+    // on this account's free trial tier (every text field literally reads "Scrambled", and a real
+    // game's combined plate-appearance total came back at ~1/3 of a plausible value), while
+    // PlayerSeasonStats' numeric totals check out as real. WNBA is excluded: every player-level
+    // stats endpoint on this account 404s for WNBA specifically, so it keeps using its existing,
+    // already-real ESPN season-average providerFppg below instead.
+    if (['MLB', 'NBA', 'NFL'].includes(workingSlate.sport)) {
       try {
-        const projections = await availability.getProjectionSnapshot(workingSlate);
-        const byNameAndTeam = new Map(projections.map((projection) => [`${normalizeProjectionName(projection.name)}:${String(projection.team ?? '').toUpperCase()}`, projection]));
-        const missingProjectionPlayers: string[] = [];
-        const refreshedPlayers = workingSlate.playerPool.map((player) => { const projection = byNameAndTeam.get(`${normalizeProjectionName(player.playerName)}:${String(player.team ?? '').toUpperCase()}`); if (!projection || projection.fantasyPointsDraftKings === undefined) { missingProjectionPlayers.push(player.playerName); return player; } return { ...player, providerFppg: projection.fantasyPointsDraftKings }; });
+        let seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate);
+        let seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
+        let seasonFallbackNote = '';
+        // NFL specifically: early in a season, the current year has 0 games played yet. Fall back
+        // to the most recently completed season rather than projecting from an empty data set.
+        if (workingSlate.sport === 'NFL' && !seasonRows.some((row) => Number(row.Games ?? 0) > 0)) {
+          seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
+          seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
+          seasonFallbackNote = ` (current season not yet underway; using ${seasonParam} instead)`;
+        }
+        const missingPlayers: string[] = [];
+        const refreshedPlayers = workingSlate.playerPool.map((player) => {
+          const row = findRow(player, seasonRows);
+          const games = row ? gamesPlayedFromRow(row) : 0;
+          if (!row || games <= 0) { missingPlayers.push(player.playerName); return player; }
+          const dkPoints = Number(row.FantasyPointsDraftKings ?? NaN);
+          const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, seasonRows);
+          return { ...player, ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
+        });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
-        if (missingProjectionPlayers.length) stages.projectionWarning = `SportsDataIO did not return a DraftKings projection for ${missingProjectionPlayers.length} MLB players: ${missingProjectionPlayers.join(', ')}.`;
-      } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'SportsDataIO projection refresh failed.'; }
+        stages.projectionWarning = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
+        if (missingPlayers.length) stages.projectionInputsWarning = `No ${seasonParam} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`;
+      } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.'; }
     }
-    if (workingSlate.sport === 'NFL') {
-      const missingProjectionPlayers = workingSlate.playerPool.filter((player) => !Number.isFinite(player.providerFppg)).map((player) => player.playerName);
-      if (missingProjectionPlayers.length) stages.projectionWarning = `DraftKings did not provide native FPPG projections for ${missingProjectionPlayers.length} NFL players: ${missingProjectionPlayers.join(', ')}.`;
-    }
-    if (['NBA', 'WNBA', 'MLB', 'NFL'].includes(workingSlate.sport)) {
-      try {
-        const rows = await availability.getPlayerGameProjectionStats(workingSlate);
-        if (rows.length) workingSlate = { ...workingSlate, playerPool: workingSlate.playerPool.map((player) => { const inputs = deriveProjectionInputs(workingSlate.sport, player, rows); return inputs ? { ...player, projectionInputs: inputs } : player; }) };
-      } catch (error) { stages.projectionInputsWarning = error instanceof Error ? error.message : 'SportsDataIO projection-stats refresh failed.'; }
-    }
+    if (workingSlate.sport === 'WNBA') stages.projectionInputsWarning = 'WNBA rate-stat inputs are not available on the current SportsDataIO plan (player-level stats endpoints are inaccessible for this sport); projections use the ESPN season-average baseline only.';
   }
   // No dedicated confirmed-lineup feed exists for NBA/WNBA/NFL (SportsDataIO's is MLB-only on
   // this plan), so ESPN's roster status/injuries endpoint is the availability source for these

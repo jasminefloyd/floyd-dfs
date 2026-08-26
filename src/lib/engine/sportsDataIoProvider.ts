@@ -2,7 +2,6 @@ import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, SourceTier,
 import { normalizeTeamCode, parseAvailabilityRecords, type AvailabilitySnapshot } from './availability.js';
 
 export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; }
-export interface SportsDataIoProjectionRecord { name: string; team?: string; providerPlayerId?: string; fantasyPointsDraftKings?: number; updatedAt?: string; }
 
 export class SportsDataIoClient {
   private readonly fetcher: typeof fetch;
@@ -29,23 +28,24 @@ export class SportsDataIoClient {
     if (!availability) return { source: 'SPORTSDATAIO', retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured provider availability feed.` };
     return parseAvailabilityRecords(await this.get<unknown>(slate.sport, availability.feed, availability.resource, date, signal), slate.sport, new Date().toISOString());
   }
-  async getProjectionSnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<SportsDataIoProjectionRecord[]> {
-    if (slate.sport !== 'MLB') return [];
-    const payload = await this.get<unknown>('MLB', 'projections', 'PlayerGameProjectionStatsByDate', sportsDataDate(slate), signal);
-    if (!Array.isArray(payload)) return [];
-    return payload.flatMap((value) => { const row = value && typeof value === 'object' ? value as Record<string, unknown> : undefined; if (!row || typeof row.Name !== 'string') return []; const fantasy = typeof row.FantasyPointsDraftKings === 'number' ? row.FantasyPointsDraftKings : Number(row.FantasyPointsDraftKings); return [{ name: row.Name, team: typeof row.Team === 'string' ? row.Team : undefined, providerPlayerId: row.PlayerID === undefined ? undefined : String(row.PlayerID), fantasyPointsDraftKings: Number.isFinite(fantasy) ? fantasy : undefined, updatedAt: typeof row.Updated === 'string' ? row.Updated : undefined }]; });
-  }
   /**
-   * Raw per-player projected box-score rows for the slate's sport/date, used to derive
-   * rate-based projectionInputs (see projectionInputs.ts). Covers NBA/WNBA/MLB/NFL; the
-   * exact stat fields present vary by sport and are read defensively downstream since
-   * this repo cannot verify SportsDataIO's field names against a live subscription.
+   * Real season-to-date box-score totals (verified live against this account -- unlike
+   * `PlayerGameProjectionStatsByDate`, which returns SportsDataIO's premium/gated projection
+   * product and comes back obfuscated on a free-trial key, `PlayerSeasonStats` numeric fields
+   * are the account's own real, ungated stats). Used as the projection basis for MLB/NBA/NFL --
+   * see projectionInputs.ts's deriveSeasonBasedInputs for how season totals become per-game rates.
    */
-  async getPlayerGameProjectionStats(slate: ValidatedSlate, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
-    const payload = await this.get<unknown>(slate.sport, 'projections', 'PlayerGameProjectionStatsByDate', sportsDataDate(slate), signal);
+  async getSeasonStats(sport: Sport, seasonParam: string, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
+    const payload = await this.get<unknown>(sport, 'stats', 'PlayerSeasonStats', seasonParam, signal);
     if (!Array.isArray(payload)) return [];
     return payload.flatMap((value) => (value && typeof value === 'object' ? [value as Record<string, unknown>] : []));
   }
+}
+
+// MLB/NBA accept a bare year; NFL requires the season-type suffix ('REG' = regular season).
+export function seasonParamFor(sport: Sport, eventDate: string, yearOffset = 0): string {
+  const year = new Date(eventDate).getUTCFullYear() + yearOffset;
+  return sport === 'NFL' ? `${year}REG` : String(year);
 }
 
 export interface SportsDataIoResearchProviderOptions { client: SportsDataIoClient; feed?: string; resource?: string; tier?: SourceTier; }

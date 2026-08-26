@@ -9,6 +9,8 @@ import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
 import { selectLineups } from '../src/lib/engine/selection';
+import { deriveSeasonBasedInputs, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
+import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 
@@ -313,6 +315,39 @@ const testAdjustmentStatusReflectsResolvedConflictsParity = (): void => {
   assert.equal(stillPartialAdjustment.status, 'PARTIAL', 'a conflict Adjustment could NOT net into a real signal must still be reported PARTIAL');
 };
 
+const testSeasonBasedInputsParity = (): void => {
+  const hitter = { ...baseSlate.playerPool[0], playerName: 'Yordan Alvarez', team: 'HOU', position: 'OF' };
+  const hitterRow = { Name: 'Yordan Alvarez', Team: 'HOU', Games: 130, PlateAppearances: 569.3, AtBats: 466.6, Hits: 150.5, Singles: 85.7, Doubles: 27.9, Triples: 1, HomeRuns: 35.9, TotalBases: 288.1, RunsBattedIn: 90.7, Runs: 87.7, StolenBases: 1, Walks: 90.7 };
+  const hitterInputs = deriveSeasonBasedInputs('MLB', hitter, [hitterRow]);
+  assert.ok(hitterInputs);
+  assert.ok(hitterInputs!.expectedPA > 3 && hitterInputs!.expectedPA < 6, 'a real slugger\'s per-game plate appearances should land in a realistic 3-6 range, not a season total or a scrambled fraction');
+  assert.ok(Math.abs(hitterInputs!.hitRate - hitterRow.Hits / hitterRow.PlateAppearances) < 1e-9, 'rate stats must stay computed against season totals, not divided by games again');
+
+  const pitcher = { ...baseSlate.playerPool[0], playerName: 'Patrick Corbin', team: 'TOR', position: 'SP' };
+  const pitcherRow = { Name: 'Patrick Corbin', Team: 'TOR', Games: 19, InningsPitchedDecimal: 79.8, PitchingStrikeouts: 62.8, PitchingWalks: 24.9, PitchingHits: 97.7, PitchingEarnedRuns: 48.9, Strikeouts: 0, Walks: 0 };
+  const pitcherInputs = deriveSeasonBasedInputs('MLB', pitcher, [pitcherRow]);
+  assert.ok(pitcherInputs);
+  assert.ok(pitcherInputs!.strikeoutsPerInning > 0, 'a pitcher\'s real strikeouts live under PitchingStrikeouts, not the bare (batting) Strikeouts field, which is 0 for this row');
+  assert.ok(pitcherInputs!.expectedInnings > 3 && pitcherInputs!.expectedInnings < 8, 'a real starter\'s per-game innings should land in a realistic range');
+
+  const wr = { ...baseSlate.playerPool[0], playerName: 'K.Allen', team: 'JAX', position: 'WR' };
+  const wrRow = { Name: 'K.Allen', Team: 'JAX', Played: 17, ReceivingTargets: 138.2, Receptions: 91.8, ReceivingYards: 880.3, ReceivingTouchdowns: 5.1, RushingAttempts: 0, RushingYards: 0, RushingTouchdowns: 0 };
+  const wrInputs = deriveSeasonBasedInputs('NFL', wr, [wrRow]);
+  assert.ok(wrInputs);
+  assert.ok(wrInputs!.targets > 5, 'NFL season rows report targets under ReceivingTargets, not the bare Targets field, which is absent');
+  assert.ok(gamesPlayedFromRow(wrRow) === 17, 'NFL season rows report games played under Played, not Games');
+
+  assert.equal(deriveSeasonBasedInputs('MLB', hitter, [{ ...hitterRow, Games: 0 }]), undefined, 'zero games played must be treated as no data, never a divide-by-zero guess');
+  assert.equal(deriveSeasonBasedInputs('MLB', hitter, []), undefined, 'no matching row must be treated as no data');
+};
+
+const testSeasonParamForParity = (): void => {
+  assert.equal(seasonParamFor('MLB', '2026-08-26T23:05:00.000Z'), '2026');
+  assert.equal(seasonParamFor('NBA', '2026-08-26T23:05:00.000Z'), '2026');
+  assert.equal(seasonParamFor('NFL', '2026-08-26T23:05:00.000Z'), '2026REG');
+  assert.equal(seasonParamFor('NFL', '2026-08-26T23:05:00.000Z', -1), '2025REG');
+};
+
 const testContractParity = (): void => {
   assertSlate(baseSlate);
   assertProjection(projection);
@@ -320,7 +355,7 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   console.log('engine parity tests passed');
