@@ -137,7 +137,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         let seasonFallbackNote = '';
         // NFL specifically: early in a season, the current year has 0 games played yet. Fall back
         // to the most recently completed season rather than projecting from an empty data set.
-        if (workingSlate.sport === 'NFL' && !seasonRows.some((row) => Number(row.Games ?? 0) > 0)) {
+        if (workingSlate.sport === 'NFL' && !seasonRows.some((row) => gamesPlayedFromRow(row) > 0)) {
           seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
           seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
           seasonFallbackNote = ` (current season not yet underway; using ${seasonParam} instead)`;
@@ -152,11 +152,11 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           return { ...player, ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
         });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
-        stages.projectionWarning = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
-        if (missingPlayers.length) stages.projectionInputsWarning = `No ${seasonParam} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`;
-      } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.'; }
+        const dataSourceNote = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
+        stages.projectionDataSourceWarnings = missingPlayers.length ? [dataSourceNote, `No ${seasonParam} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`] : [dataSourceNote];
+      } catch (error) { stages.projectionDataSourceWarnings = [error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.']; }
     }
-    if (workingSlate.sport === 'WNBA') stages.projectionInputsWarning = 'WNBA rate-stat inputs are not available on the current SportsDataIO plan (player-level stats endpoints are inaccessible for this sport); projections use the ESPN season-average baseline only.';
+    if (workingSlate.sport === 'WNBA') stages.projectionDataSourceWarnings = ['WNBA rate-stat inputs are not available on the current SportsDataIO plan (player-level stats endpoints are inaccessible for this sport); projections use the ESPN season-average baseline only.'];
   }
   // No dedicated confirmed-lineup feed exists for NBA/WNBA/NFL (SportsDataIO's is MLB-only on
   // this plan), so ESPN's roster status/injuries endpoint is the availability source for these
@@ -200,7 +200,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const projection = projectSlate(workingSlate, adjustment);
   assertProjection(projection);
   stages.projection = projection;
-  await saveStage(db, run, 'PROJECTION', adjustment, projection, projection.status);
+  await saveStage(db, run, 'PROJECTION', adjustment, projection, projection.status, (stages.projectionDataSourceWarnings as string[] | undefined) ?? []);
   const projectionRun = await db.from('floyd_dfs_projection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: projection.version, sport: projection.sport, model_version: projection.modelVersion, simulation_runs: projection.simulationRuns, projection_package: projection, status: projection.status }).select('id').single();
   if (projectionRun.error) throw projectionRun.error;
   const projectionRows = await db.from('floyd_dfs_player_projections').insert(projection.players.map((player) => ({ tenant_id: run.tenant_id, projection_run_id: projectionRun.data.id, player_id: player.playerId, baseline_opportunity: player.baselineOpportunity, adjusted_opportunity: player.adjustedOpportunity, opportunity_delta: player.opportunityDelta, component_projection: player.componentProjection, floor_p20: player.projectedOutcomes.floorP20, median_p50: player.projectedOutcomes.medianP50, ceiling_p90: player.projectedOutcomes.ceilingP90, median_per_1k: player.salaryEfficiency.medianPer1k, ceiling_per_1k: player.salaryEfficiency.ceilingPer1k, confidence: player.confidence, uncertainty_factors: player.uncertaintyFactors, watch_dependencies: player.watchDependencies, model_version: player.modelVersion })));
