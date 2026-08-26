@@ -39,7 +39,12 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
   const limit = maxCandidates * 4;
-  const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => (projectionByPlayer.get(b.playerId)?.salaryEfficiency.medianPer1k ?? 0) - (projectionByPlayer.get(a.playerId)?.salaryEfficiency.medianPer1k ?? 0));
+  // Blends in ceiling efficiency (not just median) so a high-ceiling/lower-median leverage play
+  // still has a real chance of entering the DFS search space -- pure median-sort can otherwise
+  // prune it out of the fixed node budget before it's ever generated as a candidate, not just
+  // outrank it.
+  const searchValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); return projection ? projection.salaryEfficiency.medianPer1k * 0.7 + projection.salaryEfficiency.ceilingPer1k * 0.3 : 0; };
+  const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
   const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
   const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
   enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit);
@@ -191,7 +196,13 @@ function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUse
   for (const player of playerRows) if (player.team) teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
   let correlationScore = 0;
   for (let i = 0; i < playerRows.length; i += 1) for (let j = i + 1; j < playerRows.length; j += 1) correlationScore += pairCorrelation(input.validatedSlate.sport, playerRows[i], playerRows[j]);
-  const ownershipEstimate = players.reduce((sum, player) => sum + 1 / Math.max(1, player.salaryEfficiency.medianPer1k), 0) / Math.max(1, players.length);
+  const baseOwnershipEstimate = players.reduce((sum, player) => sum + 1 / Math.max(1, player.salaryEfficiency.medianPer1k), 0) / Math.max(1, players.length);
+  // Nudges ownership down (leverage up) for lineups built from higher-relative-variance players --
+  // still a heuristic proxy, not real field data, but one that now uses the real per-player
+  // floor/ceiling spread Projection computes instead of ignoring it entirely. Bounded so it can
+  // only ever discount the base salary-efficiency signal, never dominate it.
+  const relativeSpread = players.reduce((sum, player) => sum + (player.projectedOutcomes.ceilingP90 - player.projectedOutcomes.floorP20) / Math.max(1, player.projectedOutcomes.medianP50), 0) / Math.max(1, players.length);
+  const ownershipEstimate = baseOwnershipEstimate * (1 - Math.min(0.2, relativeSpread * 0.1));
   const leverageScore = Math.max(0, 1 - ownershipEstimate);
   const objective = median * profile.medianWeight + ceiling * profile.ceilingWeight + leverageScore * profile.leverageWeight + correlationScore * profile.correlationWeight;
   const id = stableId(JSON.stringify(lineup.rosterSlots));

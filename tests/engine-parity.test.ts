@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { applyAvailabilitySnapshot } from '../src/lib/engine/availability';
+import { applyAvailabilitySnapshot, withDegradedAvailability } from '../src/lib/engine/availability';
+import { adjustSlate } from '../src/lib/engine/adjustment';
+import { projectSlate } from '../src/lib/engine/projection';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
 import { classifyContestKind } from '../src/lib/engine/draftKingsSlate';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
+import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
 import { selectLineups } from '../src/lib/engine/selection';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
-import type { ProjectionPackage, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
+import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 
 const now = new Date('2026-08-23T12:00:00.000Z');
 const baseSlate: ValidatedSlate = {
@@ -182,6 +185,126 @@ const testCashLineCalibrationBoundaryParity = (): void => {
   assert.equal(probability, bin?.observedRate);
 };
 
+const testConflictingEvidenceNetsRealSignalParity = (): void => {
+  const findings: ResearchFinding[] = [
+    { id: 'f-out', subjectId: 'p1', bucket: 'AVAILABILITY', finding: 'Player was ruled out for tonight.', sourceName: 'Test', sourceTier: 2, confidence: 'MEDIUM', retrievedAt: now.toISOString() },
+    { id: 'f-usage', subjectId: 'p1', bucket: 'RECENT_ROLE_FORM', finding: 'Increased usage as the primary scoring option.', sourceName: 'Test', sourceTier: 2, confidence: 'MEDIUM', retrievedAt: now.toISOString() },
+  ];
+  const researchWithConflict: ResearchPackage = { ...research, findings };
+  const adjustment = adjustSlate(baseSlate, researchWithConflict, now);
+  const playerAdjustment = adjustment.adjustments.find((item) => item.playerId === 'p1')!;
+  assert.equal(playerAdjustment.netOpportunityDirection, 'MATERIALLY_DOWN', 'a strong DOWN signal should still win out over a weaker conflicting UP signal, not collapse to NEUTRAL');
+  assert.ok(playerAdjustment.netSignedMagnitude < 0);
+
+  const providerFppgSlate: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player) => player.playerId === 'p1' ? { ...player, providerFppg: 40 } : player) };
+  const projected = projectSlate(providerFppgSlate, adjustment, now);
+  const p1 = projected.players.find((player) => player.playerId === 'p1')!;
+  assert.ok(p1.projectedOutcomes.medianP50 < 40, 'conflicting evidence that nets DOWN must reduce the projection, not leave it unchanged as if there were no evidence at all');
+};
+
+const testNoiseWidthReflectsRoleCertaintyParity = (): void => {
+  const providerFppgSlate: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player) => player.playerId === 'p1' ? { ...player, providerFppg: 40 } : player) };
+  const emptyAdjustment = adjustSlate(providerFppgSlate, research, now);
+  const lowProjection = projectSlate(providerFppgSlate, emptyAdjustment, now);
+  const lowP1 = lowProjection.players.find((player) => player.playerId === 'p1')!;
+  const lowSpread = lowP1.projectedOutcomes.ceilingP90 - lowP1.projectedOutcomes.floorP20;
+
+  const highCertaintyAdjustment = { ...emptyAdjustment, adjustments: emptyAdjustment.adjustments.map((item) => item.playerId === 'p1' ? { ...item, roleCertainty: 'HIGH' as const } : item) };
+  const highProjection = projectSlate(providerFppgSlate, highCertaintyAdjustment, now);
+  const highP1 = highProjection.players.find((player) => player.playerId === 'p1')!;
+  const highSpread = highP1.projectedOutcomes.ceilingP90 - highP1.projectedOutcomes.floorP20;
+
+  assert.ok(highSpread < lowSpread, 'a HIGH-certainty player should have a narrower floor/ceiling band than a LOW-certainty player projected from the same inputs');
+};
+
+const testDegradedAvailabilityParity = (): void => {
+  const degraded = withDegradedAvailability(baseSlate, 'Availability refresh failed.');
+  assert.equal(degraded.validation.status, 'WARNING');
+  assert.ok(degraded.validation.warnings.includes('Availability refresh failed.'));
+
+  const alreadyBlocked: ValidatedSlate = { ...baseSlate, validation: { ...baseSlate.validation, status: 'BLOCKED' } };
+  const stillBlocked = withDegradedAvailability(alreadyBlocked, 'Availability refresh failed.');
+  assert.equal(stillBlocked.validation.status, 'BLOCKED', 'an already-BLOCKED slate must stay BLOCKED, never silently downgraded');
+};
+
+const testThinPoolDiversityDisclosureParity = (): void => {
+  const makeCandidate = (id: string, playerIds: string[]): LineupCandidate => ({
+    id, playerIds, rosterSlots: Object.fromEntries(playerIds.map((playerId, index) => [`SLOT_${index}`, playerId])), salaryUsed: 9000, salaryRemaining: 1000, median: 40, ceiling: 55,
+    correlationScore: 0, optimalLineupFrequency: 1, topOnePercentFrequency: 1, ownershipEstimate: 0.2, leverageScore: 0.8, duplicationRisk: 'LOW',
+    estimatedDuplicates: 5, medianRank: 1, ceilingRank: 1, tournamentRank: 1, candidateTypes: [], gameScriptCluster: 'SINGLE_TEAM_OR_UNKNOWN', strategicSimilarity: 0, riskFlags: [],
+  });
+  // 4-of-5 shared players -> 0.8 overlap, at the "near-duplicate" threshold choosePortfolio itself uses.
+  const nearDuplicatePool = { candidates: [makeCandidate('c1', ['p1', 'p2', 'p3', 'p4', 'p5']), makeCandidate('c2', ['p1', 'p2', 'p3', 'p4', 'p6'])] };
+  const twoEntrySlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, userEntryCount: 2, requestedEntryCount: 2 } };
+  const result = selectLineups({ validatedSlate: twoEntrySlate, researchPackage: research, optimizerPackage: nearDuplicatePool }, now);
+  assert.equal(result.selectedLineups.length, 2);
+  assert.ok(result.warnings.some((warning) => warning.includes('closely overlap')), 'a thin pool of near-duplicate candidates must be disclosed as a portfolio-level warning');
+  assert.ok(result.selectedLineups.some((lineup) => lineup.rationale.some((line) => line.includes('closely overlaps'))), 'the affected lineup(s) must carry a per-lineup disclosure too');
+};
+
+const testOpenAiSelectionNearDuplicateDisclosureParity = async (): Promise<void> => {
+  const makeCandidate = (id: string, playerIds: string[]): LineupCandidate => ({
+    id, playerIds, rosterSlots: Object.fromEntries(playerIds.map((playerId, index) => [`SLOT_${index}`, playerId])), salaryUsed: 9000, salaryRemaining: 1000, median: 40, ceiling: 55,
+    correlationScore: 0, optimalLineupFrequency: 1, topOnePercentFrequency: 1, ownershipEstimate: 0.2, leverageScore: 0.8, duplicationRisk: 'LOW',
+    estimatedDuplicates: 5, medianRank: 1, ceilingRank: 1, tournamentRank: 1, candidateTypes: [], gameScriptCluster: 'SINGLE_TEAM_OR_UNKNOWN', strategicSimilarity: 0, riskFlags: [],
+  });
+  const candidates = [makeCandidate('c1', ['p1', 'p2', 'p3', 'p4', 'p5']), makeCandidate('c2', ['p1', 'p2', 'p3', 'p4', 'p6'])];
+  const twoEntrySlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, userEntryCount: 2, requestedEntryCount: 2 } };
+  const baselineSelection = selectLineups({ validatedSlate: twoEntrySlate, researchPackage: research, optimizerPackage: { candidates } }, now);
+  assert.ok(baselineSelection.warnings.some((warning) => warning.includes('closely overlap')), 'sanity check: the deterministic pass should already flag this pair as near-duplicate');
+
+  const fetcher = (async () => ({ ok: true, json: async () => ({ output_text: JSON.stringify({ selections: [{ candidateId: 'c1', explanation: 'Top build.' }, { candidateId: 'c2', explanation: 'Second build.' }] }) }) })) as unknown as typeof fetch;
+  const result = await selectWithOpenAi({ slate: twoEntrySlate, research, candidates, selection: baselineSelection, cashLineCalibration: undefined }, { apiKey: 'test-key', fetcher });
+  assert.equal(result.selectedLineups.length, 2);
+  assert.ok((result.warnings ?? []).some((warning) => warning.includes('closely overlap')), 'a near-duplicate pair within the actual OpenAI-selected set must be disclosed at the portfolio level, not just via Optimizer\'s pool-wide average');
+  assert.ok(result.selectedLineups.some((lineup) => lineup.rationale.some((line) => line.includes('closely overlaps'))), 'the affected lineup(s) must carry a per-lineup disclosure too');
+};
+
+const testRoleCertaintyThreeTierParity = (): void => {
+  const findings: ResearchFinding[] = Array.from({ length: 3 }, (_, index) => ({ id: `f-${index}`, subjectId: 'p1', bucket: 'RECENT_ROLE_FORM', finding: 'Confirmed starting role with stable, well-established playing time.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() }));
+  const highCertaintyResearch: ResearchPackage = { ...research, findings };
+  const highAdjustment = adjustSlate(baseSlate, highCertaintyResearch, now).adjustments.find((item) => item.playerId === 'p1')!;
+  assert.equal(highAdjustment.roleCertainty, 'HIGH', 'three or more corroborating findings for the same player should reach HIGH role certainty on the deterministic-only path');
+
+  const mediumCertaintyResearch: ResearchPackage = { ...research, findings: [findings[0]] };
+  const mediumAdjustment = adjustSlate(baseSlate, mediumCertaintyResearch, now).adjustments.find((item) => item.playerId === 'p1')!;
+  assert.equal(mediumAdjustment.roleCertainty, 'MEDIUM');
+};
+
+const testOwnershipEstimateReflectsVolatilityParity = (): void => {
+  const volatileProjection: ProjectionPackage = { ...projection, players: projection.players.map((player) => player.playerId === 'p1' ? { ...player, projectedOutcomes: { floorP20: 5, medianP50: 30, ceilingP90: 70 } } : player) };
+  const stableResult = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  const volatileResult = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: volatileProjection }, { maxCandidates: 20 }, now);
+  const stableCandidate = stableResult.candidates.find((candidate) => candidate.playerIds.includes('p1'))!;
+  const volatileCandidate = volatileResult.candidates.find((candidate) => candidate.playerIds.includes('p1'))!;
+  assert.ok(volatileCandidate.ownershipEstimate < stableCandidate.ownershipEstimate, 'a lineup built from a higher-relative-variance player should get a lower ownership estimate (more leverage) than an identical-median, lower-variance lineup');
+};
+
+const testAdjustmentStatusReflectsResolvedConflictsParity = (): void => {
+  const coverAll: ResearchFinding[] = [
+    { id: 'f-p2', subjectId: 'p2', bucket: 'RECENT_ROLE_FORM', finding: 'Confirmed starting role with stable, established playing time.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+    { id: 'f-p3', subjectId: 'p3', bucket: 'RECENT_ROLE_FORM', finding: 'Confirmed starting role with stable, established playing time.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+  ];
+
+  const nettedFindings: ResearchFinding[] = [...coverAll,
+    { id: 'f-out', subjectId: 'p1', bucket: 'AVAILABILITY', finding: 'Player was ruled out for tonight.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+    { id: 'f-usage', subjectId: 'p1', bucket: 'RECENT_ROLE_FORM', finding: 'Increased usage as the primary scoring option.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+  ];
+  const nettedConflicts = [{ findingIds: ['f-out', 'f-usage'], subjectId: 'p1', summary: 'Conflicting availability/role evidence.', resolved: false }];
+  const resolvedResearch: ResearchPackage = { ...research, findings: nettedFindings, unknowns: [], conflicts: nettedConflicts, status: 'PARTIAL' };
+  const resolvedAdjustment = adjustSlate(baseSlate, resolvedResearch, now);
+  assert.equal(resolvedAdjustment.status, 'COMPLETE', 'a conflict Adjustment itself nets into a real signal must no longer keep Adjustment PARTIAL just because Research never marks it resolved');
+
+  const unnettedFindings: ResearchFinding[] = [...coverAll,
+    { id: 'f-usage2', subjectId: 'p1', bucket: 'RECENT_ROLE_FORM', finding: 'Increased usage as the primary scoring option.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+    { id: 'f-restricted', subjectId: 'p1', bucket: 'AVAILABILITY', finding: 'Questionable due to a minor workload restriction.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH', retrievedAt: now.toISOString() },
+  ];
+  const unnettedConflicts = [{ findingIds: ['f-usage2', 'f-restricted'], subjectId: 'p1', summary: 'Conflicting role/availability evidence that nets to near zero.', resolved: false }];
+  const unresolvedResearch: ResearchPackage = { ...research, findings: unnettedFindings, unknowns: [], conflicts: unnettedConflicts, status: 'PARTIAL' };
+  const stillPartialAdjustment = adjustSlate(baseSlate, unresolvedResearch, now);
+  assert.equal(stillPartialAdjustment.status, 'PARTIAL', 'a conflict Adjustment could NOT net into a real signal must still be reported PARTIAL');
+};
+
 const testContractParity = (): void => {
   assertSlate(baseSlate);
   assertProjection(projection);
@@ -189,7 +312,8 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
+  await testOpenAiSelectionNearDuplicateDisclosureParity();
   console.log('engine parity tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

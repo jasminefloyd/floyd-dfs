@@ -313,6 +313,7 @@ export interface PlayerAdjustment {
   baselineContext: Record<string, unknown>;
   adjustments: Array<{ adjustmentType?: string; direction?: 'UP' | 'DOWN' | 'NEUTRAL'; magnitude: 'NONE' | 'SMALL' | 'MODERATE' | 'MATERIAL' | 'MAJOR'; rationale?: string; evidenceFindingIds?: string[]; confidence: 'LOW' | 'MEDIUM' | 'HIGH' }>;
   netOpportunityDirection: 'MATERIALLY_UP' | 'SLIGHTLY_UP' | 'NEUTRAL' | 'SLIGHTLY_DOWN' | 'MATERIALLY_DOWN';
+  netSignedMagnitude: number;
   roleCertainty: 'LOW' | 'MEDIUM' | 'HIGH';
   keyDeltas: string[];
   projectionNotes: string[];
@@ -327,6 +328,7 @@ export interface AdjustmentPackage {
   adjustments: PlayerAdjustment[];
   researchGaps: unknown[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
+  warnings?: string[];
 }
 
 export interface SelectedLineup {

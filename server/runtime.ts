@@ -10,7 +10,7 @@ import { selectLineups } from '../src/lib/engine/selection.js';
 import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
 import { SportsDataIoClient, SportsDataIoResearchProvider } from '../src/lib/engine/sportsDataIoProvider.js';
-import { applyAvailabilitySnapshot, normalizeTeamCode } from '../src/lib/engine/availability.js';
+import { applyAvailabilitySnapshot, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
 import { assertAdjustment, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection.js';
 import { OddsResearchProvider } from '../src/lib/engine/oddsProvider.js';
@@ -116,7 +116,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   let workingSlate = slate;
   if (availability) {
     try { workingSlate = applyAvailabilitySnapshot(workingSlate, await availability.getAvailabilitySnapshot(workingSlate)); }
-    catch (error) { stages.availabilityWarning = error instanceof Error ? error.message : 'Availability refresh failed.'; }
+    catch (error) { const message = error instanceof Error ? error.message : 'Availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `Availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
     // Providers may not return a matching row for every player. That no longer removes the
     // player from the slate here — projectSlate's own gap logic (which also checks
     // projectionInputs, populated below) is the single source of truth for whether a player
@@ -149,7 +149,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   // "no configured feed" result for these sports with real per-player status.
   if (espnProjection && ['NBA', 'WNBA', 'NFL'].includes(workingSlate.sport)) {
     try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate)); }
-    catch (error) { stages.availabilityWarning = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; }
+    catch (error) { const message = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `ESPN availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
   }
   if (espnProjection && (workingSlate.sport === 'NBA' || workingSlate.sport === 'WNBA')) {
     try {
@@ -174,10 +174,10 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if ((research.unknowns ?? []).length) { const watchItems = await db.from('floyd_dfs_watch_items').insert((research.unknowns ?? []).map((unknown) => ({ tenant_id: run.tenant_id, generation_run_id: run.id, subject: unknown.question, importance: unknown.importance, current_state: { reason: unknown.reason }, trigger_condition: { expectedChangeBeforeLock: true }, affected_player_ids: workingSlate.playerPool.map((player) => player.playerId), affected_lineup_ids: [], expected_update_at: workingSlate.contest.lockTime, status: 'active' }))); if (watchItems.error) throw watchItems.error; }
   let adjustment = adjustSlate(workingSlate, research);
   const adjustmentKey = env('OPENAI_API_KEY');
-  if (adjustmentKey && adjustment.status !== 'BLOCKED') { try { adjustment = await adjustWithOpenAi({ slate: workingSlate, research, baseline: adjustment }, { apiKey: adjustmentKey, model: openAiModel() }); } catch (error) { stages.adjustmentWarning = error instanceof Error ? error.message : 'OpenAI Sport Adjustment failed; deterministic specialist retained.'; } }
+  if (adjustmentKey && adjustment.status !== 'BLOCKED') { try { adjustment = await adjustWithOpenAi({ slate: workingSlate, research, baseline: adjustment }, { apiKey: adjustmentKey, model: openAiModel() }); } catch (error) { const message = error instanceof Error ? error.message : 'OpenAI Sport Adjustment failed; deterministic specialist retained.'; stages.adjustmentWarning = message; adjustment = { ...adjustment, warnings: [...(adjustment.warnings ?? []), message] }; } }
   assertAdjustment(adjustment, research);
   stages.adjustment = adjustment;
-  await saveStage(db, run, 'SPORT_ADJUSTMENT', research, adjustment, adjustment.status);
+  await saveStage(db, run, 'SPORT_ADJUSTMENT', research, adjustment, adjustment.status, adjustment.warnings ?? []);
   const adjustmentRun = await db.from('floyd_dfs_adjustment_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: adjustment.version, sport: adjustment.sport, adjustment_package: adjustment, status: adjustment.status, model_name: openAiModel(), prompt_version: 'sport-adjustment.deterministic.v1' }).select('id').single();
   if (adjustmentRun.error) throw adjustmentRun.error;
   const adjustmentRows = await db.from('floyd_dfs_player_adjustments').insert(adjustment.adjustments.flatMap((player) => player.adjustments.map((item) => ({ tenant_id: run.tenant_id, adjustment_run_id: adjustmentRun.data.id, player_id: player.playerId, adjustment_type: item.adjustmentType ?? 'CONTEXT', direction: item.direction ?? 'NEUTRAL', magnitude: item.magnitude, confidence: item.confidence, rationale: item.rationale ?? player.projectionNotes[0] ?? 'No additional rationale.', evidence_finding_ids: item.evidenceFindingIds ?? [], metadata: { roleCertainty: player.roleCertainty } }))));
@@ -202,7 +202,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   let selection = selectLineups({ validatedSlate: workingSlate, researchPackage: research, optimizerPackage: optimizer, cashLineCalibration: calibration });
   const openAiKey = env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY');
   if (openAiKey && selection.status === 'COMPLETE' && selection.selectedLineups.length) {
-    try { selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }); } catch (error) { stages.selectionWarning = error instanceof Error ? error.message : 'OpenAI Selection failed; deterministic selection retained.'; }
+    try { selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }); } catch (error) { const message = error instanceof Error ? error.message : 'OpenAI Selection failed; deterministic selection retained.'; stages.selectionWarning = message; selection = { ...selection, warnings: [...(selection.warnings ?? []), message] }; }
   }
   assertSelection(selection, optimizer);
   stages.selection = selection;

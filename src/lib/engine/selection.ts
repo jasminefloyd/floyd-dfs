@@ -18,6 +18,8 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
   const { selected, underfilled } = choosePortfolio(ranked, count);
   const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
+  const nearDuplicateCount = selected.filter((candidate) => candidate.strategicSimilarity >= 0.8).length;
+  if (nearDuplicateCount) warnings.push(`${nearDuplicateCount} of ${selected.length} selected lineups closely overlap (>=80% shared players) with another selected lineup because the candidate pool didn't contain enough sufficiently distinct high-quality builds.`);
   return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE' };
 }
 
@@ -87,6 +89,8 @@ function explain(candidate: LineupCandidate, bulletNumber: number, input: Select
   // available candidate (choosePortfolio never blocks), this only makes clear when that candidate
   // didn't actually clear the 85% target rather than silently presenting it as if it had.
   if (isCashGame && cashLine.probability !== undefined && cashLine.probability < CASH_LINE_TARGET_PROBABILITY) rationale.push(`Best available cash-line confidence is ${Math.round(cashLine.probability * 100)}% (${cashLine.confidence === 'CALIBRATED' ? 'calibrated' : 'simulated estimate'}), below the ${Math.round(CASH_LINE_TARGET_PROBABILITY * 100)}% target — no candidate in this pool cleared it.`);
+  if (candidate.candidateTypes.includes('LEVERAGE') || candidate.candidateTypes.includes('LOW_DUPLICATION')) rationale.push('Leverage/duplication figures are a salary-efficiency heuristic, not real field-ownership data.');
+  if (candidate.strategicSimilarity >= 0.8) rationale.push('This lineup closely overlaps with another selected lineup due to a limited pool of distinct high-quality builds.');
   const watchItems = watchItemsFor(input.researchPackage, candidate.playerIds);
   return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: watchItems.length ? 'READY_WITH_WATCH' : 'READY', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
 }
@@ -104,6 +108,6 @@ function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): st
   return `Selected as ${typeLabel}${anchor}${correlationNote}, projecting ${format(candidate.median)} points on $${(candidate.salaryUsed / 1000).toFixed(1)}k of the $${(slate.salaryCap / 1000).toFixed(1)}k cap.`;
 }
 
-function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }
+export function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }
 function existingIds(candidates: LineupCandidate[]): string[] { return [...new Set(candidates.flatMap((candidate) => candidate.playerIds))]; }
 function format(value: number): string { return Number.isFinite(value) ? value.toFixed(1) : '—'; }

@@ -10,6 +10,16 @@ export function normalizeProviderName(value: string): string { return value.norm
 const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR', SDP: 'SD', SFG: 'SF', TBR: 'TB', AZ: 'ARI', OAK: 'ATH' };
 export function normalizeTeamCode(value?: string): string { const code = (value ?? '').trim().toUpperCase(); return TEAM_CODE_ALIASES[code] ?? code; }
 
+// A structured-availability provider call failing means the engine has zero confirmed signal
+// distinguishing an OUT/scratched player from an active one for this sport -- players stay
+// eligible (fabricating a status would be worse), but that degraded state must never be
+// silent. Never escalates an already-BLOCKED slate, and never sets BLOCKED itself -- lineup
+// generation still proceeds, just with an honest, persisted record of the gap.
+export function withDegradedAvailability(slate: ValidatedSlate, message: string): ValidatedSlate {
+  const status = slate.validation.status === 'BLOCKED' ? 'BLOCKED' : 'WARNING';
+  return { ...slate, validation: { ...slate.validation, status, warnings: [...slate.validation.warnings, message] } };
+}
+
 export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot): ValidatedSlate {
   const byKey = new Map<string, AvailabilityRecord[]>();
   for (const record of snapshot.records) { const key = identityKey(record.playerName, record.team); byKey.set(key, [...(byKey.get(key) ?? []), record]); }

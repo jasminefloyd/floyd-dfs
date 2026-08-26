@@ -11,7 +11,17 @@ const REQUIRED_NFL_QB = ['passAttempts', 'completionRate', 'yardsPerCompletion',
 const REQUIRED_MLB_HITTER = ['expectedPA', 'hitRate', 'totalBasesPerPA', 'rbiPerPA', 'runsPerPA', 'stolenBasesPerPA'];
 const REQUIRED_MLB_PITCHER = ['expectedInnings', 'strikeoutsPerInning', 'walksPerInning', 'hitsAllowedPerInning', 'earnedRunsPerInning'];
 const REQUIRED_GOLF = ['birdiesPerRound', 'eaglesPerRound', 'bogeysPerRound', 'parsPerRound', 'roundsRemaining'];
-const MAGNITUDE: Record<string, number> = { NONE: 0, SMALL: 0.03, MODERATE: 0.08, MATERIAL: 0.15, MAJOR: 0.3 };
+
+// Noise width feeds simulateScores' floor/ceiling band. Grounded in signals the pipeline
+// already computes -- roleCertainty (evidence-backed) as a coarse tier, refined by how much
+// corroborating evidence exists -- rather than a single flat width for every player and sport.
+const NOISE_WIDTH_BY_CERTAINTY: Record<'LOW' | 'MEDIUM' | 'HIGH', number> = { LOW: 0.32, MEDIUM: 0.2, HIGH: 0.12 };
+function noiseWidthFor(adjustment: PlayerAdjustment | undefined): number {
+  const base = NOISE_WIDTH_BY_CERTAINTY[adjustment?.roleCertainty ?? 'LOW'];
+  const rawEvidenceCount = Number((adjustment?.baselineContext as Record<string, unknown> | undefined)?.evidenceCount ?? 0);
+  const evidenceCount = Number.isFinite(rawEvidenceCount) ? rawEvidenceCount : 0;
+  return Math.max(base * 0.6, base / (1 + evidenceCount * 0.15));
+}
 
 function requiredFieldsFor(sport: Sport, player: SlatePlayer): string[] {
   if (sport === 'NBA' || sport === 'WNBA') return REQUIRED_BASKETBALL;
@@ -48,11 +58,12 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const median = (player.providerFppg ?? 0) * factor;
   const components = { fantasyPoints: median };
   const rules = { fantasyPoints: { value: 1 } };
-  const samples = simulateScores(components, rules, `${player.playerId}:fppg`);
+  const noiseWidth = noiseWidthFor(adjustment);
+  const samples = simulateScores(components, rules, `${player.playerId}:fppg`, noiseWidth);
   const floor = quantile(samples, 0.2);
   const ceiling = quantile(samples, 0.9);
   const confidence = adjustment?.roleCertainty ?? 'LOW';
-  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors: ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.'], watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION };
+  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors: ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', `Floor/ceiling reflect ${confidence} role certainty (noise band ±${Math.round(noiseWidth * 50)}%).`], watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION };
 }
 
 function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
@@ -61,10 +72,12 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const components = componentsFor(slate, player, adjusted);
   const rules = scoringRulesFor(slate, components);
   const median = scoreComponents(components, rules);
-  const samples = simulateScores(components, rules, `${player.playerId}:${slate.sport}`);
+  const noiseWidth = noiseWidthFor(adjustment);
+  const samples = simulateScores(components, rules, `${player.playerId}:${slate.sport}`, noiseWidth);
   const floor = quantile(samples, 0.2);
   const ceiling = quantile(samples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
+  uncertaintyFactors.push(`Floor/ceiling reflect ${adjustment?.roleCertainty ?? 'LOW'} role certainty (noise band ±${Math.round(noiseWidth * 50)}%).`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
   const opportunityDelta = Object.fromEntries(Object.keys(values).map((key) => [key, (adjusted[key] ?? 0) - (values[key] ?? 0)]));
   return { playerId: player.playerId, salary: player.salary, baselineOpportunity: values, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION };
@@ -96,6 +109,6 @@ function scoringRulesFor(slate: ValidatedSlate, components: Record<string, numbe
 }
 
 function scoreComponents(components: Record<string, number>, rules: Record<string, { value: number }>): number { return Object.entries(components).reduce((total, [key, value]) => total + value * (rules[key]?.value ?? 0), 0); }
-function simulateScores(components: Record<string, number>, rules: Record<string, { value: number }>, seedText: string): number[] { let seed = [...seedText].reduce((sum, character) => (sum * 31 + character.charCodeAt(0)) >>> 0, 7); const scores: number[] = []; for (let i = 0; i < SIMULATION_RUNS; i += 1) { const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => { seed = (1664525 * seed + 1013904223) >>> 0; const noise = ((seed / 4294967296) - 0.5) * 0.4; return [key, Math.max(0, value * (1 + noise))]; })); scores.push(scoreComponents(sampled, rules)); } return scores.sort((a, b) => a - b); }
+function simulateScores(components: Record<string, number>, rules: Record<string, { value: number }>, seedText: string, noiseWidth: number): number[] { let seed = [...seedText].reduce((sum, character) => (sum * 31 + character.charCodeAt(0)) >>> 0, 7); const scores: number[] = []; for (let i = 0; i < SIMULATION_RUNS; i += 1) { const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => { seed = (1664525 * seed + 1013904223) >>> 0; const noise = ((seed / 4294967296) - 0.5) * noiseWidth; return [key, Math.max(0, value * (1 + noise))]; })); scores.push(scoreComponents(sampled, rules)); } return scores.sort((a, b) => a - b); }
 function quantile(values: number[], q: number): number { return values[Math.min(values.length - 1, Math.max(0, Math.floor((values.length - 1) * q)))]; }
-function adjustmentFactor(adjustment: PlayerAdjustment | undefined): number { if (!adjustment) return 1; const magnitude = Math.max(...adjustment.adjustments.map((item) => MAGNITUDE[item.magnitude] ?? 0), 0); return adjustment.netOpportunityDirection.includes('UP') ? 1 + magnitude : adjustment.netOpportunityDirection.includes('DOWN') ? 1 - magnitude : 1; }
+function adjustmentFactor(adjustment: PlayerAdjustment | undefined): number { return 1 + (adjustment?.netSignedMagnitude ?? 0); }
