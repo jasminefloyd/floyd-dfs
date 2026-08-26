@@ -12,6 +12,19 @@ import { rawCashLineProbability } from './cashLineCalibration.js';
 const DEFAULT_PROFILE: ObjectiveProfile = { name: 'balanced-tournament', medianWeight: 0.35, ceilingWeight: 0.35, leverageWeight: 0.15, duplicationPenalty: 0.1, correlationWeight: 0.05 };
 const SMALL_FIELD_PROFILE: ObjectiveProfile = { name: 'small-field', medianWeight: 0.45, ceilingWeight: 0.3, leverageWeight: 0.1, duplicationPenalty: 0.1, correlationWeight: 0.05 };
 const LARGE_FIELD_PROFILE: ObjectiveProfile = { name: 'large-field-gpp', medianWeight: 0.2, ceilingWeight: 0.4, leverageWeight: 0.2, duplicationPenalty: 0.15, correlationWeight: 0.05 };
+// "Max Fantasy Points" is a literal objective, not a blend -- none of the three contest-size
+// profiles above are purely median-maximizing (they all weight ceiling/leverage too), so it
+// gets its own profile rather than being approximated by one of the others.
+const MAX_FPTS_PROFILE: ObjectiveProfile = { name: 'max-fantasy-points', medianWeight: 1, ceilingWeight: 0, leverageWeight: 0, duplicationPenalty: 0, correlationWeight: 0 };
+
+// Maps the user-facing "Objective" selector to a real objective profile. The other three reuse
+// the existing contest-size profiles rather than inventing new weights for them.
+const OBJECTIVE_PROFILE_BY_LINEUP_MODE: Record<string, ObjectiveProfile> = {
+  max_fpts: MAX_FPTS_PROFILE,
+  tournament: LARGE_FIELD_PROFILE,
+  balanced_ev: DEFAULT_PROFILE,
+  safe: SMALL_FIELD_PROFILE,
+};
 
 export interface OptimizerInput {
   validatedSlate: ValidatedSlate;
@@ -21,12 +34,19 @@ export interface OptimizerInput {
 export interface OptimizerOptions {
   maxCandidates?: number;
   objectiveProfile?: ObjectiveProfile;
+  /** The UI's "Objective" selector value (max_fpts/tournament/balanced_ev/safe). Takes priority
+   * over the automatic contest-size profile below when recognized; falls through otherwise. */
+  lineupMode?: string;
+  /** A hard salary-floor constraint (e.g. from the UI's "min salary used" setting) enforced
+   * during enumeration -- never fabricated, only applied when the caller actually supplies it. */
+  minSalaryUsed?: number;
 }
 
 export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions = {}, now = new Date()): OptimizerPackage {
   const contest = input.validatedSlate.contest;
-  const profile = options.objectiveProfile ?? objectiveProfileForContest({ contestSize: contest.contestSize, userEntryCount: contest.userEntryCount, maxEntriesAllowed: contest.maxEntriesAllowed, format: input.validatedSlate.contest.format });
+  const profile = options.objectiveProfile ?? (options.lineupMode ? OBJECTIVE_PROFILE_BY_LINEUP_MODE[options.lineupMode] : undefined) ?? objectiveProfileForContest({ contestSize: contest.contestSize, userEntryCount: contest.userEntryCount, maxEntriesAllowed: contest.maxEntriesAllowed, format: input.validatedSlate.contest.format });
   const maxCandidates = options.maxCandidates ?? 500;
+  const minSalaryUsed = options.minSalaryUsed ?? 0;
   const warnings = [...input.validatedSlate.validation.warnings];
   if (contest.contestSize === undefined) warnings.push('contest.contestSize is unavailable; optimizer used the configured fallback objective profile.');
   if (input.projectionPackage.status === 'BLOCKED') return blocked(input.validatedSlate, profile, now, ['ProjectionPackage is BLOCKED; no legal lineup can be evaluated.']);
@@ -39,16 +59,24 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
   const limit = maxCandidates * 4;
-  // Blends in ceiling efficiency (not just median) so a high-ceiling/lower-median leverage play
-  // still has a real chance of entering the DFS search space -- pure median-sort can otherwise
-  // prune it out of the fixed node budget before it's ever generated as a candidate, not just
-  // outrank it.
-  const searchValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); return projection ? projection.salaryEfficiency.medianPer1k * 0.7 + projection.salaryEfficiency.ceilingPer1k * 0.3 : 0; };
+  // Sorts by RAW projected value aligned with the actual objective being scored (median/ceiling,
+  // weighted the same way scoreCandidate() weights them below) -- not by salary efficiency
+  // (points per $1k). Efficiency systematically ranks cheap, decent-production bench players
+  // above expensive stars (a $2k player scoring 8 pts has HIGHER points-per-dollar than an $11k
+  // player scoring 32, purely because salary doesn't scale linearly with production), which
+  // means the DFS search would try the cheap player's entire subtree of UTIL combinations first
+  // and can exhaust the whole node budget before ever trying the actual highest-value player at
+  // any slot, including CPT -- confirmed live: an efficiency-sorted search never generated a
+  // single candidate with the slate's best player (4x the next-best player's median) as captain,
+  // out of 500 ranked candidates. Sorting by the same value the objective actually rewards fixes
+  // this at the source, for every objective profile including the pure-median "max fantasy
+  // points" one.
+  const searchValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); return projection ? projection.projectedOutcomes.medianP50 * profile.medianWeight + projection.projectedOutcomes.ceilingP90 * profile.ceilingWeight : 0; };
   const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
   const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
   const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit);
-  if (!generated.length) return blocked(input.validatedSlate, profile, now, ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
+  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit, minSalaryUsed);
+  if (!generated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
   if (generated.length >= limit) warnings.push(`Lineup enumeration stopped at ${limit} candidates (a search budget, not exhaustive enumeration); results reflect the highest-value combinations found within that budget, prioritized by salary efficiency.`);
 
   const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile));
@@ -129,12 +157,13 @@ function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<str
   return result;
 }
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number): void {
+function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number): void {
   if (output.length >= limit) return;
   if (index === slots.length) {
     const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
     const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
     if (minimumTeams && teams.size < minimumTeams) return;
+    if (minSalaryUsed && salaryUsed < minSalaryUsed) return;
     output.push({ rosterSlots: { ...rosterSlots }, salaryUsed });
     return;
   }
@@ -155,7 +184,7 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     if (minimumTeams && minimumTeams > 1 && slots.length === 6 && index === 1 && selectedTeams.size === 1 && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit);
+    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed);
     delete rosterSlots[slot];
     used.delete(player.playerId);
   }

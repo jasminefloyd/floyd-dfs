@@ -315,6 +315,35 @@ const testAdjustmentStatusReflectsResolvedConflictsParity = (): void => {
   assert.equal(stillPartialAdjustment.status, 'PARTIAL', 'a conflict Adjustment could NOT net into a real signal must still be reported PARTIAL');
 };
 
+const testSearchOrderFindsHighValueStudParity = (): void => {
+  // Mirrors a real production bug: cheap bench players with decent production have HIGHER
+  // points-per-$1k efficiency than an expensive stud (salary doesn't scale linearly with
+  // production), so sorting the DFS search by efficiency tries every cheap-player combination
+  // before ever trying the stud -- and can exhaust a small search budget before backtracking to
+  // try them at all, in any slot including captain. Sorting by raw projected value instead
+  // fixes this; this test would fail under the old efficiency-based sort.
+  const cheapPlayer = (id: string, team: string) => ({ playerId: id, playerName: id, team, salary: 2000, captainSalary: 3000, utilitySalary: 2000, eligibility: { CPT: true, UTIL: true } });
+  const studSlate: ValidatedSlate = {
+    ...showdownSlate(),
+    salaryCap: 50000,
+    playerPool: [
+      cheapPlayer('chp-a1', 'A'), cheapPlayer('chp-a2', 'A'), cheapPlayer('chp-a3', 'A'),
+      cheapPlayer('chp-b1', 'B'), cheapPlayer('chp-b2', 'B'), cheapPlayer('chp-b3', 'B'),
+      { playerId: 'stud-a', playerName: 'Stud', team: 'A', salary: 10000, captainSalary: 15000, utilitySalary: 10000, eligibility: { CPT: true, UTIL: true } },
+    ],
+  };
+  const cheapProjection = (id: string) => ({ playerId: id, salary: 2000, baselineOpportunity: { points: 8 }, adjustedOpportunity: { points: 8 }, opportunityDelta: { points: 0 }, componentProjection: { points: 8 }, projectedOutcomes: { floorP20: 6, medianP50: 8, ceilingP90: 10 }, salaryEfficiency: { medianPer1k: 4, ceilingPer1k: 5 }, confidence: 'HIGH' as const, uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' });
+  const studProjection: ProjectionPackage = {
+    slateId: 'slate-1', tenantId: 'tenant-1', sport: 'NBA', version: 1, generatedAt: now.toISOString(), modelVersion: 'test', simulationRuns: 10,
+    players: [...['chp-a1', 'chp-a2', 'chp-a3', 'chp-b1', 'chp-b2', 'chp-b3'].map(cheapProjection),
+      { playerId: 'stud-a', salary: 10000, baselineOpportunity: { points: 30 }, adjustedOpportunity: { points: 30 }, opportunityDelta: { points: 0 }, componentProjection: { points: 30 }, projectedOutcomes: { floorP20: 24, medianP50: 30, ceilingP90: 36 }, salaryEfficiency: { medianPer1k: 3, ceilingPer1k: 3.6 }, confidence: 'HIGH' as const, uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' },
+    ], gaps: [], status: 'COMPLETE',
+  };
+  const result = optimizeLineups({ validatedSlate: studSlate, projectionPackage: studProjection }, { maxCandidates: 2 }, now);
+  assert.equal(result.status, 'COMPLETE');
+  assert.ok(result.candidates.some((candidate) => candidate.rosterSlots.CPT === 'stud-a'), 'the highest-value player must be reachable as captain even under a small search budget, not pruned out purely because cheaper players rank higher on salary efficiency');
+};
+
 const testSeasonBasedInputsParity = (): void => {
   const hitter = { ...baseSlate.playerPool[0], playerName: 'Yordan Alvarez', team: 'HOU', position: 'OF' };
   const hitterRow = { Name: 'Yordan Alvarez', Team: 'HOU', Games: 130, PlateAppearances: 569.3, AtBats: 466.6, Hits: 150.5, Singles: 85.7, Doubles: 27.9, Triples: 1, HomeRuns: 35.9, TotalBases: 288.1, RunsBattedIn: 90.7, Runs: 87.7, StolenBases: 1, Walks: 90.7 };
@@ -355,7 +384,7 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   console.log('engine parity tests passed');

@@ -9,7 +9,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const id = String(req.query.runId ?? '');
     const found = await context.db.from('generation_runs').select('*').eq('id', id).eq('tenant_id', context.tenantId).single();
     if (found.error) throw found.error;
-    const payload = found.data.request_payload as { input?: { validatedSlate?: unknown } };
+    const payload = found.data.request_payload as { input?: { validatedSlate?: unknown; lineupMode?: unknown; minSalaryUsed?: unknown } };
     if (!payload.input?.validatedSlate) throw new Error('This run does not contain a validated slate payload.');
     const existing = await context.db.from('engine_jobs').select('id,status,attempt,max_attempts').eq('generation_run_id', id).order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (existing.error) throw existing.error;
@@ -22,7 +22,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (!job.data?.id) { cors(req, res); res.status(409).json({ error: 'This run was claimed by another worker.' }); return; }
     jobId = String(job.data.id);
     await recordEvent(context.db, { tenant_id: context.tenantId, generation_run_id: id, event_type: 'JOB_CLAIMED', stage: 'SLATE', payload: { attempt: nextAttempt } });
-    const result = await processRun(context.db, found.data, payload.input.validatedSlate as Parameters<typeof processRun>[2]);
+    const minSalaryUsed = Number(payload.input.minSalaryUsed);
+    const result = await processRun(context.db, found.data, payload.input.validatedSlate as Parameters<typeof processRun>[2], { lineupMode: typeof payload.input.lineupMode === 'string' ? payload.input.lineupMode : undefined, minSalaryUsed: Number.isFinite(minSalaryUsed) && minSalaryUsed > 0 ? minSalaryUsed : undefined });
     await context.db.from('engine_jobs').update({ status: 'succeeded', completed_at: new Date().toISOString(), output_ref: { selection: true } }).eq('id', jobId);
     cors(req, res); res.status(200).json(result);
   } catch (error) {

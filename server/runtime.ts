@@ -108,7 +108,9 @@ export function providerSet(): { agent: ResearchAgent; availability?: SportsData
   return { agent: new ResearchAgent({ providers, synthesizer }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined };
 }
 
-export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate): Promise<Json> {
+export interface RunOptions { lineupMode?: string; minSalaryUsed?: number; }
+
+export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate, runOptions: RunOptions = {}): Promise<Json> {
   assertSlate(slate);
   await persistConfiguration(db, String(run.tenant_id));
   const { agent, availability, espnProjection } = providerSet();
@@ -205,7 +207,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (projectionRun.error) throw projectionRun.error;
   const projectionRows = await db.from('floyd_dfs_player_projections').insert(projection.players.map((player) => ({ tenant_id: run.tenant_id, projection_run_id: projectionRun.data.id, player_id: player.playerId, baseline_opportunity: player.baselineOpportunity, adjusted_opportunity: player.adjustedOpportunity, opportunity_delta: player.opportunityDelta, component_projection: player.componentProjection, floor_p20: player.projectedOutcomes.floorP20, median_p50: player.projectedOutcomes.medianP50, ceiling_p90: player.projectedOutcomes.ceilingP90, median_per_1k: player.salaryEfficiency.medianPer1k, ceiling_per_1k: player.salaryEfficiency.ceilingPer1k, confidence: player.confidence, uncertainty_factors: player.uncertaintyFactors, watch_dependencies: player.watchDependencies, model_version: player.modelVersion })));
   if (projectionRows.error) throw projectionRows.error;
-  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection });
+  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed });
   assertOptimizer(optimizer, workingSlate);
   stages.optimizer = optimizer;
   await saveStage(db, run, 'OPTIMIZE', projection, optimizer, optimizer.status);

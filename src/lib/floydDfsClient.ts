@@ -114,8 +114,8 @@ function enrichedSlateFrom(stagesValue: unknown, fallbackSlate: unknown): unknow
   return isJsonRecord(slateStage) && slateStage.output_payload ? slateStage.output_payload : fallbackSlate;
 }
 
-export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
-  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize }) });
+export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; minSalaryUsed?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
+  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, minSalaryUsed: input.minSalaryUsed }) });
   const run = queued.run as JsonRecord;
   await request(`/api/runs/${String(run.id)}/process`, { method: 'POST', body: '{}' });
   let current: JsonRecord = run;
