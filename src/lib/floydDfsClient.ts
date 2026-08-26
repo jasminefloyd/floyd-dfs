@@ -11,6 +11,27 @@ export interface FloydGenerationResult {
   data_warnings: string[];
 }
 
+export const SCAN_STAGE_ORDER = ['SLATE', 'RESEARCH', 'SPORT_ADJUSTMENT', 'PROJECTION', 'OPTIMIZE', 'SELECTION'] as const;
+
+export const SCAN_STAGE_LABELS: Record<(typeof SCAN_STAGE_ORDER)[number], string> = {
+  SLATE: 'Loading slate',
+  RESEARCH: 'Gathering research',
+  SPORT_ADJUSTMENT: 'Adjusting for matchups',
+  PROJECTION: 'Projecting scores',
+  OPTIMIZE: 'Building lineups',
+  SELECTION: 'Selecting your lineup',
+};
+
+export interface ScanProgressStage {
+  stage: string;
+  status: string;
+}
+
+function stageProgress(stagesValue: unknown): ScanProgressStage[] {
+  if (!Array.isArray(stagesValue)) return [];
+  return stagesValue.filter(isJsonRecord).map((stage) => ({ stage: String(stage.stage ?? 'UNKNOWN'), status: String(stage.status ?? 'UNKNOWN') }));
+}
+
 function apiUrl(path: string): string {
   const configured = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? DEFAULT_FLOYD_DFS_API_URL;
   return `${configured}${path}`;
@@ -82,7 +103,7 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
-export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number }): Promise<FloydGenerationResult> {
+export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
   const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize }) });
   const run = queued.run as JsonRecord;
   await request(`/api/runs/${String(run.id)}/process`, { method: 'POST', body: '{}' });
@@ -90,6 +111,7 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
   for (let attempt = 0; attempt < 90; attempt += 1) {
     const payload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
     current = payload.run as JsonRecord;
+    onProgress?.(stageProgress(payload.stages));
     if (['ready', 'blocked', 'failed', 'complete'].includes(String(current.state))) {
       const lineups = mapLineups(payload.lineups, queued.slate, payload.stages);
       if (current.state !== 'ready' && current.state !== 'complete') throw new Error(String((current.error as JsonRecord | undefined)?.message ?? 'Floyd DFS blocked lineup generation.'));

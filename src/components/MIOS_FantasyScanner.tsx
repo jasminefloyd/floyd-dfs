@@ -41,6 +41,7 @@ export interface ScanParams {
 interface MIOS_FantasyScannerProps {
   onScan: (params: ScanParams) => void;
   loading: boolean;
+  loadingLabel?: string;
   onValidationError?: (errors: string[]) => void;
 }
 
@@ -78,7 +79,7 @@ const PAYOUT_SHAPES = [
 
 const SLATES_PER_PAGE = 7;
 
-export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS_FantasyScannerProps) {
+export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
   const [contestType, setContestType] = useState('showdown');
   const [groups, setGroups] = useState<DraftKingsGameGroup[]>([]);
@@ -547,7 +548,7 @@ export function MIOS_FantasyScanner({ onScan, loading, onValidationError }: MIOS
         disabled={scanDisabled}
         className="w-full rounded-md bg-[#0b1f3a] px-4 py-3 font-black uppercase tracking-wide text-white shadow-[var(--shadow-medium)] transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:bg-slate-300 disabled:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
-        {loading ? 'Scanning...' : 'Run Scan'}
+        {loading ? (loadingLabel ?? 'Scanning...') : 'Run Scan'}
       </button>
     </div>
   );
