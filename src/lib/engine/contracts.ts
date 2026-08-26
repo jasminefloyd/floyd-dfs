@@ -93,6 +93,8 @@ export interface ValidatedSlate {
     contestSize?: number;
     maxEntriesAllowed?: number;
     cashLine?: number;
+    contestKind?: 'CASH' | 'GPP' | 'UNKNOWN';
+    paidPositions?: number;
   };
   salaryCap: number;
   rosterRules: RosterRules;
@@ -214,6 +216,7 @@ export interface LineupCandidate {
   gameScriptCluster: string;
   strategicSimilarity: number;
   riskFlags: string[];
+  cashLineProbability?: number;
 }
 
 export interface OptimizerPackage {
@@ -227,6 +230,7 @@ export interface OptimizerPackage {
   warnings: string[];
   gaps: string[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
+  cashLineEstimate?: { value: number; source: 'MANUAL' | 'SIMULATED' };
 }
 
 export interface ResearchFinding {
@@ -341,6 +345,8 @@ export interface SelectedLineup {
   ceiling: number;
   watchItems: string[];
   readinessStatus: 'READY' | 'READY_WITH_WATCH';
+  cashLineProbability?: number;
+  cashLineConfidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
 }
 
 export interface SelectionPackage {

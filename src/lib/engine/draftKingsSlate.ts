@@ -7,14 +7,18 @@ export interface DraftKingsSlateContext { tenantId: string; userId: string; requ
 export class DraftKingsSlateMappingError extends Error { constructor(message: string) { super(message); this.name = 'DraftKingsSlateMappingError'; } }
 
 export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, context: DraftKingsSlateContext): ValidatedSlate {
-  const contest = unwrapRecord(bundle.contest.data, 'contest');
+  const contest = unwrapRecord(bundle.contest.data, ['contest', 'contestDetail']);
   const draftGroup = unwrapRecord(bundle.draftGroup.data, 'draftGroup');
   const rules = resolveRules(unwrapRecord(bundle.gameTypeRules.data, 'gameTypeRules'));
   const draftables = unwrapRecord(bundle.draftables.data, 'draftables');
   const rosterRules = mapRosterRules(rules, context.contestFormat);
   const mappedDraftables = mapDraftables(draftables, context.contestFormat, rosterRules, context.sport);
   const playerPool = mappedDraftables.players;
-  const contestSize = context.contestSizeOverride ?? readNumber(contest, ['contestSize', 'entries', 'totalEntries', 'maxEntries']);
+  // Prefer the contest's actual field-size cap (maximumEntries) over its live sign-up count
+  // (entries) -- the latter fluctuates continuously as people join before lock and would make
+  // any paid-fraction/cash-line math built on it unstable between fetches of the same contest.
+  const contestSize = context.contestSizeOverride ?? readNumber(contest, ['maximumEntries', 'contestSize', 'entries', 'totalEntries', 'maxEntries']);
+  const contestKind = classifyContestKind(contest);
   const receivedAt = bundle.contest.retrievedAt;
   const sourceManifest = [
     { source: 'DRAFTKINGS_API', receivedAt, fields: ['contest', 'draftGroup', 'gameTypeRules', 'draftables'] },
@@ -25,7 +29,7 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const slate: ValidatedSlate = {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
     event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate([draftGroup], ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
-    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate([contest, draftGroup], ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
+    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate([contest, draftGroup], ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), contestKind: contestKind.kind, ...(contestKind.paidPositions !== undefined ? { paidPositions: contestKind.paidPositions } : {}), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
     salaryCap: readNestedNumber(rules, ['salaryCap', 'salary_cap', 'maxValue']) ?? 0, rosterRules, scoringRules: resolvedScoringRules, playerPool, sourceManifest, validation: { status: 'VALID', warnings: [], errors: [] },
   };
   const validationErrors = validateSlate(slate);
@@ -110,6 +114,35 @@ function mapDraftables(record: Record<string, unknown>, format: ContestFormat, r
   return { players: [...merged.values()], warnings };
 }
 
+// Classifies a contest directly from DraftKings' own payout structure, never guessed. Verified
+// live: a Double Up/50-50 (cash game) has exactly one payout tier covering roughly the top half
+// of the field, paying every cashing position the same amount; a GPP/tournament has many tiers
+// with a steep first-place-to-last-paid-place payout ratio. Missing/unparseable payout data
+// yields UNKNOWN rather than a guess.
+export function classifyContestKind(contest: Record<string, unknown>): { kind: 'CASH' | 'GPP' | 'UNKNOWN'; paidPositions?: number } {
+  const tiers = Array.isArray(contest.payoutSummary) ? contest.payoutSummary.flatMap((value) => { const tier = asRecord(value); return tier ? [tier] : []; }) : [];
+  if (!tiers.length) return { kind: 'UNKNOWN' };
+  const paidPositions = Math.max(...tiers.map((tier) => readNumber(tier, ['maxPosition']) ?? 0));
+  if (!paidPositions) return { kind: 'UNKNOWN' };
+  const payoutAt = (position: number): number | undefined => {
+    const tier = tiers.find((candidate) => { const min = readNumber(candidate, ['minPosition']) ?? 1; const max = readNumber(candidate, ['maxPosition']) ?? min; return position >= min && position <= max; });
+    return tier ? readTierPayoutValue(tier) : undefined;
+  };
+  const firstPayout = payoutAt(1);
+  const lastPayout = payoutAt(paidPositions);
+  const topHeavyRatio = firstPayout !== undefined && lastPayout !== undefined && lastPayout > 0 ? firstPayout / lastPayout : undefined;
+  if (topHeavyRatio === undefined) return { kind: 'UNKNOWN', paidPositions };
+  const kind: 'CASH' | 'GPP' = tiers.length === 1 && topHeavyRatio <= 1.5 ? 'CASH' : 'GPP';
+  return { kind, paidPositions };
+}
+function readTierPayoutValue(tier: Record<string, unknown>): number | undefined {
+  const descriptions = Array.isArray(tier.payoutDescriptions) ? tier.payoutDescriptions : [];
+  for (const value of descriptions) { const numeric = readNumber(asRecord(value) ?? {}, ['value']); if (numeric !== undefined) return numeric; }
+  const tierPayoutDescriptions = asRecord(tier.tierPayoutDescriptions);
+  if (tierPayoutDescriptions) for (const value of Object.values(tierPayoutDescriptions)) { const numeric = Number(String(value).replace(/[^0-9.]/g, '')); if (Number.isFinite(numeric)) return numeric; }
+  return undefined;
+}
+
 function mapScoringRules(record: Record<string, unknown>): Record<string, { value: number }> { const scoring = record.scoringRules ?? record.scoring ?? record.scoringSettings; if (Array.isArray(scoring)) return Object.fromEntries(scoring.flatMap((value, index) => { const item = asRecord(value); if (!item) return []; const key = readOptionalString(item, ['name', 'key', 'stat', 'type']) ?? `rule_${index}`; const numeric = readNumber(item, ['value', 'points', 'multiplier']); return numeric === undefined ? [] : [[key, { value: numeric }]]; })); const object = asRecord(scoring); return Object.fromEntries(Object.entries(object ?? {}).flatMap(([key, value]) => { const numeric = typeof value === 'number' ? value : readNumber(asRecord(value) ?? {}, ['value', 'points', 'multiplier']); return numeric === undefined ? [] : [[key, { value: numeric }]]; })); }
 // DraftKings' draftStatAttributes carries the FPPG-equivalent value under a numeric `id` that
 // is NOT stable across sports (verified live: WNBA Showdown draftables used id 219 for a value
@@ -132,7 +165,7 @@ function standardScoringRules(sport: Sport): Record<string, { value: number }> {
   if (sport === 'NFL') return { passingYards: { value: 0.04 }, passingTouchdown: { value: 4 }, interception: { value: -1 }, rushingYards: { value: 0.1 }, rushingTouchdown: { value: 6 }, reception: { value: 1 }, receivingYards: { value: 0.1 }, receivingTouchdown: { value: 6 }, twoPointConversion: { value: 2 }, fumbleLost: { value: -2 } };
   return {};
 }
-function unwrapRecord(value: unknown, key: string): Record<string, unknown> { const record = asRecord(value); return (record && (asRecord(record[key]) ?? record)) ?? {}; }
+function unwrapRecord(value: unknown, key: string | string[]): Record<string, unknown> { const record = asRecord(value); if (!record) return {}; for (const candidate of Array.isArray(key) ? key : [key]) { const nested = asRecord(record[candidate]); if (nested) return nested; } return record; }
 function resolveRules(record: Record<string, unknown>): Record<string, unknown> { const relevant = ['salaryCap', 'salary_cap', 'maxValue', 'scoringRules', 'scoring', 'rosterRules', 'lineupTemplate', 'slots']; if (relevant.some((key) => record[key] !== undefined)) return record; for (const key of ['rules', 'gameTypeRules', 'lineupRules', 'settings', 'configuration']) { const nested = asRecord(record[key]); if (nested) { const resolved = resolveRules(nested); if (relevant.some((candidate) => resolved[candidate] !== undefined)) return resolved; } } return record; }
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 function readString(record: Record<string, unknown>, keys: string[], fallback?: string): string { return readOptionalString(record, keys) ?? fallback ?? (() => { throw new DraftKingsSlateMappingError(`Missing required field: ${keys.join(' / ')}.`); })(); }

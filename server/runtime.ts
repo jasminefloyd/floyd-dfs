@@ -198,10 +198,11 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (optimizationRun.error) throw optimizationRun.error;
   const candidateRows = await db.from('floyd_dfs_lineup_candidates').insert(optimizer.candidates.map((candidate) => ({ tenant_id: run.tenant_id, optimization_run_id: optimizationRun.data.id, candidate_key: candidate.id, salary_used: candidate.salaryUsed, salary_remaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, correlation_score: candidate.correlationScore, optimal_lineup_frequency: candidate.optimalLineupFrequency, top_one_percent_frequency: candidate.topOnePercentFrequency, ownership_estimate: candidate.ownershipEstimate, leverage_score: candidate.leverageScore, duplication_risk: candidate.duplicationRisk, estimated_duplicates: candidate.estimatedDuplicates, median_rank: candidate.medianRank, ceiling_rank: candidate.ceilingRank, tournament_rank: candidate.tournamentRank, candidate_types: candidate.candidateTypes, roster_slots: candidate.rosterSlots, game_script_cluster: candidate.gameScriptCluster, strategic_similarity: candidate.strategicSimilarity, risk_flags: candidate.riskFlags })));
   if (candidateRows.error) throw candidateRows.error;
-  let selection = selectLineups({ validatedSlate: workingSlate, researchPackage: research, optimizerPackage: optimizer });
+  const calibration = await loadCashLineCalibration(db, String(run.tenant_id));
+  let selection = selectLineups({ validatedSlate: workingSlate, researchPackage: research, optimizerPackage: optimizer, cashLineCalibration: calibration });
   const openAiKey = env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY');
   if (openAiKey && selection.status === 'COMPLETE' && selection.selectedLineups.length) {
-    try { selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }); } catch (error) { stages.selectionWarning = error instanceof Error ? error.message : 'OpenAI Selection failed; deterministic selection retained.'; }
+    try { selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }); } catch (error) { stages.selectionWarning = error instanceof Error ? error.message : 'OpenAI Selection failed; deterministic selection retained.'; }
   }
   assertSelection(selection, optimizer);
   stages.selection = selection;
@@ -209,9 +210,8 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const selectionRun = await db.from('floyd_dfs_selection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: 1, selection_package: selection, status: selection.status }).select('id').single();
   if (selectionRun.error) throw selectionRun.error;
   if (selection.selectedLineups.length) {
-    const calibration = await loadCashLineCalibration(db, String(run.tenant_id));
+    const cashLine = optimizer.cashLineEstimate?.value ?? workingSlate.contest.cashLine;
     const lineups = selection.selectedLineups.map((lineup) => {
-      const cashLine = workingSlate.contest.cashLine;
       const rawProbability = cashLine ? rawCashLineProbability({ median: lineup.median, floor: lineup.floor, ceiling: lineup.ceiling, cashLine }) : null;
       const calibratedProbability = calibratedCashLineProbability(rawProbability, calibration);
       return { tenant_id: run.tenant_id, selection_run_id: selectionRun.data.id, candidate_key: lineup.candidateId, bullet_number: lineup.bulletNumber, selection_type: lineup.selectionType, lineup_payload: lineup, status: 'GENERATED', cash_line: cashLine ?? null, raw_cash_line_probability: rawProbability, cash_line_probability: calibratedProbability, cash_line_calibration_status: calibration.status, cash_line_calibration_version: CASH_LINE_CALIBRATION_VERSION };

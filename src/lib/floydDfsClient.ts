@@ -144,8 +144,15 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown): 
       const captain = isCaptainSlot(rosterSlot);
       return [{ ...player, roster_slot: rosterSlot, base_salary: player.salary, salary: captain ? player.captain_salary ?? Math.round(player.salary * 1.5) : player.utility_salary ?? player.salary, salary_multiplier: captain ? 1.5 : 1 }];
     });
-    const calibrated = typeof (row as JsonRecord).cash_line_probability === 'number' ? Number((row as JsonRecord).cash_line_probability) : undefined;
-    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), salary_used: Number(payload.salaryUsed ?? 0), confidence_score: calibrated ?? 0, ceiling_score: Number(payload.ceiling ?? 0), simulation_ev: Number(payload.median ?? 0), narrative: String(payload.explanation ?? 'Selected from the verified optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'high_ev' };
+    // payload.cashLineProbability (from SelectedLineup, computed in selection.ts) is the best
+    // available number -- calibrated once enough real contest results exist, otherwise the
+    // disclosed simulated estimate. The persisted row's own cash_line_probability column is only
+    // ever the calibrated value (null pre-approval), kept as a fallback for older persisted rows.
+    const cashLineProbability = typeof payload.cashLineProbability === 'number' ? Number(payload.cashLineProbability) : typeof (row as JsonRecord).cash_line_probability === 'number' ? Number((row as JsonRecord).cash_line_probability) : undefined;
+    const cashLineConfidence = payload.cashLineConfidence === 'CALIBRATED' || payload.cashLineConfidence === 'SIMULATED_ESTIMATE' ? payload.cashLineConfidence : cashLineProbability !== undefined ? 'CALIBRATED' : 'UNAVAILABLE';
+    const contestKind = asRecord(slate?.contest)?.contestKind;
+    const contest_kind = contestKind === 'CASH' || contestKind === 'GPP' ? contestKind : 'UNKNOWN';
+    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? 0, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], ceiling_score: Number(payload.ceiling ?? 0), simulation_ev: Number(payload.median ?? 0), narrative: String(payload.explanation ?? 'Selected from the verified optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'high_ev' };
   });
 }
 

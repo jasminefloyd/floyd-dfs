@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { applyAvailabilitySnapshot } from '../src/lib/engine/availability';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
+import { classifyContestKind } from '../src/lib/engine/draftKingsSlate';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
@@ -55,6 +56,27 @@ const testUnprojectedPlayerExclusion = (): void => {
   assert.ok(result.warnings.some((warning) => warning.includes('Four')));
 };
 
+const testCashLineFieldEstimateParity = (): void => {
+  const cashSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'CASH', paidPositions: 50, contestSize: 100 } };
+  const result = optimizeLineups({ validatedSlate: cashSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(result.status, 'COMPLETE');
+  assert.ok(result.cashLineEstimate, 'a cash-game contest with known paid positions/size should produce a simulated cash-line estimate');
+  assert.equal(result.cashLineEstimate?.source, 'SIMULATED');
+  for (const candidate of result.candidates) {
+    assert.ok(candidate.cashLineProbability !== undefined, 'every candidate should get a cash-line probability once an estimate exists');
+    assert.ok(candidate.cashLineProbability! >= 0 && candidate.cashLineProbability! <= 1);
+  }
+
+  const manualCashSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, cashLine: 20 } };
+  const manualResult = optimizeLineups({ validatedSlate: manualCashSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(manualResult.cashLineEstimate?.source, 'MANUAL');
+  assert.equal(manualResult.cashLineEstimate?.value, 20);
+
+  const gppSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'UNKNOWN' } };
+  const gppResult = optimizeLineups({ validatedSlate: gppSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(gppResult.cashLineEstimate, undefined, 'no cash-line estimate should be fabricated when contest kind/payout data is unknown');
+};
+
 const testSalarySlotParity = (): void => {
   const slate = showdownSlate();
   const idMap: Record<string, string> = { 'home-1': 'p1', 'home-2': 'p2', 'away-1': 'p3' };
@@ -62,6 +84,36 @@ const testSalarySlotParity = (): void => {
   const result = optimizeLineups({ validatedSlate: { ...slate, playerPool, salaryCap: 15000 }, projectionPackage: { ...projection, players: projection.players } });
   assert.equal(result.status, 'COMPLETE');
   assert.ok(result.candidates.some((item) => item.rosterSlots.CPT === 'p1' && item.salaryUsed === 10500));
+};
+
+const testCashGameSelectionParity = (): void => {
+  const optimizer = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: projection });
+  assert.ok(optimizer.candidates.length >= 2);
+  const cashSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'CASH' } };
+
+  const withProbabilities = { ...optimizer, candidates: optimizer.candidates.map((candidate, index) => ({ ...candidate, cashLineProbability: index === 1 ? 0.92 : 0.4 })) };
+  const result = selectLineups({ validatedSlate: cashSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
+  assert.equal(result.status, 'COMPLETE');
+  assert.equal(result.selectedLineups.length, 1);
+  assert.equal(result.selectedLineups[0].cashLineProbability, 0.92, 'should rank the candidate that clears the 85% target first');
+  assert.ok(!result.selectedLineups[0].rationale.some((line) => line.includes('below the')), 'a candidate that clears the target should not carry a shortfall disclosure');
+
+  // Force every candidate below target -- selection must still return the requested count, never
+  // fewer just because nothing clears the cash bar, and must disclose the shortfall.
+  const allBelowTarget = { ...optimizer, candidates: optimizer.candidates.map((candidate) => ({ ...candidate, cashLineProbability: 0.5 })) };
+  const shortfallResult = selectLineups({ validatedSlate: cashSlate, researchPackage: research, optimizerPackage: allBelowTarget }, now);
+  assert.equal(shortfallResult.selectedLineups.length, 1, 'selection must never return fewer lineups just because no candidate clears the cash target');
+  assert.ok(shortfallResult.selectedLineups[0].rationale.some((line) => line.includes('below the 85% target')), 'a shortfall must be disclosed, not hidden');
+};
+
+const testGppSelectionUnaffectedByCashLineParity = (): void => {
+  const optimizer = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: projection });
+  // Deliberately invert: the best tournament candidate gets a LOW cash-line probability.
+  const withProbabilities = { ...optimizer, candidates: optimizer.candidates.map((candidate) => ({ ...candidate, cashLineProbability: candidate.tournamentRank === 1 ? 0.1 : 0.99 })) };
+  const gppSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'GPP' } };
+  const result = selectLineups({ validatedSlate: gppSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
+  const chosen = optimizer.candidates.find((candidate) => candidate.id === result.selectedLineups[0].candidateId);
+  assert.equal(chosen?.tournamentRank, 1, 'GPP selection must rank by the tournament composite, ignoring cash-line probability entirely');
 };
 
 const testSelectionParity = (): void => {
@@ -100,6 +152,25 @@ const testAvailabilitySeedsResearchParity = async (): Promise<void> => {
   assert.ok((result.unknowns ?? []).some((unknown) => unknown.subjectId === 'p2'), 'an unconfirmed player should still raise a gap');
 };
 
+const testContestKindClassificationParity = (): void => {
+  const flatPayout = { payoutSummary: [{ minPosition: 1, maxPosition: 150, payoutDescriptions: [{ value: 10 }] }] };
+  const cash = classifyContestKind(flatPayout);
+  assert.equal(cash.kind, 'CASH');
+  assert.equal(cash.paidPositions, 150);
+
+  const topHeavyPayout = { payoutSummary: [
+    { minPosition: 1, maxPosition: 1, payoutDescriptions: [{ value: 1_000_000 }] },
+    { minPosition: 2, maxPosition: 2, payoutDescriptions: [{ value: 400 }] },
+    { minPosition: 3, maxPosition: 240, payoutDescriptions: [{ value: 5 }] },
+  ] };
+  const gpp = classifyContestKind(topHeavyPayout);
+  assert.equal(gpp.kind, 'GPP');
+  assert.equal(gpp.paidPositions, 240);
+
+  const noPayoutData = classifyContestKind({});
+  assert.equal(noPayoutData.kind, 'UNKNOWN');
+};
+
 const testCashLineCalibrationBoundaryParity = (): void => {
   const observations = Array.from({ length: 120 }, (_, index) => ({ rawProbability: 0.85, beatCashLine: index % 20 !== 0 }));
   const calibration = buildCashLineCalibration(observations);
@@ -118,7 +189,7 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testSalarySlotParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   console.log('engine parity tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

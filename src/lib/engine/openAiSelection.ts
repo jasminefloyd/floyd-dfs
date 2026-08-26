@@ -1,7 +1,9 @@
+import type { CashLineCalibration } from './cashLineCalibration.js';
 import type { LineupCandidate, ResearchPackage, SelectionPackage, ValidatedSlate } from './contracts.js';
+import { resolveCashLineProbability } from './selection.js';
 
 export interface OpenAiSelectionOptions { apiKey: string; model?: string; endpoint?: string; fetcher?: typeof fetch; }
-export async function selectWithOpenAi(input: { slate: ValidatedSlate; research: ResearchPackage; candidates: LineupCandidate[]; selection: SelectionPackage }, options: OpenAiSelectionOptions): Promise<SelectionPackage> {
+export async function selectWithOpenAi(input: { slate: ValidatedSlate; research: ResearchPackage; candidates: LineupCandidate[]; selection: SelectionPackage; cashLineCalibration?: CashLineCalibration }, options: OpenAiSelectionOptions): Promise<SelectionPackage> {
   const fetcher = options.fetcher ?? fetch;
   const response = await fetcher(options.endpoint ?? 'https://api.openai.com/v1/responses', { method: 'POST', headers: { authorization: `Bearer ${options.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({
     model: options.model ?? 'gpt-5', store: false,
@@ -20,7 +22,8 @@ export async function selectWithOpenAi(input: { slate: ValidatedSlate; research:
   const selectedLineups = selections.slice(0, limit).map((item, index) => {
     const candidate = allowed.get(item.candidateId)!;
     const watchItems = (input.research.watchItems ?? []).filter((watchItem) => watchItem.importance === 'CRITICAL' && (!watchItem.subjectId || candidate.playerIds.includes(watchItem.subjectId))).map((watchItem) => watchItem.reason);
-    return { candidateId: candidate.id, bulletNumber: index + 1, selectionType: candidate.candidateTypes[0] ?? 'OPENAI_SELECTED', explanation: item.explanation?.trim() || `Selected from the optimizer candidate set by the Selection Agent using contest context.`, newsContext: input.research.findings.filter((finding) => candidate.playerIds.includes(finding.subjectId) && finding.bucket === 'NEWS_EXTERNAL_CONTEXT').slice(0, 2).map((finding) => `${finding.sourceName}: ${finding.finding}`), rationale: [`Median ${candidate.median.toFixed(1)} with a ${candidate.ceiling.toFixed(1)} ceiling.`, `Optimizer profile: ${candidate.candidateTypes.join(', ') || 'ranked candidate'}.`], playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: (watchItems.length ? 'READY_WITH_WATCH' : 'READY') as 'READY' | 'READY_WITH_WATCH' };
+    const cashLine = resolveCashLineProbability(candidate, input.cashLineCalibration);
+    return { candidateId: candidate.id, bulletNumber: index + 1, selectionType: candidate.candidateTypes[0] ?? 'OPENAI_SELECTED', explanation: item.explanation?.trim() || `Selected from the optimizer candidate set by the Selection Agent using contest context.`, newsContext: input.research.findings.filter((finding) => candidate.playerIds.includes(finding.subjectId) && finding.bucket === 'NEWS_EXTERNAL_CONTEXT').slice(0, 2).map((finding) => `${finding.sourceName}: ${finding.finding}`), rationale: [`Median ${candidate.median.toFixed(1)} with a ${candidate.ceiling.toFixed(1)} ceiling.`, `Optimizer profile: ${candidate.candidateTypes.join(', ') || 'ranked candidate'}.`], playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: (watchItems.length ? 'READY_WITH_WATCH' : 'READY') as 'READY' | 'READY_WITH_WATCH', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
   });
   return selectedLineups.length ? { ...input.selection, selectedLineups, warnings: selectedLineups.length < limit ? [`OpenAI Selection returned ${selectedLineups.length} of ${limit} requested lineup(s).`] : [] } : input.selection;
 }

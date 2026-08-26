@@ -67,6 +67,8 @@ export interface Lineup {
   projected_points: number;
   salary_used: number;
   confidence_score: number;
+  cash_line_confidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
+  contest_kind?: 'CASH' | 'GPP' | 'UNKNOWN';
   simulation_ev?: number;
   ceiling_score?: number;
   floor_score?: number;
@@ -162,10 +164,13 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                       {lineup.readiness_status === 'READY_WITH_WATCH' ? (
                         <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Watch items</span>
                       ) : null}
+                      {lineup.contest_kind === 'CASH' && lineup.cash_line_confidence !== 'UNAVAILABLE' && lineup.confidence_score < 0.85 ? (
+                        <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Below cash target</span>
+                      ) : null}
                     </div>
                     <h3 className="mt-3 truncate text-xl font-black tracking-tight text-white sm:text-2xl">{lineup.win_condition || lineupTypeLabel(lineup.lineup_type ?? 'high_ev')}</h3>
                     <p className="mt-1 text-[11px] font-bold uppercase tracking-[0.1em] text-blue-200">
-                      {lineup.confidence_score > 0 ? `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability` : 'Cash-line probability uncalibrated'}
+                      {cashLineLabel(lineup)}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-start gap-2 text-right">
@@ -355,6 +360,14 @@ function LineupAlerts({ lineup }: { lineup: Lineup }) {
       ))}
     </div>
   );
+}
+
+// Never present a simulated estimate the same way as a real, historically-calibrated number --
+// the tier is always labeled so the user can weigh how much to trust it.
+function cashLineLabel(lineup: Lineup): string {
+  if (lineup.cash_line_confidence === 'CALIBRATED' && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (calibrated)`;
+  if (lineup.cash_line_confidence === 'SIMULATED_ESTIMATE' && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (simulated estimate)`;
+  return 'Cash-line probability unavailable';
 }
 
 function formatSalary(salary?: number): string {

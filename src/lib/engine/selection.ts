@@ -1,9 +1,11 @@
 import type { LineupCandidate, ResearchPackage, SelectedLineup, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
+import { calibratedCashLineProbability, CASH_LINE_TARGET_PROBABILITY, type CashLineCalibration } from './cashLineCalibration.js';
 
 export interface SelectionInput {
   validatedSlate: ValidatedSlate;
   researchPackage: ResearchPackage;
   optimizerPackage: { candidates: LineupCandidate[] };
+  cashLineCalibration?: CashLineCalibration;
 }
 
 export function selectLineups(input: SelectionInput, now = new Date()): SelectionPackage {
@@ -12,22 +14,35 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const requested = Math.max(1, input.validatedSlate.contest.userEntryCount);
   const maximum = input.validatedSlate.contest.maxEntriesAllowed ?? requested;
   const count = Math.min(requested, maximum, candidates.length);
-  const ranked = rankForContext(candidates, input.validatedSlate);
+  const isCashGame = input.validatedSlate.contest.contestKind === 'CASH';
+  const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
   const { selected, underfilled } = choosePortfolio(ranked, count);
   const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
-  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input)), warnings, status: 'COMPLETE' };
+  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE' };
 }
 
-// Default to the tournament-composite rank (already balances median/ceiling/frequency) even
-// for single-entry contests — sorting by raw median alone is exactly the "always pick highest
-// median" anti-pattern the design docs warn against. The one carve-out is a confirmed small
-// cash game (an explicit cashLine on a small field), where beating a fixed line matters more
-// than tournament-style ceiling chasing.
-function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate): LineupCandidate[] {
-  const cashLine = slate.contest.cashLine;
-  const isSmallCashGame = cashLine !== undefined && (slate.contest.contestSize === undefined || slate.contest.contestSize < 2_500);
-  if (isSmallCashGame) return [...candidates].sort((a, b) => (b.median - cashLine) - (a.median - cashLine));
+// Default to the tournament-composite rank (already balances median/ceiling/frequency) — sorting
+// by raw median alone is exactly the "always pick highest median" anti-pattern the design docs
+// warn against, and it's the wrong objective for a tournament regardless of contest size. The
+// one carve-out is a contest DraftKings' own payout structure classifies as a cash game (see
+// draftKingsSlate.ts's classifyContestKind) — there, beating the cash line is the actual game
+// being played, so candidates are ranked by cash-line probability instead. This never blocks or
+// shrinks the portfolio: choosePortfolio always fills from this ranking regardless of whether
+// any candidate actually clears the 85% target -- see explain() for how a shortfall is disclosed.
+function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined): LineupCandidate[] {
+  if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (resolveCashLineProbability(b, calibration).probability ?? -1) - (resolveCashLineProbability(a, calibration).probability ?? -1));
   return [...candidates].sort((a, b) => a.tournamentRank - b.tournamentRank);
+}
+
+export interface CashLineResolution { probability?: number; confidence: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE'; }
+// Prefers real, historically-calibrated probability once enough resolved contest results exist
+// (CashLineCalibration.status === 'APPROVED'); falls back to the simulated/manual raw estimate
+// computed in Optimize; UNAVAILABLE when neither exists (e.g. an UNKNOWN-kind contest) rather
+// than fabricating a number.
+export function resolveCashLineProbability(candidate: LineupCandidate, calibration: CashLineCalibration | undefined): CashLineResolution {
+  if (candidate.cashLineProbability === undefined) return { confidence: 'UNAVAILABLE' };
+  if (calibration) { const calibrated = calibratedCashLineProbability(candidate.cashLineProbability, calibration); if (calibrated !== null) return { probability: calibrated, confidence: 'CALIBRATED' }; }
+  return { probability: candidate.cashLineProbability, confidence: 'SIMULATED_ESTIMATE' };
 }
 
 function choosePortfolio(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
@@ -60,15 +75,20 @@ function watchItemsFor(research: ResearchPackage, playerIds: string[]): string[]
     .map((item) => item.reason);
 }
 
-function explain(candidate: LineupCandidate, bulletNumber: number, input: SelectionInput): SelectedLineup {
+function explain(candidate: LineupCandidate, bulletNumber: number, input: SelectionInput, isCashGame: boolean): SelectedLineup {
   const news = input.researchPackage.findings.filter((finding) => candidate.playerIds.includes(finding.subjectId) && finding.bucket === 'NEWS_EXTERNAL_CONTEXT').slice(0, 2).map((finding) => `${finding.sourceName}: ${finding.finding}`);
+  const cashLine = resolveCashLineProbability(candidate, input.cashLineCalibration);
   const rationale = [
     `Median ${format(candidate.median)} with a ${format(candidate.ceiling)} ceiling.`,
     candidate.candidateTypes.length ? `Profile: ${candidate.candidateTypes.join(', ').replaceAll('_', ' ').toLowerCase()}.` : "Selected from the optimizer's ranked candidate set.",
     candidate.riskFlags.length ? `Watch: ${candidate.riskFlags[0]}` : 'No projection risk flag was attached to this candidate.',
   ];
+  // Cash-game shortfall is disclosed, never hidden -- the portfolio is still filled from the best
+  // available candidate (choosePortfolio never blocks), this only makes clear when that candidate
+  // didn't actually clear the 85% target rather than silently presenting it as if it had.
+  if (isCashGame && cashLine.probability !== undefined && cashLine.probability < CASH_LINE_TARGET_PROBABILITY) rationale.push(`Best available cash-line confidence is ${Math.round(cashLine.probability * 100)}% (${cashLine.confidence === 'CALIBRATED' ? 'calibrated' : 'simulated estimate'}), below the ${Math.round(CASH_LINE_TARGET_PROBABILITY * 100)}% target — no candidate in this pool cleared it.`);
   const watchItems = watchItemsFor(input.researchPackage, candidate.playerIds);
-  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: watchItems.length ? 'READY_WITH_WATCH' : 'READY' };
+  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: watchItems.length ? 'READY_WITH_WATCH' : 'READY', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
 }
 
 function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): string {

@@ -18,4 +18,95 @@ export default function HistoryPage() {
   </AppPage>;
 }
 
-function HistoryCard({ row }: { row: HistoryRow }) { const payload = (row.lineup_payload ?? {}) as HistoryRow; const players = Array.isArray(payload.playerIds) ? payload.playerIds.length : 0; return <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-wide text-slate-500">{String(row.sport ?? 'DFS')} · {String(row.contest_format ?? row.contest_type ?? 'contest')}</p><h2 className="mt-1 text-lg font-black text-[#0b1f3a]">Lineup #{String(row.bullet_number ?? '—')}</h2></div><StatusBadge status={String(row.status ?? 'unknown')} /></div><div className="mt-4 grid grid-cols-3 gap-2 text-center"><Metric label="Median" value={formatNumber(payload.median)} /><Metric label="Salary" value={formatMoney(payload.salaryUsed)} /><Metric label="Players" value={String(players || '—')} /></div><div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-500"><span>{formatDate(String(row.created_at ?? ''))}</span>{row.selection_run_id ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${String(row.generation_run_id)}`}>View run</Link> : null}</div></article>; }
+function HistoryCard({ row }: { row: HistoryRow }) {
+  const payload = (row.lineup_payload ?? {}) as HistoryRow;
+  const players = Array.isArray(payload.playerIds) ? payload.playerIds.length : 0;
+  const isEntered = String(row.status ?? '').toLowerCase() === 'entered';
+  return <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]">
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">{String(row.sport ?? 'DFS')} · {String(row.contest_format ?? row.contest_type ?? 'contest')}</p>
+        <h2 className="mt-1 text-lg font-black text-[#0b1f3a]">Lineup #{String(row.bullet_number ?? '—')}</h2>
+      </div>
+      <StatusBadge status={String(row.status ?? 'unknown')} />
+    </div>
+    <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+      <Metric label="Median" value={formatNumber(payload.median)} />
+      <Metric label="Salary" value={formatMoney(payload.salaryUsed)} />
+      <Metric label="Players" value={String(players || '—')} />
+    </div>
+    <div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-500">
+      <span>{formatDate(String(row.created_at ?? ''))}</span>
+      {row.selection_run_id ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${String(row.generation_run_id)}`}>View run</Link> : null}
+    </div>
+    {isEntered ? <RecordResult lineupId={String(row.id ?? '')} existingResult={row.actual_dk_points as number | undefined} existingCashLine={row.cash_line as number | undefined} /> : null}
+  </article>;
+}
+
+function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId: string; existingResult?: number; existingCashLine?: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const [actualDkPoints, setActualDkPoints] = useState(existingResult !== undefined ? String(existingResult) : '');
+  const [cashLine, setCashLine] = useState(existingCashLine !== undefined ? String(existingCashLine) : '');
+  const [finishPosition, setFinishPosition] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(existingResult !== undefined);
+
+  async function submit() {
+    const points = Number(actualDkPoints);
+    if (!Number.isFinite(points)) { setError('Actual DK points is required and must be a number.'); return; }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const cashLineValue = cashLine.trim() ? Number(cashLine) : undefined;
+      const finishPositionValue = finishPosition.trim() ? Number(finishPosition) : undefined;
+      await floydRequest(`/api/lineups/${encodeURIComponent(lineupId)}/result`, {
+        method: 'POST',
+        body: JSON.stringify({ actualDkPoints: points, ...(cashLineValue !== undefined ? { cashLine: cashLineValue } : {}), ...(finishPositionValue !== undefined ? { finishPosition: finishPositionValue } : {}) }),
+      });
+      setSubmitted(true);
+      setExpanded(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to record this result.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        onClick={() => setExpanded(true)}
+        className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 py-2 text-xs font-black uppercase tracking-wide text-slate-600 hover:border-cyan-500 hover:text-cyan-800"
+      >
+        {submitted ? 'Update result' : 'Record result'}
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+      <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
+        Actual DK points
+        <input type="number" value={actualDkPoints} onChange={(event) => setActualDkPoints(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
+          Cash line (optional)
+          <input type="number" value={cashLine} onChange={(event) => setCashLine(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
+        </label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
+          Finish position (optional)
+          <input type="number" value={finishPosition} onChange={(event) => setFinishPosition(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
+        </label>
+      </div>
+      {error ? <p className="text-xs font-bold text-error">{error}</p> : null}
+      <div className="flex gap-2">
+        <button type="button" onClick={() => void submit()} disabled={submitting} className="flex-1 rounded-md bg-[#0b1f3a] py-2 text-xs font-black text-white disabled:opacity-50">{submitting ? 'Saving…' : 'Save result'}</button>
+        <button type="button" onClick={() => setExpanded(false)} className="rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-slate-600">Cancel</button>
+      </div>
+      <p className="text-[10px] text-slate-500">Recording real results is what lets cash-line confidence move from a simulated estimate to a calibrated one over time.</p>
+    </div>
+  );
+}

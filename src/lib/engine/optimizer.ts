@@ -7,6 +7,7 @@ import type {
   Sport,
   ValidatedSlate,
 } from './contracts.js';
+import { rawCashLineProbability } from './cashLineCalibration.js';
 
 const DEFAULT_PROFILE: ObjectiveProfile = { name: 'balanced-tournament', medianWeight: 0.35, ceilingWeight: 0.35, leverageWeight: 0.15, duplicationPenalty: 0.1, correlationWeight: 0.05 };
 const SMALL_FIELD_PROFILE: ObjectiveProfile = { name: 'small-field', medianWeight: 0.45, ceilingWeight: 0.3, leverageWeight: 0.1, duplicationPenalty: 0.1, correlationWeight: 0.05 };
@@ -47,10 +48,55 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
 
   const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile));
   const ranked = rankCandidates(scored, maxCandidates);
-  applyFieldHeuristic(ranked);
+  applyFieldHeuristic(ranked); // must run before the cash-line estimate below, which weights by the refined ownershipEstimate
+  const cashLineEstimate = computeCashLineEstimate(input.validatedSlate, ranked);
+  if (cashLineEstimate) for (const candidate of ranked) candidate.cashLineProbability = rawCashLineProbability({ median: candidate.median, floor: candidate.floor, ceiling: candidate.ceiling, cashLine: cashLineEstimate.value }) ?? undefined;
   applyStrategicSimilarity(ranked);
   assignTypes(ranked);
-  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE' };
+  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE', ...(cashLineEstimate ? { cashLineEstimate } : {}) };
+}
+
+// Prefers an explicit manual cash line when one was supplied on the slate; otherwise builds a
+// first-pass SIMULATED estimate from data Optimize already has (the candidate pool and its
+// ownership heuristic) -- there is no real field/ownership data source in this repo, so this is
+// disclosed as an estimate via `source`, never presented as a validated number. Real calibrated
+// probability (once enough historical contest results exist) is applied later in Selection.
+function computeCashLineEstimate(slate: ValidatedSlate, candidates: LineupCandidate[]): { value: number; source: 'MANUAL' | 'SIMULATED' } | undefined {
+  if (slate.contest.cashLine !== undefined) return { value: slate.contest.cashLine, source: 'MANUAL' };
+  const { paidPositions, contestSize, contestKind } = slate.contest;
+  if (contestKind === 'UNKNOWN' || contestKind === undefined || paidPositions === undefined || !contestSize) return undefined;
+  const paidFraction = paidPositions / contestSize;
+  const value = estimateFieldCashLine(candidates, paidFraction, slate.slateId);
+  return value !== undefined ? { value, source: 'SIMULATED' } : undefined;
+}
+
+// Simulates a field of entries by weighted-resampling the existing candidate pool (heavier
+// ownershipEstimate = drafted more often by the simulated field, closer to a real field's
+// composition than uniform-random sampling), applying the same style of seeded noise used
+// elsewhere in the engine for outcome variance, then reads off the score at the percentile
+// matching the contest's paid fraction. This is a heuristic-on-a-heuristic (built on the
+// already-labeled ownership proxy) and must never be presented as more precise than that.
+function estimateFieldCashLine(candidates: LineupCandidate[], paidFraction: number, seedText: string): number | undefined {
+  if (!candidates.length || !(paidFraction > 0) || !(paidFraction < 1)) return undefined;
+  const weights = candidates.map((candidate) => Math.max(0.001, candidate.ownershipEstimate));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  if (!(totalWeight > 0)) return undefined;
+  const sampleCount = 2000;
+  let seed = [...seedText].reduce((sum, character) => (sum * 31 + character.charCodeAt(0)) >>> 0, 11);
+  const scores: number[] = [];
+  for (let i = 0; i < sampleCount; i += 1) {
+    seed = (1664525 * seed + 1013904223) >>> 0;
+    let pick = (seed / 4294967296) * totalWeight;
+    let chosenIndex = candidates.length - 1;
+    for (let index = 0; index < candidates.length; index += 1) { pick -= weights[index]; if (pick <= 0) { chosenIndex = index; break; } }
+    seed = (1664525 * seed + 1013904223) >>> 0;
+    const noise = ((seed / 4294967296) - 0.5) * 0.5;
+    scores.push(Math.max(0, candidates[chosenIndex].median * (1 + noise)));
+  }
+  scores.sort((a, b) => a - b);
+  const percentile = Math.min(0.999, Math.max(0, 1 - paidFraction));
+  const index = Math.min(scores.length - 1, Math.max(0, Math.floor(percentile * (scores.length - 1))));
+  return scores[index];
 }
 
 interface ContestObjectiveContext { contestSize?: number; userEntryCount: number; maxEntriesAllowed?: number; format: string; }
