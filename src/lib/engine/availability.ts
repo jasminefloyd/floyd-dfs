@@ -30,8 +30,16 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
     const record = records[0];
     return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy: 'NAME_AND_TEAM' as const, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
-  const removed = playerPool.filter((player) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE').length;
-  const filtered = slate.sport === 'MLB' && snapshot.confirmedLineupAvailable ? playerPool.filter((player) => ['CONFIRMED_STARTER', 'ACTIVE'].includes(player.availability?.status ?? '')) : playerPool;
+  const isOutOrInactive = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE';
+  const removed = playerPool.filter(isOutOrInactive).length;
+  // MLB additionally requires an explicit CONFIRMED_STARTER/ACTIVE designation once a real
+  // confirmed batting order exists (non-starters have near-zero fantasy value there). Every
+  // other sport still must remove an explicit OUT/INACTIVE status -- this used to silently keep
+  // OUT players fully eligible for every non-MLB sport despite `removed`'s count/warning text
+  // claiming they were removed.
+  const filtered = slate.sport === 'MLB' && snapshot.confirmedLineupAvailable
+    ? playerPool.filter((player) => ['CONFIRMED_STARTER', 'ACTIVE'].includes(player.availability?.status ?? ''))
+    : playerPool.filter((player) => !isOutOrInactive(player));
   if (removed) warnings.push(`${removed} DraftKings player(s) removed after an explicit ${snapshot.source} OUT/INACTIVE status.`);
   warnings.push(snapshot.confirmedLineupAvailable ? `${snapshot.source} confirmed lineup state applied at ${snapshot.retrievedAt}.` : `${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
   return { ...slate, playerPool: filtered, validation: { ...slate.validation, warnings } };

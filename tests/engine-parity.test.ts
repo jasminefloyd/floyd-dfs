@@ -142,6 +142,14 @@ const testAvailabilityParity = (): void => {
   assert.equal(result.playerPool.length, 1); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
 };
 
+const testOutPlayersRemovedForNonMlbSportsParity = (): void => {
+  const wnba = { ...baseSlate, sport: 'WNBA' as const, league: 'WNBA' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player One', team: 'SEA' }, { ...baseSlate.playerPool[1], playerName: 'Player Two', team: 'TOR' }] };
+  const result = applyAvailabilitySnapshot(wnba, { source: 'ESPN', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, records: [{ playerName: 'Player One', team: 'SEA', status: 'ACTIVE', confirmed: true }, { playerName: 'Player Two', team: 'TOR', status: 'OUT', confirmed: true }] });
+  assert.equal(result.playerPool.length, 1, 'a player ESPN explicitly reports OUT must actually be removed from the pool, not just counted in the warning text');
+  assert.equal(result.playerPool[0].playerName, 'Player One');
+  assert.ok(result.validation.warnings.some((warning) => warning.includes('removed')));
+};
+
 const testAvailabilitySeedsResearchParity = async (): Promise<void> => {
   const slateWithAvailability: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player, index) => index === 0 ? { ...player, availability: { status: 'CONFIRMED_STARTER', confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' } } : player) };
   const seeds = findingsFromAvailability(slateWithAvailability);
@@ -312,7 +320,7 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   console.log('engine parity tests passed');

@@ -103,6 +103,17 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
+// `queued.slate` is a snapshot from BEFORE processRun() ever runs -- it predates availability
+// enrichment (SportsDataIO/ESPN confirmed-lineup/injury data) entirely, so no player on it ever
+// carries a real `availability` status. The SLATE stage's own persisted `output_payload` is the
+// same slate AFTER that enrichment ran, and is what the roster/lineup display must use instead --
+// otherwise "confirmed"/"unconfirmed" badges can never reflect reality.
+function enrichedSlateFrom(stagesValue: unknown, fallbackSlate: unknown): unknown {
+  if (!Array.isArray(stagesValue)) return fallbackSlate;
+  const slateStage = stagesValue.find((value) => isJsonRecord(value) && String(value.stage ?? '').toUpperCase() === 'SLATE');
+  return isJsonRecord(slateStage) && slateStage.output_payload ? slateStage.output_payload : fallbackSlate;
+}
+
 export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
   const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize }) });
   const run = queued.run as JsonRecord;
@@ -113,9 +124,10 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
     current = payload.run as JsonRecord;
     onProgress?.(stageProgress(payload.stages));
     if (['ready', 'blocked', 'failed', 'complete'].includes(String(current.state))) {
-      const lineups = mapLineups(payload.lineups, queued.slate, payload.stages);
+      const enrichedSlate = enrichedSlateFrom(payload.stages, queued.slate);
+      const lineups = mapLineups(payload.lineups, enrichedSlate, payload.stages);
       if (current.state !== 'ready' && current.state !== 'complete') throw new Error(String((current.error as JsonRecord | undefined)?.message ?? 'Floyd DFS blocked lineup generation.'));
-      return { manifest: mapManifest(input, queued.slate, payload), lineups, data_warnings: [] };
+      return { manifest: mapManifest(input, enrichedSlate, payload), lineups, data_warnings: [] };
     }
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
   }
