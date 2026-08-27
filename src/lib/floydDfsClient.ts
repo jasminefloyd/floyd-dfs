@@ -126,7 +126,13 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
   let processError: unknown;
   const processPromise = request(`/api/runs/${String(run.id)}/process`, { method: 'POST', body: '{}' }).catch((error) => { processError = error; });
   let current: JsonRecord = run;
-  for (let attempt = 0; attempt < 90; attempt += 1) {
+  // A real run commonly takes 2+ minutes end-to-end (Research/Sport Adjustment/Selection each
+  // call OpenAI, on top of several external provider fetches) -- verified live against
+  // production: a normal successful run took 144s, another ran past 120s. The old 90-attempt
+  // (90s) cap was shorter than a normal run, not just a slow one, so it was throwing this timeout
+  // on completely healthy runs. 300 attempts (5 minutes) gives real runs comfortable headroom;
+  // a genuinely stuck run still surfaces immediately via processError without waiting it out.
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     const payload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
     current = payload.run as JsonRecord;
     onProgress?.(stageProgress(payload.stages));
