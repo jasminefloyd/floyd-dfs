@@ -3,7 +3,7 @@ import { applyAvailabilitySnapshot, withDegradedAvailability } from '../src/lib/
 import { adjustSlate } from '../src/lib/engine/adjustment';
 import { projectSlate } from '../src/lib/engine/projection';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
-import { classifyContestKind } from '../src/lib/engine/draftKingsSlate';
+import { classifyContestKind, buildValidatedSlateFromBundle } from '../src/lib/engine/draftKingsSlate';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
@@ -344,6 +344,34 @@ const testSearchOrderFindsHighValueStudParity = (): void => {
   assert.ok(result.candidates.some((candidate) => candidate.rosterSlots.CPT === 'stud-a'), 'the highest-value player must be reachable as captain even under a small search budget, not pruned out purely because cheaper players rank higher on salary efficiency');
 };
 
+const testGolfClassicSlateBuildParity = (): void => {
+  // Mirrors real production bugs found live against a real DK Golf Classic contest: (1) DK's own
+  // gameTypeRules response has no scoring-rules field at all for Golf, so the slate build hard-
+  // crashed with "scoring rules are required" until standardScoringRules() got a real GOLF entry;
+  // (2) Golf draftables carry no eligibility/eligiblePositions/positions array (DK represents
+  // eligibility via a single rosterSlotId instead, since every Classic Golf slot is the same
+  // interchangeable "G" slot) -- the array-based parser silently produced an empty eligibility
+  // object for every golfer, which would have blocked every roster combination downstream even
+  // once scoring worked. Shapes below mirror the real API responses fetched live for this test.
+  const now2 = new Date('2026-08-27T13:00:00.000Z');
+  const bundle = {
+    contest: { data: { contestDetail: { name: 'Test Golf Classic', gameTypeId: 6, draftGroupId: 152473, maximumEntries: 17, entries: 10, payoutSummary: [] } }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
+    draftGroup: { data: { draftGroup: { eventId: 'evt-1', name: 'TOUR Championship', startTime: '2026-08-27T15:00:00.000Z' } }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
+    gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, lineupTemplate: Array.from({ length: 6 }, (_, index) => ({ rosterSlot: { id: 118, name: 'G' }, order: index + 1 })) }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
+    draftables: { data: { draftables: [
+      { draftableId: 1, playerId: 1496, playerDkId: 607, displayName: 'Scottie Scheffler', position: 'G', rosterSlotId: 118, salary: 14000, status: 'None' },
+      { draftableId: 2, playerId: 1497, playerDkId: 608, displayName: 'Rory McIlroy', position: 'G', rosterSlotId: 118, salary: 13000, status: 'None' },
+    ] }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
+  };
+  const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'request-1', sport: 'GOLF', league: 'GOLF', contestId: '194164749', contestFormat: 'CLASSIC', userEntryCount: 1, contestName: 'Test Golf Classic', contestLockTime: '2026-08-27T15:00:00.000Z' });
+  assert.equal(slate.validation.status, 'VALID', `Golf Classic slate build must not fail validation: ${JSON.stringify(slate.validation.errors)}`);
+  assert.ok(Object.keys(slate.scoringRules).length > 0, 'GOLF must have a real, non-empty scoring-rules fallback');
+  assert.ok(['birdies', 'eagles', 'bogeys', 'pars'].every((key) => key in slate.scoringRules), 'GOLF scoring rules must use the component keys the projection model reads (birdies/eagles/bogeys/pars)');
+  assert.equal(slate.playerPool.length, 2);
+  assert.equal(slate.playerPool[0].eligibility.G, true, 'every Golf Classic player must be eligible for the G slot, not left with an empty eligibility object');
+  assert.equal(slate.rosterRules.slots.G?.count, 6);
+};
+
 const testSeasonBasedInputsParity = (): void => {
   const hitter = { ...baseSlate.playerPool[0], playerName: 'Yordan Alvarez', team: 'HOU', position: 'OF' };
   const hitterRow = { Name: 'Yordan Alvarez', Team: 'HOU', Games: 130, PlateAppearances: 569.3, AtBats: 466.6, Hits: 150.5, Singles: 85.7, Doubles: 27.9, Triples: 1, HomeRuns: 35.9, TotalBases: 288.1, RunsBattedIn: 90.7, Runs: 87.7, StolenBases: 1, Walks: 90.7 };
@@ -384,7 +412,7 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   console.log('engine parity tests passed');

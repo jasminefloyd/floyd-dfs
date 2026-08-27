@@ -2,6 +2,7 @@ import type { ContestFormat, RosterRules, SlatePlayer, Sport, ValidatedSlate } f
 import type { DraftKingsApiBundle } from './draftKings.js';
 import { parseDraftKingsDateValue } from './draftKings.js';
 import { validateSlate } from './validation.js';
+import { DK_SCORING } from '../dkScoring.js';
 
 export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; cashLine?: number; }
 export class DraftKingsSlateMappingError extends Error { constructor(message: string) { super(message); this.name = 'DraftKingsSlateMappingError'; } }
@@ -25,7 +26,7 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   ];
   const scoringRules = mapScoringRules(rules);
   const scoringWarnings = Object.keys(scoringRules).length ? [] : [`DraftKings game-type rules did not return scoring values; applied the verified standard ${context.sport} scoring profile.`];
-  const resolvedScoringRules = Object.keys(scoringRules).length ? scoringRules : standardScoringRules(context.sport);
+  const resolvedScoringRules = Object.keys(scoringRules).length ? scoringRules : standardScoringRules(context.sport, context.contestFormat);
   const slate: ValidatedSlate = {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
     event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate([draftGroup], ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
@@ -54,7 +55,7 @@ export function buildValidatedSlateFromScreenshot(extracted: DraftKingsScreensho
   if (context.contestFormat !== 'SHOWDOWN') errors.push('Screenshot ingestion only supports DraftKings Showdown contests; Classic roster rules cannot be reliably read from an image, and DraftKings-provided data is required instead.');
   const rosterRules: RosterRules = { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } };
   const scoringRulesFromImage = Object.fromEntries(Object.entries(extracted.scoringRules ?? {}).flatMap(([key, value]) => Number.isFinite(value) ? [[key, { value }]] : []));
-  const scoringRules = Object.keys(scoringRulesFromImage).length ? scoringRulesFromImage : standardScoringRules(context.sport);
+  const scoringRules = Object.keys(scoringRulesFromImage).length ? scoringRulesFromImage : standardScoringRules(context.sport, context.contestFormat);
   if (!Object.keys(scoringRulesFromImage).length) warnings.push(`Screenshot did not contain readable scoring rules; applied the verified standard ${context.sport} scoring profile.`);
   const players: SlatePlayer[] = [];
   (extracted.players ?? []).forEach((player, index) => {
@@ -108,7 +109,14 @@ function resolveShowdownCaptainMultiplier(record: Record<string, unknown>): numb
 
 function mapDraftables(record: Record<string, unknown>, format: ContestFormat, rules: RosterRules, sport: Sport): { players: SlatePlayer[]; warnings: string[] } {
   const values = Array.isArray(record.draftables) ? record.draftables : Array.isArray(record.players) ? record.players : [];
-  const warnings: string[] = []; const mapped = values.flatMap((value, index) => { const player = asRecord(value); if (!player) { warnings.push(`Skipped DraftKings draftable at index ${index}: record was not an object.`); return []; } const nested = asRecord(player.player) ?? asRecord(player.athlete) ?? asRecord(player.competitor) ?? asRecord(player.draftable); const source = nested ? { ...player, ...nested } : player; const salary = readNumber(source, ['salary', 'draftKingsSalary']); if (!salary) { warnings.push(`Skipped DraftKings draftable at index ${index}: salary was missing.`); return []; } const playerId = readStringOrNumber(source, ['playerId', 'playerID', 'PlayerId', 'playerDkId', 'draftableId', 'draftableID', 'id', 'Id', 'ID']); const playerName = readOptionalString(source, ['playerName', 'displayName', 'name', 'Name']); if (!playerId || !playerName) { warnings.push(`Skipped DraftKings draftable at index ${index}: player identity was missing.`); return []; } const eligibility = format === 'SHOWDOWN' ? { CPT: true, UTIL: true } : Object.fromEntries(readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']).map((slot) => [slot, true])); const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const captainMultiplier = rules.slots.CPT?.salaryMultiplier ?? 1.5; const captainSalary = format === 'SHOWDOWN' ? Math.round(utilitySalary * captainMultiplier) : (readNumber(source, ['captainSalary', 'captain_salary']) ?? Math.round(salary * captainMultiplier)); return [{ playerId, playerName, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position: readOptionalString(source, ['position']), salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source, sport), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
+  const warnings: string[] = []; const mapped = values.flatMap((value, index) => { const player = asRecord(value); if (!player) { warnings.push(`Skipped DraftKings draftable at index ${index}: record was not an object.`); return []; } const nested = asRecord(player.player) ?? asRecord(player.athlete) ?? asRecord(player.competitor) ?? asRecord(player.draftable); const source = nested ? { ...player, ...nested } : player; const salary = readNumber(source, ['salary', 'draftKingsSalary']); if (!salary) { warnings.push(`Skipped DraftKings draftable at index ${index}: salary was missing.`); return []; } const playerId = readStringOrNumber(source, ['playerId', 'playerID', 'PlayerId', 'playerDkId', 'draftableId', 'draftableID', 'id', 'Id', 'ID']); const playerName = readOptionalString(source, ['playerName', 'displayName', 'name', 'Name']); if (!playerId || !playerName) { warnings.push(`Skipped DraftKings draftable at index ${index}: player identity was missing.`); return []; } // Golf Classic draftables carry no `eligibility`/`eligiblePositions`/`positions` array at all
+// (verified live against a real contest) -- DK represents eligibility via a single numeric
+// `rosterSlotId` instead, because every Classic Golf roster slot is the same interchangeable
+// "G" slot (confirmed against the real gameTypeRules response: all 6 slots share rosterSlot id
+// 118, name "G"). Every golfer is eligible for every slot, so this is a direct, verified mapping,
+// not a guess -- the array-based parser below was returning an empty object for every golfer,
+// which silently made the entire Golf Classic player pool ineligible for any roster slot.
+const eligibility = format === 'SHOWDOWN' ? { CPT: true, UTIL: true } : sport === 'GOLF' ? { G: true } : Object.fromEntries(readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']).map((slot) => [slot, true])); const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const captainMultiplier = rules.slots.CPT?.salaryMultiplier ?? 1.5; const captainSalary = format === 'SHOWDOWN' ? Math.round(utilitySalary * captainMultiplier) : (readNumber(source, ['captainSalary', 'captain_salary']) ?? Math.round(salary * captainMultiplier)); return [{ playerId, playerName, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position: readOptionalString(source, ['position']), salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source, sport), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
   const merged = new Map<string, SlatePlayer>();
   for (const player of mapped) { const existing = merged.get(player.playerId); if (!existing) merged.set(player.playerId, player); else { const utilitySalary = Math.min(existing.utilitySalary ?? existing.salary, player.utilitySalary ?? player.salary); const eligibility = { ...existing.eligibility, ...player.eligibility }; merged.set(player.playerId, { ...existing, salary: utilitySalary, utilitySalary, eligibility, captainSalary: format === 'SHOWDOWN' ? Math.round(utilitySalary * (rules.slots.CPT?.salaryMultiplier ?? 1.5)) : Math.max(existing.captainSalary ?? 0, player.captainSalary ?? 0), providerFppg: existing.providerFppg ?? player.providerFppg }); } }
   return { players: [...merged.values()], warnings };
@@ -159,10 +167,23 @@ function readDraftStatFppg(record: Record<string, unknown>, sport: Sport): numbe
   const fppg = attributes.find((value) => { const attribute = asRecord(value); return candidateIds.has(String(attribute?.id ?? '')); });
   return readNumber(asRecord(fppg) ?? {}, ['value', 'sortValue']);
 }
-function standardScoringRules(sport: Sport): Record<string, { value: number }> {
+function standardScoringRules(sport: Sport, format: ContestFormat): Record<string, { value: number }> {
   if (sport === 'NBA' || sport === 'WNBA') return { points: { value: 1 }, threes: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } };
   if (sport === 'MLB') return { single: { value: 3 }, double: { value: 5 }, triple: { value: 8 }, homeRun: { value: 10 }, rbi: { value: 2 }, run: { value: 2 }, walk: { value: 2 }, hitByPitch: { value: 2 }, sacrificeFly: { value: 1.25 }, sacrificeHit: { value: 1.25 }, stolenBase: { value: 5 }, inningPitched: { value: 2.25 }, strikeout: { value: 2 }, win: { value: 4 }, earnedRun: { value: -2 }, hitAgainst: { value: -0.6 }, walkAgainst: { value: -0.6 }, hitBatsman: { value: -0.6 }, completeGame: { value: 2.5 }, completeGameShutout: { value: 2.5 }, noHitter: { value: 5 } };
   if (sport === 'NFL') return { passingYards: { value: 0.04 }, passingTouchdown: { value: 4 }, interception: { value: -1 }, rushingYards: { value: 0.1 }, rushingTouchdown: { value: 6 }, reception: { value: 1 }, receivingYards: { value: 0.1 }, receivingTouchdown: { value: 6 }, twoPointConversion: { value: 2 }, fumbleLost: { value: -2 } };
+  if (sport === 'GOLF') {
+    // DraftKings' own gameTypeRules response has no scoring-rules field at all for Golf (verified
+    // live -- confirmed absent from a real contest's /lineups/v1/gametypes/{id}/rules payload), so
+    // this fallback is the ONLY source of Golf scoring; it was previously missing entirely, which
+    // hard-blocked every Golf slate (`scoring rules are required`) whenever this path was hit.
+    // Reuses the already-verified DK_SCORING.golf table from dkScoring.ts rather than a new guess.
+    // Only birdie/eagle/bogey/par are included: they're the only categories this engine's
+    // projection model tracks (componentsFor's golf branch in projection.ts); finishPositionBonus
+    // is folded in separately as an implicit weight-1 rule, and rarer categories (double-eagle,
+    // streak/bogey-free/hole-in-one bonuses) aren't part of this engine's component model.
+    const table = format === 'SHOWDOWN' ? DK_SCORING.golf.showdown : DK_SCORING.golf.classic;
+    return { birdies: { value: table.birdie }, eagles: { value: table.eagle }, bogeys: { value: table.bogey }, pars: { value: table.par } };
+  }
   return {};
 }
 function unwrapRecord(value: unknown, key: string | string[]): Record<string, unknown> { const record = asRecord(value); if (!record) return {}; for (const candidate of Array.isArray(key) ? key : [key]) { const nested = asRecord(record[candidate]); if (nested) return nested; } return record; }
