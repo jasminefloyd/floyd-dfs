@@ -8,9 +8,10 @@ import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
-import { selectLineups } from '../src/lib/engine/selection';
+import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
+import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 
@@ -406,6 +407,133 @@ const testSeasonParamForParity = (): void => {
   assert.equal(seasonParamFor('NFL', '2026-08-26T23:05:00.000Z', -1), '2025REG');
 };
 
+const testMarketContextImpliedTotalParity = async (): Promise<void> => {
+  const fetcher = (async () => ({ ok: true, json: async () => ([
+    {
+      home_team: 'Los Angeles Lakers', away_team: 'Boston Celtics',
+      bookmakers: [
+        { markets: [
+          { key: 'totals', outcomes: [{ name: 'Over', point: 220 }, { name: 'Under', point: 220 }] },
+          { key: 'spreads', outcomes: [{ name: 'Los Angeles Lakers', point: -4 }, { name: 'Boston Celtics', point: 4 }] },
+        ] },
+        { markets: [
+          { key: 'totals', outcomes: [{ name: 'Over', point: 222 }, { name: 'Under', point: 222 }] },
+          { key: 'spreads', outcomes: [{ name: 'Los Angeles Lakers', point: -4 }, { name: 'Boston Celtics', point: 4 }] },
+        ] },
+      ],
+    },
+  ]) })) as unknown as typeof fetch;
+  const result = await getTeamMarketContext('NBA', 'test-key', { fetcher });
+  const lakers = result.get('LAL');
+  const celtics = result.get('BOS');
+  assert.ok(lakers, 'a real Odds API team name must resolve to its DK short code');
+  assert.ok(celtics);
+  assert.equal(lakers!.gameTotal, 221, 'the game total should be averaged across bookmakers, not taken from just the first one');
+  assert.equal(lakers!.spread, -4);
+  assert.equal(lakers!.opponent, 'BOS');
+  assert.equal(lakers!.impliedTeamTotal, 221 / 2 - -4 / 2, 'impliedTeamTotal = gameTotal/2 - spread/2, using the team\'s own signed spread');
+  assert.equal(celtics!.impliedTeamTotal, 221 / 2 - 4 / 2);
+
+  const noMatch = await getTeamMarketContext('NBA', 'test-key', { fetcher: (async () => ({ ok: true, json: async () => ([{ home_team: 'Unknown Team', away_team: 'Boston Celtics', bookmakers: [] }]) })) as unknown as typeof fetch });
+  assert.equal(noMatch.size, 0, 'a team name that cannot be confidently matched must be skipped entirely, never force-matched');
+};
+
+const testMarketDerivedOwnershipNudgeParity = (): void => {
+  const marketSlate: ValidatedSlate = {
+    ...baseSlate,
+    rosterRules: { rosterSize: 2, slots: { G: { count: 1 }, F: { count: 1 } }, uniquePlayersRequired: true },
+    playerPool: [
+      { playerId: 'm1', playerName: 'M1', team: 'HIGH', salary: 5000, eligibility: { G: true, F: true }, marketContext: { impliedTeamTotal: 130, spread: -6, gameTotal: 240 } },
+      { playerId: 'm2', playerName: 'M2', team: 'HIGH', salary: 4500, eligibility: { G: true, F: true }, marketContext: { impliedTeamTotal: 130, spread: -6, gameTotal: 240 } },
+      { playerId: 'm3', playerName: 'M3', team: 'LOW', salary: 4000, eligibility: { G: true, F: true }, marketContext: { impliedTeamTotal: 90, spread: 6, gameTotal: 240 } },
+      { playerId: 'm4', playerName: 'M4', team: 'LOW', salary: 3500, eligibility: { G: true, F: true }, marketContext: { impliedTeamTotal: 90, spread: 6, gameTotal: 240 } },
+    ],
+  };
+  const identicalOutcomes = { floorP20: 20, medianP50: 30, ceilingP90: 45 };
+  const identicalEfficiency = { medianPer1k: 6, ceilingPer1k: 9 };
+  const marketProjection: ProjectionPackage = { ...projection, players: marketSlate.playerPool.map((player) => ({ playerId: player.playerId, salary: player.salary, baselineOpportunity: { points: 30 }, adjustedOpportunity: { points: 30 }, opportunityDelta: { points: 0 }, componentProjection: { points: 30 }, projectedOutcomes: identicalOutcomes, salaryEfficiency: identicalEfficiency, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' })) };
+  const result = optimizeLineups({ validatedSlate: marketSlate, projectionPackage: marketProjection }, { maxCandidates: 20 }, now);
+  const highLineup = result.candidates.find((candidate) => candidate.playerIds.includes('m1') && candidate.playerIds.includes('m2'));
+  const lowLineup = result.candidates.find((candidate) => candidate.playerIds.includes('m3') && candidate.playerIds.includes('m4'));
+  assert.ok(highLineup && lowLineup, 'both an all-above-average-team and an all-below-average-team lineup should be reachable candidates');
+  assert.ok(highLineup!.ownershipEstimate > lowLineup!.ownershipEstimate, 'an identical-quality lineup built from teams with an above-average implied total should get a higher ownership estimate (more chalk) than one from below-average teams');
+
+  // A slate where every team's implied total exactly equals the slate average produces an exact
+  // 0 nudge (multiplier stays at exactly 1) -- the same "no nudge" outcome as no marketContext at
+  // all, and comparing matched candidate IDs sidesteps the medianRank tie-break noise that a
+  // direct high-vs-low comparison on an all-identical-projection fixture would otherwise carry.
+  const neutralMarketSlate: ValidatedSlate = { ...marketSlate, playerPool: marketSlate.playerPool.map((player) => ({ ...player, marketContext: { impliedTeamTotal: 110, spread: 0, gameTotal: 220 } })) };
+  const neutralResult = optimizeLineups({ validatedSlate: neutralMarketSlate, projectionPackage: marketProjection }, { maxCandidates: 20 }, now);
+  const noMarketSlate: ValidatedSlate = { ...marketSlate, playerPool: marketSlate.playerPool.map((player) => ({ ...player, marketContext: undefined })) };
+  const noMarketResult = optimizeLineups({ validatedSlate: noMarketSlate, projectionPackage: marketProjection }, { maxCandidates: 20 }, now);
+  assert.ok(noMarketResult.candidates.length > 0);
+  for (const candidate of noMarketResult.candidates) {
+    const matched = neutralResult.candidates.find((item) => item.id === candidate.id);
+    assert.ok(matched, 'the same rosterSlots combination should be generated regardless of marketContext presence');
+    assert.ok(Math.abs(matched!.ownershipEstimate - candidate.ownershipEstimate) < 1e-9, 'with no marketContext at all, ownership must fall back to exactly the prior (identical) behavior — no phantom nudge');
+  }
+};
+
+const testBringBackCorrelationParity = (): void => {
+  const nflRoster = { rosterSize: 2, slots: { QB: { count: 1 }, WR: { count: 1 } }, uniquePlayersRequired: true };
+  const nflProjectionFor = (ids: string[]): ProjectionPackage => ({ ...projection, players: ids.map((playerId) => ({ playerId, salary: 4000, baselineOpportunity: { points: 20 }, adjustedOpportunity: { points: 20 }, opportunityDelta: { points: 0 }, componentProjection: { points: 20 }, projectedOutcomes: { floorP20: 15, medianP50: 20, ceilingP90: 28 }, salaryEfficiency: { medianPer1k: 5, ceilingPer1k: 7 }, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' })) });
+
+  const bringBackSlate: ValidatedSlate = { ...baseSlate, sport: 'NFL', league: 'NFL', rosterRules: nflRoster, playerPool: [
+    { playerId: 'qb1', playerName: 'QB1', team: 'A', opponent: 'B', position: 'QB', salary: 5000, eligibility: { QB: true, WR: false } },
+    { playerId: 'wr1', playerName: 'WR1', team: 'B', opponent: 'A', position: 'WR', salary: 4000, eligibility: { QB: false, WR: true } },
+  ] };
+  const bringBackResult = optimizeLineups({ validatedSlate: bringBackSlate, projectionPackage: nflProjectionFor(['qb1', 'wr1']) }, { maxCandidates: 5 }, now);
+  assert.equal(bringBackResult.status, 'COMPLETE');
+  assert.ok(bringBackResult.candidates[0].correlationScore > 0, 'a QB and the OPPOSING team\'s WR in the same game (a classic bring-back) must correlate positively, not fall through to the old flat 0 for different-team pairs');
+
+  const unrelatedSlate: ValidatedSlate = { ...baseSlate, sport: 'NFL', league: 'NFL', rosterRules: nflRoster, playerPool: [
+    { playerId: 'qb1', playerName: 'QB1', team: 'A', opponent: 'B', position: 'QB', salary: 5000, eligibility: { QB: true, WR: false } },
+    { playerId: 'wr1', playerName: 'WR1', team: 'C', opponent: 'D', position: 'WR', salary: 4000, eligibility: { QB: false, WR: true } },
+  ] };
+  const unrelatedResult = optimizeLineups({ validatedSlate: unrelatedSlate, projectionPackage: nflProjectionFor(['qb1', 'wr1']) }, { maxCandidates: 5 }, now);
+  assert.equal(unrelatedResult.candidates[0].correlationScore, 0, 'players on unrelated teams (not in the same game at all) must still correlate at exactly 0');
+};
+
+const testMlbHitterCorrelationParity = (): void => {
+  const mlbSlate: ValidatedSlate = { ...baseSlate, sport: 'MLB', league: 'MLB', rosterRules: { rosterSize: 2, slots: { OF: { count: 1 }, '1B': { count: 1 } }, uniquePlayersRequired: true }, playerPool: [
+    { playerId: 'of1', playerName: 'OF1', team: 'A', position: 'OF', salary: 5000, eligibility: { OF: true, '1B': false } },
+    { playerId: 'b1', playerName: 'B1', team: 'A', position: '1B', salary: 4000, eligibility: { OF: false, '1B': true } },
+  ] };
+  const mlbProjection: ProjectionPackage = { ...projection, players: mlbSlate.playerPool.map((player) => ({ playerId: player.playerId, salary: player.salary, baselineOpportunity: { points: 15 }, adjustedOpportunity: { points: 15 }, opportunityDelta: { points: 0 }, componentProjection: { points: 15 }, projectedOutcomes: { floorP20: 10, medianP50: 15, ceilingP90: 22 }, salaryEfficiency: { medianPer1k: 3, ceilingPer1k: 4.4 }, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' })) };
+  const result = optimizeLineups({ validatedSlate: mlbSlate, projectionPackage: mlbProjection }, { maxCandidates: 5 }, now);
+  assert.equal(result.status, 'COMPLETE');
+  assert.ok(result.candidates[0].correlationScore > 0, 'two same-team MLB hitters must now correlate positively — this was zero before MLB had any POSITION_CORRELATION entries');
+};
+
+const testGenuinePortfolioDiversityParity = (): void => {
+  const makeCandidate = (id: string, playerIds: string[], tournamentRank: number): LineupCandidate => ({
+    id, playerIds, rosterSlots: Object.fromEntries(playerIds.map((playerId, index) => [`SLOT_${index}`, playerId])), salaryUsed: 9000, salaryRemaining: 1000, median: 40 - tournamentRank * 0.1, ceiling: 55,
+    correlationScore: 0, optimalLineupFrequency: 1, topOnePercentFrequency: 1, ownershipEstimate: 0.2, leverageScore: 0.8, duplicationRisk: 'LOW',
+    estimatedDuplicates: 5, medianRank: tournamentRank, ceilingRank: tournamentRank, tournamentRank, candidateTypes: [], gameScriptCluster: 'SINGLE_TEAM_OR_UNKNOWN', strategicSimilarity: 0, riskFlags: [],
+  });
+  // The 4 top-ranked candidates are near-duplicates (share 4 of 5 players); a genuinely distinct
+  // build only shows up ranked 5th. Old pure-rank selection would pick exactly the 4 duplicates.
+  const candidates = [
+    makeCandidate('c1', ['p1', 'p2', 'p3', 'p4', 'p5'], 1),
+    makeCandidate('c2', ['p1', 'p2', 'p3', 'p4', 'p6'], 2),
+    makeCandidate('c3', ['p1', 'p2', 'p3', 'p4', 'p7'], 3),
+    makeCandidate('c4', ['p1', 'p2', 'p3', 'p4', 'p8'], 4),
+    makeCandidate('c5', ['q1', 'q2', 'q3', 'q4', 'q5'], 5),
+  ];
+  const fourEntrySlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, userEntryCount: 4, requestedEntryCount: 4 } };
+  const result = selectLineups({ validatedSlate: fourEntrySlate, researchPackage: research, optimizerPackage: { candidates } }, now);
+  assert.equal(result.selectedLineups.length, 4, 'must always fill the requested count when the candidate pool has enough candidates -- diversity must never reduce the portfolio size');
+  const oldTop4Overlap = averagePairwiseOverlapForTest([['p1', 'p2', 'p3', 'p4', 'p5'], ['p1', 'p2', 'p3', 'p4', 'p6'], ['p1', 'p2', 'p3', 'p4', 'p7'], ['p1', 'p2', 'p3', 'p4', 'p8']]);
+  const newOverlap = averagePairwiseOverlapForTest(result.selectedLineups.map((lineup) => lineup.playerIds));
+  assert.ok(newOverlap < oldTop4Overlap, 'genuine diversity must produce measurably lower average pairwise overlap than picking strictly by rank');
+  assert.ok(result.selectedLineups.some((lineup) => lineup.playerIds.includes('q1')), 'the genuinely distinct 5th-ranked build should actually be pulled into the portfolio once it out-scores a near-duplicate on the diversity-adjusted score');
+};
+function averagePairwiseOverlapForTest(playerIdLists: string[][]): number {
+  let total = 0, count = 0;
+  for (let i = 0; i < playerIdLists.length; i += 1) for (let j = i + 1; j < playerIdLists.length; j += 1) { total += overlap(playerIdLists[i], playerIdLists[j]); count += 1; }
+  return count ? total / count : 0;
+}
+
 const testContractParity = (): void => {
   assertSlate(baseSlate);
   assertProjection(projection);
@@ -413,8 +541,9 @@ const testContractParity = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
+  await testMarketContextImpliedTotalParity();
   console.log('engine parity tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

@@ -79,7 +79,8 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   if (!generated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
   if (generated.length >= limit) warnings.push(`Lineup enumeration stopped at ${limit} candidates (a search budget, not exhaustive enumeration); results reflect the highest-value combinations found within that budget, prioritized by salary efficiency.`);
 
-  const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile));
+  const marketAverages = slateMarketAverages(workingInput.validatedSlate.playerPool);
+  const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile, marketAverages));
   const ranked = rankCandidates(scored, maxCandidates);
   applyFieldHeuristic(ranked); // must run before the cash-line estimate below, which weights by the refined ownershipEstimate
   const cashLineEstimate = computeCashLineEstimate(input.validatedSlate, ranked);
@@ -198,23 +199,69 @@ function salaryForSlot(player: { salary: number; captainSalary?: number; utility
 
 function baseSlot(slot: string): string { return slot.replace(/_\d+$/, ''); }
 
-// Small, honest correlation model: only same-team pairings can correlate. Sport-specific
-// position pairings get a stronger weight (e.g. NFL QB + pass-catcher); any other same-team
-// pairing gets a modest default. This is not a simulated joint distribution — it's a
-// directional heuristic, same spirit as the rest of the deterministic engine.
+// Small, honest correlation model: same-team pairings, plus (below) opposing same-game
+// "bring-back" pairings. Sport-specific position pairings get a stronger weight (e.g. NFL QB +
+// pass-catcher); any other same-team pairing gets a modest default. This is not a simulated
+// joint distribution — it's a directional heuristic, same spirit as the rest of the
+// deterministic engine.
 const POSITION_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; weight: number }>>> = {
   NFL: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.18 }, { a: /^RB$/i, b: /^DST$/i, weight: -0.05 }],
   NBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
   WNBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
+  // A team's own pitcher and its hitters are largely independent outcomes (not a real stack),
+  // so that pairing is explicitly neutralized to 0 rather than falling through to the generic
+  // same-team default below. Two same-team hitters is the standard MLB GPP stack.
+  MLB: [{ a: /^P$/i, b: /^(C|1B|2B|3B|SS|OF)$/i, weight: 0 }, { a: /^(C|1B|2B|3B|SS|OF)$/i, b: /^(C|1B|2B|3B|SS|OF)$/i, weight: 0.08 }],
 };
-function pairCorrelation(sport: Sport, a: SlatePlayer, b: SlatePlayer): number {
-  if (!a.team || a.team !== b.team) return 0;
-  const rules = POSITION_CORRELATION[sport] ?? [];
-  for (const rule of rules) if ((rule.a.test(a.position ?? '') && rule.b.test(b.position ?? '')) || (rule.a.test(b.position ?? '') && rule.b.test(a.position ?? ''))) return rule.weight;
-  return 0.03;
+// Opposing players in the same game ("bring-back" correlation): real in a shootout-projected
+// game script (NFL: a QB and the opposing team's pass-catcher both benefit from a
+// back-and-forth scoring game), roughly neutral for NBA/WNBA (small positive from pace/blowout
+// avoidance), and genuinely negative for an MLB pitcher against the opposing lineup he's
+// actually facing (strikeouts/quality starts directly suppress those hitters' output).
+const BRING_BACK_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; weight: number }>>> = {
+  NFL: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.08 }],
+  NBA: [{ a: /^(PG|SG|SF|PF|C)$/i, b: /^(PG|SG|SF|PF|C)$/i, weight: 0.02 }],
+  WNBA: [{ a: /^(PG|SG|SF|PF|C)$/i, b: /^(PG|SG|SF|PF|C)$/i, weight: 0.02 }],
+  MLB: [{ a: /^P$/i, b: /^(C|1B|2B|3B|SS|OF)$/i, weight: -0.05 }],
+};
+// Real Vegas game total relative to the slate average scales the correlation bonus -- a stack
+// in a genuinely high-total, shootout-projected game earns more credit than an identical stack
+// in a low-total game. Capped to a modest range so it nudges, never inverts, the base weight.
+// Falls back to a neutral 1x when no market data is available for this game (unchanged behavior).
+function gameTotalScale(gameTotal: number | undefined, avgGameTotal: number | undefined): number {
+  if (gameTotal === undefined || !avgGameTotal) return 1;
+  return Math.max(0.7, Math.min(1.3, gameTotal / avgGameTotal));
+}
+function pairCorrelation(sport: Sport, a: SlatePlayer, b: SlatePlayer, avgGameTotal?: number): number {
+  if (a.team && a.team === b.team) {
+    const rules = POSITION_CORRELATION[sport] ?? [];
+    const scale = gameTotalScale(a.marketContext?.gameTotal, avgGameTotal);
+    for (const rule of rules) if ((rule.a.test(a.position ?? '') && rule.b.test(b.position ?? '')) || (rule.a.test(b.position ?? '') && rule.b.test(a.position ?? ''))) return rule.weight * scale;
+    return 0.03 * scale;
+  }
+  if (a.team && b.team && (a.opponent === b.team || b.opponent === a.team)) {
+    const rules = BRING_BACK_CORRELATION[sport] ?? [];
+    const scale = gameTotalScale(a.marketContext?.gameTotal ?? b.marketContext?.gameTotal, avgGameTotal);
+    for (const rule of rules) if ((rule.a.test(a.position ?? '') && rule.b.test(b.position ?? '')) || (rule.a.test(b.position ?? '') && rule.b.test(a.position ?? ''))) return rule.weight * scale;
+  }
+  return 0;
+}
+// Averages real Vegas market data across the slate's distinct teams (players on the same team
+// share identical marketContext, so dedupe by team rather than double-counting). Empty/absent
+// when no players have marketContext (fetch failed, key missing, or GOLF) -- callers treat an
+// undefined average as "no market signal available" and fall back to unchanged behavior.
+function slateMarketAverages(players: SlatePlayer[]): { avgImpliedTeamTotal?: number; avgGameTotal?: number } {
+  const byTeam = new Map<string, NonNullable<SlatePlayer['marketContext']>>();
+  for (const player of players) if (player.team && player.marketContext && !byTeam.has(player.team)) byTeam.set(player.team, player.marketContext);
+  const contexts = [...byTeam.values()];
+  if (!contexts.length) return {};
+  return {
+    avgImpliedTeamTotal: contexts.reduce((sum, context) => sum + context.impliedTeamTotal, 0) / contexts.length,
+    avgGameTotal: contexts.reduce((sum, context) => sum + context.gameTotal, 0) / contexts.length,
+  };
 }
 
-function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUsed: number }, input: OptimizerInput, projectionByPlayer: Map<string, OptimizerInput['projectionPackage']['players'][number]>, profile: ObjectiveProfile): LineupCandidate {
+function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUsed: number }, input: OptimizerInput, projectionByPlayer: Map<string, OptimizerInput['projectionPackage']['players'][number]>, profile: ObjectiveProfile, marketAverages: { avgImpliedTeamTotal?: number; avgGameTotal?: number } = {}): LineupCandidate {
   const players = Object.values(lineup.rosterSlots).map((id) => projectionByPlayer.get(id)).filter((player): player is NonNullable<typeof player> => Boolean(player));
   const projected = (key: 'floorP20' | 'medianP50' | 'ceilingP90') => Object.entries(lineup.rosterSlots).reduce((sum, [slot, id]) => sum + scaledProjection(projectionByPlayer.get(id)?.projectedOutcomes[key] ?? 0, input.validatedSlate.rosterRules.slots[baseSlot(slot)]?.fantasyMultiplier), 0);
   const floor = projected('floorP20');
@@ -224,14 +271,22 @@ function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUse
   const teamCounts = new Map<string, number>();
   for (const player of playerRows) if (player.team) teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
   let correlationScore = 0;
-  for (let i = 0; i < playerRows.length; i += 1) for (let j = i + 1; j < playerRows.length; j += 1) correlationScore += pairCorrelation(input.validatedSlate.sport, playerRows[i], playerRows[j]);
+  for (let i = 0; i < playerRows.length; i += 1) for (let j = i + 1; j < playerRows.length; j += 1) correlationScore += pairCorrelation(input.validatedSlate.sport, playerRows[i], playerRows[j], marketAverages.avgGameTotal);
   const baseOwnershipEstimate = players.reduce((sum, player) => sum + 1 / Math.max(1, player.salaryEfficiency.medianPer1k), 0) / Math.max(1, players.length);
   // Nudges ownership down (leverage up) for lineups built from higher-relative-variance players --
   // still a heuristic proxy, not real field data, but one that now uses the real per-player
   // floor/ceiling spread Projection computes instead of ignoring it entirely. Bounded so it can
   // only ever discount the base salary-efficiency signal, never dominate it.
   const relativeSpread = players.reduce((sum, player) => sum + (player.projectedOutcomes.ceilingP90 - player.projectedOutcomes.floorP20) / Math.max(1, player.projectedOutcomes.medianP50), 0) / Math.max(1, players.length);
-  const ownershipEstimate = baseOwnershipEstimate * (1 - Math.min(0.2, relativeSpread * 0.1));
+  // Grounds part of the ownership proxy in real Vegas data: a lineup leaning on teams with an
+  // implied total above the slate average (the field chases high-scoring environments) nudges
+  // ownership up; below-average teams nudge it down (more leverage). Bounded the same way as the
+  // variance nudge above -- can only ever adjust the base signal by a capped amount, never
+  // dominate or invert it. Players/lineups with no marketContext leave this at 0 (no nudge),
+  // exactly today's behavior.
+  const marketNudges = playerRows.filter((player) => player.marketContext).map((player) => marketAverages.avgImpliedTeamTotal ? (player.marketContext!.impliedTeamTotal - marketAverages.avgImpliedTeamTotal) / marketAverages.avgImpliedTeamTotal : 0);
+  const avgMarketNudge = marketNudges.length ? marketNudges.reduce((sum, value) => sum + value, 0) / marketNudges.length : 0;
+  const ownershipEstimate = baseOwnershipEstimate * (1 - Math.min(0.2, relativeSpread * 0.1)) * (1 + Math.max(-0.15, Math.min(0.15, avgMarketNudge * 0.3)));
   const leverageScore = Math.max(0, 1 - ownershipEstimate);
   const objective = median * profile.medianWeight + ceiling * profile.ceilingWeight + leverageScore * profile.leverageWeight + correlationScore * profile.correlationWeight;
   const id = stableId(JSON.stringify(lineup.rosterSlots));

@@ -16,7 +16,7 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const count = Math.min(requested, maximum, candidates.length);
   const isCashGame = input.validatedSlate.contest.contestKind === 'CASH';
   const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
-  const { selected, underfilled } = choosePortfolio(ranked, count);
+  const { selected, underfilled } = choosePortfolio(ranked, count, isCashGame);
   const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
   const nearDuplicateCount = selected.filter((candidate) => candidate.strategicSimilarity >= 0.8).length;
   if (nearDuplicateCount) warnings.push(`${nearDuplicateCount} of ${selected.length} selected lineups closely overlap (>=80% shared players) with another selected lineup because the candidate pool didn't contain enough sufficiently distinct high-quality builds.`);
@@ -47,28 +47,52 @@ export function resolveCashLineProbability(candidate: LineupCandidate, calibrati
   return { probability: candidate.cashLineProbability, confidence: 'SIMULATED_ESTIMATE' };
 }
 
-function choosePortfolio(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
-  const chosenIds = new Set<string>();
+// Cash games are probability-based, not a diversity problem: repeating the single best
+// cash-line candidate across every entry is the correct play there (see rankForContext), so
+// this just takes the top N by rank as-is. `strategicSimilarity` is still computed (against
+// already-picked entries) purely for the near-duplicate disclosure in selectLineups/explain.
+function choosePortfolioForCashGame(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
   const chosen: LineupCandidate[] = [];
   for (const candidate of candidates) {
     if (chosen.length >= count) break;
     const similarity = chosen.length ? Math.max(...chosen.map((existing) => overlap(existing.playerIds, candidate.playerIds))) : 0;
-    if (chosen.length && count > 1 && similarity >= 0.8 && candidates.some((other) => !chosenIds.has(other.id) && overlap(existingIds(chosen), other.playerIds) < 0.8)) continue;
     chosen.push({ ...candidate, strategicSimilarity: similarity });
-    chosenIds.add(candidate.id);
-  }
-  // Backfill with the next-best remaining candidates (even if similar) rather than silently
-  // returning fewer lineups than requested with no signal.
-  if (chosen.length < count) {
-    for (const candidate of candidates) {
-      if (chosen.length >= count) break;
-      if (chosenIds.has(candidate.id)) continue;
-      const similarity = chosen.length ? Math.max(...chosen.map((existing) => overlap(existing.playerIds, candidate.playerIds))) : 0;
-      chosen.push({ ...candidate, strategicSimilarity: similarity });
-      chosenIds.add(candidate.id);
-    }
   }
   return { selected: chosen, underfilled: chosen.length < count };
+}
+
+// Greedy diminishing-returns diverse selection for multi-entry GPP portfolios: each pick after
+// the first maximizes (rank score - diversityWeight * overlap with the best-matching
+// already-chosen lineup), instead of pure rank order. This naturally spreads a portfolio across
+// genuinely different captains/stacks/game scripts when the pool supports it, while every
+// remaining candidate is still always a legal pick -- so this never returns fewer than `count`
+// unless the candidate pool itself is smaller than requested (same guarantee as before; a
+// candidate that's still a near-duplicate of everything chosen so far is only picked once it's
+// genuinely the best-scoring option left, which is the correct "pool too thin" signal downstream).
+const DIVERSITY_WEIGHT = 0.35;
+function choosePortfolioDiverse(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
+  const rankScore = new Map(candidates.map((candidate, index) => [candidate.id, 1 - index / Math.max(1, candidates.length - 1)]));
+  const remaining = [...candidates];
+  const chosen: LineupCandidate[] = [];
+  while (chosen.length < count && remaining.length) {
+    let bestIndex = 0;
+    let bestScore = -Infinity;
+    let bestSimilarity = 0;
+    for (let i = 0; i < remaining.length; i += 1) {
+      const candidate = remaining[i];
+      const similarity = chosen.length ? Math.max(...chosen.map((existing) => overlap(existing.playerIds, candidate.playerIds))) : 0;
+      const score = (rankScore.get(candidate.id) ?? 0) - DIVERSITY_WEIGHT * similarity;
+      if (score > bestScore) { bestScore = score; bestIndex = i; bestSimilarity = similarity; }
+    }
+    const [picked] = remaining.splice(bestIndex, 1);
+    chosen.push({ ...picked, strategicSimilarity: bestSimilarity });
+  }
+  return { selected: chosen, underfilled: chosen.length < count };
+}
+
+function choosePortfolio(candidates: LineupCandidate[], count: number, isCashGame: boolean): { selected: LineupCandidate[]; underfilled: boolean } {
+  if (isCashGame || count <= 1) return choosePortfolioForCashGame(candidates, count);
+  return choosePortfolioDiverse(candidates, count);
 }
 
 function watchItemsFor(research: ResearchPackage, playerIds: string[]): string[] {
@@ -109,5 +133,4 @@ function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): st
 }
 
 export function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }
-function existingIds(candidates: LineupCandidate[]): string[] { return [...new Set(candidates.flatMap((candidate) => candidate.playerIds))]; }
 function format(value: number): string { return Number.isFinite(value) ? value.toFixed(1) : '—'; }

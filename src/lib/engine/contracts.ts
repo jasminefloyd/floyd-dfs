@@ -65,6 +65,10 @@ export interface SlatePlayer {
     mappedBy?: 'NAME_AND_TEAM' | 'UNMAPPED';
     note?: string;
   };
+  /** Real Vegas market data (implied team total from game total + spread) for this player's
+   * team, when a match against The Odds API's data was found -- see oddsProvider.ts's
+   * getTeamMarketContext. Absent (not fabricated) when the fetch failed or no team match. */
+  marketContext?: { impliedTeamTotal: number; spread: number; gameTotal: number };
 }
 
 export interface ValidatedSlate {

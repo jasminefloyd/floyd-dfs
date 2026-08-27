@@ -13,7 +13,7 @@ import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor } from
 import { applyAvailabilitySnapshot, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
 import { assertAdjustment, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection.js';
-import { OddsResearchProvider } from '../src/lib/engine/oddsProvider.js';
+import { OddsResearchProvider, getTeamMarketContext } from '../src/lib/engine/oddsProvider.js';
 import { adjustWithOpenAi } from '../src/lib/engine/openAiAdjustment.js';
 import { ConfiguredResearchProvider } from '../src/lib/engine/configuredResearchProvider.js';
 import { OpenAiResearchSynthesizer } from '../src/lib/engine/openAiSynthesizer.js';
@@ -177,6 +177,25 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
       if (missingProjectionPlayers.length) stages.projectionWarning = `ESPN did not return season-average projections for ${missingProjectionPlayers.length} ${workingSlate.sport} players: ${missingProjectionPlayers.join(', ')}.`;
     } catch (error) { stages.projectionWarning = error instanceof Error ? error.message : 'ESPN projection refresh failed.'; }
+  }
+  // Real Vegas market context (implied team total from game total + spread) -- feeds the
+  // ownership-leverage nudge (optimizer.ts) and real game-stack correlation (optimizer.ts).
+  // Non-blocking like every other enrichment step above: no key, no sport support, or a fetch
+  // failure just means players keep their existing (undefined) marketContext, never fabricated.
+  const oddsKey = env('THE_ODDS_API_KEY') ?? env('ODDS_API_KEY');
+  if (oddsKey && ['MLB', 'NBA', 'WNBA', 'NFL'].includes(workingSlate.sport)) {
+    try {
+      const marketContextBySport = await getTeamMarketContext(workingSlate.sport, oddsKey, { baseUrl: env('ODDS_API_BASE_URL') });
+      if (marketContextBySport.size) {
+        const refreshedPlayers = workingSlate.playerPool.map((player) => {
+          const context = player.team ? marketContextBySport.get(normalizeTeamCode(player.team)) : undefined;
+          return context ? { ...player, marketContext: { impliedTeamTotal: context.impliedTeamTotal, spread: context.spread, gameTotal: context.gameTotal } } : player;
+        });
+        workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
+      } else {
+        stages.marketContextWarning = 'The Odds API returned no matching market data for this slate\'s teams.';
+      }
+    } catch (error) { stages.marketContextWarning = error instanceof Error ? error.message : 'Vegas market-context refresh failed.'; }
   }
   await saveStage(db, run, 'SLATE', { contestId: workingSlate.contest.draftKingsContestId }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
   let research = await agent.run({ validatedSlate: workingSlate });
