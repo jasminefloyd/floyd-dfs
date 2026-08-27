@@ -254,7 +254,7 @@ const testThinPoolDiversityDisclosureParity = (): void => {
 
 const testOpenAiSelectionNearDuplicateDisclosureParity = async (): Promise<void> => {
   const makeCandidate = (id: string, playerIds: string[]): LineupCandidate => ({
-    id, playerIds, rosterSlots: Object.fromEntries(playerIds.map((playerId, index) => [`SLOT_${index}`, playerId])), salaryUsed: 9000, salaryRemaining: 1000, median: 40, ceiling: 55,
+    id, playerIds, rosterSlots: Object.fromEntries(playerIds.map((playerId, index) => [`SLOT_${index}`, playerId])), salaryUsed: 9000, salaryRemaining: 1000, floor: 30, median: 40, ceiling: 55,
     correlationScore: 0, optimalLineupFrequency: 1, topOnePercentFrequency: 1, ownershipEstimate: 0.2, leverageScore: 0.8, duplicationRisk: 'LOW',
     estimatedDuplicates: 5, medianRank: 1, ceilingRank: 1, tournamentRank: 1, candidateTypes: [], gameScriptCluster: 'SINGLE_TEAM_OR_UNKNOWN', strategicSimilarity: 0, riskFlags: [],
   });
@@ -268,6 +268,7 @@ const testOpenAiSelectionNearDuplicateDisclosureParity = async (): Promise<void>
   assert.equal(result.selectedLineups.length, 2);
   assert.ok((result.warnings ?? []).some((warning) => warning.includes('closely overlap')), 'a near-duplicate pair within the actual OpenAI-selected set must be disclosed at the portfolio level, not just via Optimizer\'s pool-wide average');
   assert.ok(result.selectedLineups.some((lineup) => lineup.rationale.some((line) => line.includes('closely overlaps'))), 'the affected lineup(s) must carry a per-lineup disclosure too');
+  assert.ok(result.selectedLineups.every((lineup) => lineup.floor === 30), 'the OpenAI selection path must preserve floor from the optimizer candidate, not silently drop it (a real production bug: a missing floor made a real post-contest diagnosis fall back to a cruder tolerance check instead of the real floor/ceiling range)');
 };
 
 const testRoleCertaintyThreeTierParity = (): void => {
