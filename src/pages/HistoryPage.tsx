@@ -43,6 +43,8 @@ function HistoryCard({ row }: { row: HistoryRow }) {
   </article>;
 }
 
+interface Diagnostic { error_stage?: string; diagnosis?: string; confidence?: string; error?: string; }
+
 function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId: string; existingResult?: number; existingCashLine?: number }) {
   const [expanded, setExpanded] = useState(false);
   const [actualDkPoints, setActualDkPoints] = useState(existingResult !== undefined ? String(existingResult) : '');
@@ -51,6 +53,7 @@ function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(existingResult !== undefined);
+  const [diagnostic, setDiagnostic] = useState<Diagnostic | null>(null);
 
   async function submit() {
     const points = Number(actualDkPoints);
@@ -60,12 +63,13 @@ function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId
     try {
       const cashLineValue = cashLine.trim() ? Number(cashLine) : undefined;
       const finishPositionValue = finishPosition.trim() ? Number(finishPosition) : undefined;
-      await floydRequest(`/api/lineups/${encodeURIComponent(lineupId)}/result`, {
+      const response = await floydRequest<{ diagnostic: Diagnostic | null }>(`/api/lineups/${encodeURIComponent(lineupId)}/result`, {
         method: 'POST',
         body: JSON.stringify({ actualDkPoints: points, ...(cashLineValue !== undefined ? { cashLine: cashLineValue } : {}), ...(finishPositionValue !== undefined ? { finishPosition: finishPositionValue } : {}) }),
       });
       setSubmitted(true);
       setExpanded(false);
+      setDiagnostic(response.diagnostic ?? null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to record this result.');
     } finally {
@@ -75,13 +79,16 @@ function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId
 
   if (!expanded) {
     return (
-      <button
-        type="button"
-        onClick={() => setExpanded(true)}
-        className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 py-2 text-xs font-black uppercase tracking-wide text-slate-600 hover:border-cyan-500 hover:text-cyan-800"
-      >
-        {submitted ? 'Update result' : 'Record result'}
-      </button>
+      <>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="mt-3 w-full rounded-md border border-slate-200 bg-slate-50 py-2 text-xs font-black uppercase tracking-wide text-slate-600 hover:border-cyan-500 hover:text-cyan-800"
+        >
+          {submitted ? 'Update result' : 'Record result'}
+        </button>
+        <DiagnosticNote diagnostic={diagnostic} />
+      </>
     );
   }
 
@@ -108,5 +115,16 @@ function RecordResult({ lineupId, existingResult, existingCashLine }: { lineupId
       </div>
       <p className="text-[10px] text-slate-500">Recording real results is what lets cash-line confidence move from a simulated estimate to a calibrated one over time.</p>
     </div>
+  );
+}
+
+function DiagnosticNote({ diagnostic }: { diagnostic: Diagnostic | null }) {
+  if (!diagnostic) return null;
+  if (diagnostic.error) return <p className="mt-2 text-[10px] text-slate-400">Automatic diagnosis wasn't available for this result: {diagnostic.error}</p>;
+  if (diagnostic.error_stage === 'VARIANCE') return <p className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10px] text-slate-500">{diagnostic.diagnosis ?? 'No evidence of a modeling miss — the outcome fell within the projected range.'}</p>;
+  return (
+    <p className="mt-2 rounded-md border border-amber-300/60 bg-amber-50 px-2.5 py-2 text-[10px] text-amber-800">
+      <span className="font-black uppercase tracking-wide">{diagnostic.error_stage ?? 'Diagnosis'}:</span> {diagnostic.diagnosis ?? 'Actual outcome fell outside the projected range.'}
+    </p>
   );
 }
