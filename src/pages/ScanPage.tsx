@@ -22,6 +22,17 @@ function currentStageLabel(stages: ScanProgressStage[]): string {
   return active ? SCAN_STAGE_LABELS[active as keyof typeof SCAN_STAGE_LABELS] : 'Starting scan';
 }
 
+function formatElapsed(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours) parts.push(`${hours} hr`);
+  if (minutes) parts.push(`${minutes} min`);
+  parts.push(`${seconds} sec`);
+  return parts.join(' ');
+}
+
 export default function ScanPage() {
   const [phase, setPhase] = useState<ScanPhase>('idle');
   const [manifest, setManifest] = useState<MIOS_FantasyManifest | null>(null);
@@ -49,7 +60,7 @@ export default function ScanPage() {
       setError(message); showToast('Failed to generate lineups', 'error'); console.error('Floyd DFS generation error:', err);
     } finally { setPhase('idle'); }
   };
-  const scanStatusLabel = phase === 'idle' ? undefined : `${currentStageLabel(progressStages)}... (${elapsedSeconds}s)`;
+  const scanStatusLabel = phase === 'idle' ? undefined : `${currentStageLabel(progressStages)}... (${formatElapsed(elapsedSeconds)})`;
 
   const onSave = async (lineup: Lineup) => {
     if (!lineup.id) { showToast(`Lineup #${lineup.rank} is already persisted with this run.`, 'success'); return; }

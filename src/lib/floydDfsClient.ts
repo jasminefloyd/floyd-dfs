@@ -117,13 +117,23 @@ function enrichedSlateFrom(stagesValue: unknown, fallbackSlate: unknown): unknow
 export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; minSalaryUsed?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
   const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, minSalaryUsed: input.minSalaryUsed }) });
   const run = queued.run as JsonRecord;
-  await request(`/api/runs/${String(run.id)}/process`, { method: 'POST', body: '{}' });
+  // /process is a single request that runs the entire pipeline server-side and only resolves once
+  // every stage is done -- awaiting it before polling meant onProgress never fired until the run
+  // was already 100% complete (the button just sat on its initial label the whole time). Each
+  // stage is written to Supabase as processRun() reaches it, so firing this WITHOUT awaiting it
+  // and polling concurrently lets the GET calls below actually observe real incremental progress
+  // while the POST is still in flight.
+  let processError: unknown;
+  const processPromise = request(`/api/runs/${String(run.id)}/process`, { method: 'POST', body: '{}' }).catch((error) => { processError = error; });
   let current: JsonRecord = run;
   for (let attempt = 0; attempt < 90; attempt += 1) {
     const payload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
     current = payload.run as JsonRecord;
     onProgress?.(stageProgress(payload.stages));
+    if (processError) throw processError;
     if (['ready', 'blocked', 'failed', 'complete'].includes(String(current.state))) {
+      await processPromise;
+      if (processError) throw processError;
       const enrichedSlate = enrichedSlateFrom(payload.stages, queued.slate);
       const lineups = mapLineups(payload.lineups, enrichedSlate, payload.stages);
       if (current.state !== 'ready' && current.state !== 'complete') throw new Error(String((current.error as JsonRecord | undefined)?.message ?? 'Floyd DFS blocked lineup generation.'));
