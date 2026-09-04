@@ -11,7 +11,7 @@ import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
 import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor } from '../src/lib/engine/sportsDataIoProvider.js';
 import { applyAvailabilitySnapshot, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
-import { assertAdjustment, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
+import { assertAdjustment, assertContestMetrics, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection.js';
 import { OddsResearchProvider, getTeamMarketContext } from '../src/lib/engine/oddsProvider.js';
 import { adjustWithOpenAi } from '../src/lib/engine/openAiAdjustment.js';
@@ -197,13 +197,13 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       }
     } catch (error) { stages.marketContextWarning = error instanceof Error ? error.message : 'Vegas market-context refresh failed.'; }
   }
-  await saveStage(db, run, 'SLATE', { contestId: workingSlate.contest.draftKingsContestId }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
+  await saveStage(db, run, 'SLATE', { rawSlate: slate, enrichedSlate: workingSlate }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
   let research = await agent.run({ validatedSlate: workingSlate });
   const criticalGaps = (research.unknowns ?? []).filter((unknown) => unknown.importance === 'CRITICAL');
   if (criticalGaps.length) research = await agent.run({ validatedSlate: workingSlate, researchGaps: criticalGaps });
   assertResearch(research);
   stages.research = research;
-  await saveStage(db, run, 'RESEARCH', workingSlate, research, research.status, [], []);
+  await saveStage(db, run, 'RESEARCH', { slate: workingSlate }, research, research.status, [], []);
   const researchRun = await db.from('floyd_dfs_research_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: research.version, research_plan: { slateId: workingSlate.slateId }, research_package: research, status: research.status, model_name: openAiModel(), prompt_version: 'research.v1' }).select('id').single();
   if (researchRun.error) throw researchRun.error;
   if (research.findings.length) { const findings = await db.from('floyd_dfs_research_findings').insert(research.findings.map((finding) => ({ tenant_id: run.tenant_id, research_run_id: researchRun.data.id, bucket: finding.bucket, subject_type: finding.subjectType ?? 'EVENT', subject_id: finding.subjectId, finding: finding.finding, source_name: finding.sourceName, source_url: finding.sourceUrl ?? null, source_tier: finding.sourceTier ?? 4, source_purpose: finding.sourcePurpose ?? null, published_at: finding.publishedAt ?? null, retrieved_at: finding.retrievedAt ?? research.generatedAt, confidence: finding.confidence, metadata: finding.metadata ?? {} }))); if (findings.error) throw findings.error; }
@@ -213,7 +213,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (adjustmentKey && adjustment.status !== 'BLOCKED') { try { adjustment = await adjustWithOpenAi({ slate: workingSlate, research, baseline: adjustment }, { apiKey: adjustmentKey, model: openAiModel() }); } catch (error) { const message = error instanceof Error ? error.message : 'OpenAI Sport Adjustment failed; deterministic specialist retained.'; stages.adjustmentWarning = message; adjustment = { ...adjustment, warnings: [...(adjustment.warnings ?? []), message] }; } }
   assertAdjustment(adjustment, research);
   stages.adjustment = adjustment;
-  await saveStage(db, run, 'SPORT_ADJUSTMENT', research, adjustment, adjustment.status, adjustment.warnings ?? []);
+  await saveStage(db, run, 'SPORT_ADJUSTMENT', { slate: workingSlate, research }, adjustment, adjustment.status, adjustment.warnings ?? []);
   const adjustmentRun = await db.from('floyd_dfs_adjustment_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: adjustment.version, sport: adjustment.sport, adjustment_package: adjustment, status: adjustment.status, model_name: openAiModel(), prompt_version: 'sport-adjustment.deterministic.v1' }).select('id').single();
   if (adjustmentRun.error) throw adjustmentRun.error;
   const adjustmentRows = await db.from('floyd_dfs_player_adjustments').insert(adjustment.adjustments.flatMap((player) => player.adjustments.map((item) => ({ tenant_id: run.tenant_id, adjustment_run_id: adjustmentRun.data.id, player_id: player.playerId, adjustment_type: item.adjustmentType ?? 'CONTEXT', direction: item.direction ?? 'NEUTRAL', magnitude: item.magnitude, confidence: item.confidence, rationale: item.rationale ?? player.projectionNotes[0] ?? 'No additional rationale.', evidence_finding_ids: item.evidenceFindingIds ?? [], metadata: { roleCertainty: player.roleCertainty } }))));
@@ -221,18 +221,19 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const projection = projectSlate(workingSlate, adjustment);
   assertProjection(projection);
   stages.projection = projection;
-  await saveStage(db, run, 'PROJECTION', adjustment, projection, projection.status, (stages.projectionDataSourceWarnings as string[] | undefined) ?? []);
+  await saveStage(db, run, 'PROJECTION', { slate: workingSlate, adjustment }, projection, projection.status, (stages.projectionDataSourceWarnings as string[] | undefined) ?? []);
   const projectionRun = await db.from('floyd_dfs_projection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: projection.version, sport: projection.sport, model_version: projection.modelVersion, simulation_runs: projection.simulationRuns, projection_package: projection, status: projection.status }).select('id').single();
   if (projectionRun.error) throw projectionRun.error;
-  const projectionRows = await db.from('floyd_dfs_player_projections').insert(projection.players.map((player) => ({ tenant_id: run.tenant_id, projection_run_id: projectionRun.data.id, player_id: player.playerId, baseline_opportunity: player.baselineOpportunity, adjusted_opportunity: player.adjustedOpportunity, opportunity_delta: player.opportunityDelta, component_projection: player.componentProjection, floor_p20: player.projectedOutcomes.floorP20, median_p50: player.projectedOutcomes.medianP50, ceiling_p90: player.projectedOutcomes.ceilingP90, median_per_1k: player.salaryEfficiency.medianPer1k, ceiling_per_1k: player.salaryEfficiency.ceilingPer1k, confidence: player.confidence, uncertainty_factors: player.uncertaintyFactors, watch_dependencies: player.watchDependencies, model_version: player.modelVersion })));
+  const projectionRows = await db.from('floyd_dfs_player_projections').insert(projection.players.map((player) => ({ tenant_id: run.tenant_id, projection_run_id: projectionRun.data.id, player_id: player.playerId, baseline_opportunity: player.baselineOpportunity, adjusted_opportunity: player.adjustedOpportunity, opportunity_delta: player.opportunityDelta, component_projection: player.componentProjection, simulated_fantasy_point_samples: player.simulatedFantasyPointSamples ?? [], distribution: player.distribution ?? {}, model_path: player.modelPath ?? 'UNKNOWN_LEGACY', floor_p20: player.projectedOutcomes.floorP20, median_p50: player.projectedOutcomes.medianP50, ceiling_p90: player.projectedOutcomes.ceilingP90, median_per_1k: player.salaryEfficiency.medianPer1k, ceiling_per_1k: player.salaryEfficiency.ceilingPer1k, confidence: player.confidence, uncertainty_factors: player.uncertaintyFactors, watch_dependencies: player.watchDependencies, model_version: player.modelVersion })));
   if (projectionRows.error) throw projectionRows.error;
   const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed });
   assertOptimizer(optimizer, workingSlate);
+  assertContestMetrics(optimizer);
   stages.optimizer = optimizer;
-  await saveStage(db, run, 'OPTIMIZE', projection, optimizer, optimizer.status);
+  await saveStage(db, run, 'OPTIMIZE', { slate: workingSlate, projection }, optimizer, optimizer.status);
   const optimizationRun = await db.from('floyd_dfs_optimization_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: optimizer.version, objective_profile: optimizer.objectiveProfile, optimizer_package: optimizer, status: optimizer.status }).select('id').single();
   if (optimizationRun.error) throw optimizationRun.error;
-  const candidateRows = await db.from('floyd_dfs_lineup_candidates').insert(optimizer.candidates.map((candidate) => ({ tenant_id: run.tenant_id, optimization_run_id: optimizationRun.data.id, candidate_key: candidate.id, salary_used: candidate.salaryUsed, salary_remaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, correlation_score: candidate.correlationScore, optimal_lineup_frequency: candidate.optimalLineupFrequency, top_one_percent_frequency: candidate.topOnePercentFrequency, ownership_estimate: candidate.ownershipEstimate, leverage_score: candidate.leverageScore, duplication_risk: candidate.duplicationRisk, estimated_duplicates: candidate.estimatedDuplicates, median_rank: candidate.medianRank, ceiling_rank: candidate.ceilingRank, tournament_rank: candidate.tournamentRank, candidate_types: candidate.candidateTypes, roster_slots: candidate.rosterSlots, game_script_cluster: candidate.gameScriptCluster, strategic_similarity: candidate.strategicSimilarity, risk_flags: candidate.riskFlags })));
+  const candidateRows = await db.from('floyd_dfs_lineup_candidates').insert(optimizer.candidates.map((candidate) => ({ tenant_id: run.tenant_id, optimization_run_id: optimizationRun.data.id, candidate_key: candidate.id, salary_used: candidate.salaryUsed, salary_remaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, correlation_score: candidate.correlationScore, median_rank: candidate.medianRank, ceiling_rank: candidate.ceilingRank, candidate_types: candidate.candidateTypes, roster_slots: candidate.rosterSlots, game_script_cluster: candidate.gameScriptCluster, strategic_similarity: candidate.strategicSimilarity, risk_flags: candidate.riskFlags, variance: candidate.variance, win_frequency: candidate.winFrequency, top_one_percent_frequency: candidate.topOnePercentFrequency, cash_frequency: candidate.cashFrequency, expected_duplicates: candidate.expectedDuplicates, expected_payout: candidate.expectedPayout, roi: candidate.roi, contest_metric_provenance: candidate.contestMetricProvenance ?? 'UNAVAILABLE' })));
   if (candidateRows.error) throw candidateRows.error;
   const calibration = await loadCashLineCalibration(db, String(run.tenant_id));
   let selection = selectLineups({ validatedSlate: workingSlate, researchPackage: research, optimizerPackage: optimizer, cashLineCalibration: calibration });
@@ -242,7 +243,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   }
   assertSelection(selection, optimizer);
   stages.selection = selection;
-  await saveStage(db, run, 'SELECTION', optimizer, selection, selection.status, selection.warnings ?? []);
+  await saveStage(db, run, 'SELECTION', { slate: workingSlate, research, optimizer }, selection, selection.status, selection.warnings ?? []);
   const selectionRun = await db.from('floyd_dfs_selection_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: 1, selection_package: selection, status: selection.status }).select('id').single();
   if (selectionRun.error) throw selectionRun.error;
   if (selection.selectedLineups.length) {

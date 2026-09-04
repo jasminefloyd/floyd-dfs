@@ -8,11 +8,14 @@ import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
+import { normalizeArticles } from '../src/lib/engine/researchEvidence';
 import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
+import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
 import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
+import { dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 
 const now = new Date('2026-08-23T12:00:00.000Z');
@@ -119,7 +122,7 @@ const testGppSelectionUnaffectedByCashLineParity = (): void => {
   const gppSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'GPP' } };
   const result = selectLineups({ validatedSlate: gppSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
   const chosen = optimizer.candidates.find((candidate) => candidate.id === result.selectedLineups[0].candidateId);
-  assert.equal(chosen?.tournamentRank, 1, 'GPP selection must rank by the tournament composite, ignoring cash-line probability entirely');
+  assert.equal(chosen?.heuristicTournamentRank ?? chosen?.tournamentRank, 1, 'GPP selection must rank by the heuristic tournament composite, ignoring cash-line probability entirely');
 };
 
 const testSelectionParity = (): void => {
@@ -142,7 +145,7 @@ const testSelectionWatchItemsParity = (): void => {
 const testAvailabilityParity = (): void => {
   const mlb = { ...baseSlate, sport: 'MLB' as const, league: 'MLB' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player One', team: 'CWS' }, { ...baseSlate.playerPool[1], playerName: 'Player Two', team: 'NYY' }] };
   const result = applyAvailabilitySnapshot(mlb, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: true, records: [{ playerName: 'Player One', team: 'CWS', status: 'CONFIRMED_STARTER', confirmed: true, battingOrder: 1 }] });
-  assert.equal(result.playerPool.length, 1); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
+  assert.equal(result.playerPool.length, 2, 'a confirmed lineup must not silently remove an otherwise unmapped player'); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER'); assert.equal(result.playerPool[1].availability?.status, 'UNKNOWN');
 };
 
 const testOutPlayersRemovedForNonMlbSportsParity = (): void => {
@@ -225,7 +228,7 @@ const testNoiseWidthReflectsRoleCertaintyParity = (): void => {
   const highP1 = highProjection.players.find((player) => player.playerId === 'p1')!;
   const highSpread = highP1.projectedOutcomes.ceilingP90 - highP1.projectedOutcomes.floorP20;
 
-  assert.ok(highSpread < lowSpread, 'a HIGH-certainty player should have a narrower floor/ceiling band than a LOW-certainty player projected from the same inputs');
+  assert.equal(highSpread, lowSpread, 'confidence must not mechanically widen or narrow performance variance for identical inputs');
 };
 
 const testDegradedAvailabilityParity = (): void => {
@@ -289,7 +292,7 @@ const testOwnershipEstimateReflectsVolatilityParity = (): void => {
   const volatileResult = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: volatileProjection }, { maxCandidates: 20 }, now);
   const stableCandidate = stableResult.candidates.find((candidate) => candidate.playerIds.includes('p1'))!;
   const volatileCandidate = volatileResult.candidates.find((candidate) => candidate.playerIds.includes('p1'))!;
-  assert.ok(volatileCandidate.ownershipEstimate < stableCandidate.ownershipEstimate, 'a lineup built from a higher-relative-variance player should get a lower ownership estimate (more leverage) than an identical-median, lower-variance lineup');
+  assert.ok(volatileCandidate.heuristicOwnershipProxy! < stableCandidate.heuristicOwnershipProxy!, 'a lineup built from a higher-relative-variance player should get a lower ownership proxy (more leverage) than an identical-median, lower-variance lineup');
 };
 
 const testAdjustmentStatusReflectsResolvedConflictsParity = (): void => {
@@ -456,7 +459,7 @@ const testMarketDerivedOwnershipNudgeParity = (): void => {
   const highLineup = result.candidates.find((candidate) => candidate.playerIds.includes('m1') && candidate.playerIds.includes('m2'));
   const lowLineup = result.candidates.find((candidate) => candidate.playerIds.includes('m3') && candidate.playerIds.includes('m4'));
   assert.ok(highLineup && lowLineup, 'both an all-above-average-team and an all-below-average-team lineup should be reachable candidates');
-  assert.ok(highLineup!.ownershipEstimate > lowLineup!.ownershipEstimate, 'an identical-quality lineup built from teams with an above-average implied total should get a higher ownership estimate (more chalk) than one from below-average teams');
+  assert.ok(highLineup!.heuristicOwnershipProxy! > lowLineup!.heuristicOwnershipProxy!, 'an identical-quality lineup built from teams with an above-average implied total should get a higher ownership proxy than one from below-average teams');
 
   // A slate where every team's implied total exactly equals the slate average produces an exact
   // 0 nudge (multiplier stays at exactly 1) -- the same "no nudge" outcome as no marketContext at
@@ -470,7 +473,7 @@ const testMarketDerivedOwnershipNudgeParity = (): void => {
   for (const candidate of noMarketResult.candidates) {
     const matched = neutralResult.candidates.find((item) => item.id === candidate.id);
     assert.ok(matched, 'the same rosterSlots combination should be generated regardless of marketContext presence');
-    assert.ok(Math.abs(matched!.ownershipEstimate - candidate.ownershipEstimate) < 1e-9, 'with no marketContext at all, ownership must fall back to exactly the prior (identical) behavior — no phantom nudge');
+    assert.ok(Math.abs(matched!.heuristicOwnershipProxy! - candidate.heuristicOwnershipProxy!) < 1e-9, 'with no marketContext at all, the ownership proxy must fall back to exactly the prior (identical) behavior — no phantom nudge');
   }
 };
 
@@ -540,8 +543,111 @@ const testContractParity = (): void => {
   assert.throws(() => assertSlate({ ...baseSlate, scoringRules: {} }), /scoring rules are required/);
 };
 
+const testGate1ScoringGoldenFixtures = (): void => {
+  assert.equal(dkMlbHitterFantasyPoints({ singles: 1, doubles: 1, triples: 1, homeRuns: 1, rbi: 2, runs: 1, walks: 1, hitByPitch: 1, stolenBases: 1 }), 41);
+  assert.equal(dkMlbPitcherFantasyPoints({ inningsPitched: 6, strikeouts: 8, wins: 1, earnedRuns: 2, hitsAllowed: 5, walksAllowed: 2 }), 25.3);
+  assert.equal(dkNflFantasyPoints({ passingYards: 350, passingTouchdowns: 3, interceptions: 1, rushingYards: 30, rushingTouchdowns: 1 }), 37);
+  assert.equal(dkNflFantasyPoints({ receptions: 8, receivingYards: 120, receivingTouchdowns: 2, fumblesLost: 1 }), 34);
+};
+
+const testGate1TypedAdjustmentParity = (): void => {
+  const nfl = { ...baseSlate, sport: 'NFL' as const, league: 'NFL' as const, scoringRules: { reception: { value: 1 }, receivingYards: { value: 0.1 }, rushingYards: { value: 0.1 }, receivingTouchdown: { value: 6 } }, playerPool: [{ ...baseSlate.playerPool[0], position: 'WR', projectionInputs: { snaps: 50, routes: 35, targets: 10, carries: 1, catchRate: 0.7, yardsPerTarget: 10, yardsPerCarry: 4, touchdownProbability: 0.2 } }] };
+  const adjustment = adjustSlate(nfl, { ...research, findings: [{ id: 'target', subjectId: 'p1', bucket: 'RECENT_ROLE_FORM', finding: 'Target share increased.', sourceName: 'test', sourceTier: 1, confidence: 'HIGH' }] }, now);
+  const projected = projectSlate(nfl, adjustment, now).players[0];
+  assert.equal(projected.adjustedOpportunity.targets, 10.8);
+  assert.equal(projected.adjustedOpportunity.catchRate, 0.7, 'TARGET_SHARE must not multiply catch rate');
+  assert.equal(projected.adjustedOpportunity.yardsPerTarget, 10, 'TARGET_SHARE must not multiply yards per target');
+};
+
+const testGate1RoleRedistributionAndMinutesParity = (): void => {
+  const slate = { ...baseSlate, playerPool: [
+    { ...baseSlate.playerPool[0], playerName: 'Out PG', team: 'A', position: 'PG' },
+    { ...baseSlate.playerPool[1], playerName: 'Direct PG', team: 'A', position: 'PG' },
+    { ...baseSlate.playerPool[2], playerName: 'Bench C', team: 'A', position: 'C' },
+  ] };
+  const researchWithOut: ResearchPackage = { ...research, findings: [{ id: 'out', subjectId: 'p1', bucket: 'AVAILABILITY', finding: 'Out for tonight.', sourceName: 'test', sourceTier: 1, confidence: 'HIGH' }] };
+  const adjustments = adjustSlate(slate, researchWithOut, now);
+  assert.equal(adjustments.adjustments.find((item) => item.playerId === 'p2')?.adjustments.at(-1)?.magnitude, 'MATERIAL');
+  assert.equal(adjustments.adjustments.find((item) => item.playerId === 'p3')?.adjustments.at(-1)?.magnitude, 'SMALL');
+  assert.equal(adjustments.adjustments.find((item) => item.playerId === 'p2')?.adjustments.at(-1)?.adjustmentType, 'MINUTES');
+
+  const basketballRules = { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } };
+  const minutesSlate = { ...slate, playerPool: slate.playerPool.slice(0, 2).map((player) => ({ ...player, projectionInputs: { expectedMinutes: 30, pointsPerMinute: 1, reboundsPerMinute: 0, assistsPerMinute: 0, stealsPerMinute: 0, blocksPerMinute: 0, turnoversPerMinute: 0, threesPerMinute: 0 } })), scoringRules: basketballRules };
+  const minutesAdjustment = adjustSlate(minutesSlate, { ...research, findings: minutesSlate.playerPool.map((player) => ({ id: `availability-${player.playerId}`, subjectId: player.playerId, bucket: 'AVAILABILITY' as const, finding: 'Active.', sourceName: 'test', sourceTier: 1 as const, confidence: 'HIGH' as const })) }, now);
+  const projected = projectSlate(minutesSlate, minutesAdjustment, now);
+  assert.equal(projected.players.reduce((sum, player) => sum + player.adjustedOpportunity.expectedMinutes, 0), 240, 'NBA team minutes must reconcile to 240');
+};
+
+const testGate1ResearchAttributionParity = (): void => {
+  const slate = { ...baseSlate, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player A' }, { ...baseSlate.playerPool[1], playerName: 'Player B' }] };
+  const findings = normalizeArticles([{ title: 'Availability update', sourceName: 'test', sourceTier: 1, summary: 'Player A is questionable. Player B starts if Player A sits.' }], slate, now);
+  assert.equal(findings.length, 3, 'each player-specific sentence context is retained for every named subject');
+  assert.ok(findings.some((finding) => finding.subjectId === 'p1' && finding.bucket === 'AVAILABILITY'));
+  assert.ok(findings.some((finding) => finding.subjectId === 'p2' && finding.bucket === 'RECENT_ROLE_FORM'));
+};
+
+const testGate1LineupDistributionParity = (): void => {
+  const slate = { ...baseSlate, rosterRules: { rosterSize: 2, slots: { G: { count: 1 }, F: { count: 1 } }, uniquePlayersRequired: true }, playerPool: baseSlate.playerPool.slice(0, 2) };
+  const packageWithJointSamples: ProjectionPackage = { ...projection, players: projection.players.slice(0, 2).map((player, index) => ({ ...player, simulatedFantasyPointSamples: index === 0 ? [0, 100] : [100, 0], projectedOutcomes: { floorP20: 0, medianP50: 50, ceilingP90: 100 } })) };
+  const result = optimizeLineups({ validatedSlate: slate, projectionPackage: packageWithJointSamples }, { maxCandidates: 10 }, now);
+  assert.equal(result.candidates[0].ceiling, 100, 'lineup ceiling must be computed from joint lineup samples, not summed player ceilings');
+};
+
+const testGate1OptimizerExhaustiveParity = (): void => {
+  const slate = { ...baseSlate, salaryCap: 20000, rosterRules: { rosterSize: 2, slots: { G: { count: 1 }, F: { count: 1 } }, uniquePlayersRequired: true }, playerPool: baseSlate.playerPool.slice(0, 4).map((player, index) => ({ ...player, team: index % 2 ? 'B' : 'A' })) };
+  const projections: ProjectionPackage = { ...projection, players: slate.playerPool.map((player, index) => ({ ...projection.players[0], playerId: player.playerId, salary: player.salary, projectedOutcomes: { floorP20: index + 1, medianP50: (index + 1) * 10, ceilingP90: (index + 1) * 12 }, simulatedFantasyPointSamples: [(index + 1) * 10, (index + 1) * 10] })) };
+  const result = optimizeLineups({ validatedSlate: slate, projectionPackage: projections }, { lineupMode: 'max_fpts', maxCandidates: 10 }, now);
+  const legalScores = slate.playerPool.flatMap((left, leftIndex) => slate.playerPool.flatMap((right, rightIndex) => leftIndex === rightIndex || left.team === right.team ? [] : [(leftIndex + 1) * 10 + (rightIndex + 1) * 10]));
+  assert.equal(result.candidates[0].median, Math.max(...legalScores), 'reference-sized optimizer output must match independently enumerated legal-lineup truth');
+  assert.ok(result.warnings.some((warning) => warning.includes('Exhaustive legal lineup enumeration')));
+};
+
+const testGate1IdentitySuffixParity = (): void => {
+  const slate = { ...baseSlate, sport: 'MLB' as const, league: 'MLB' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player Jr.', team: 'CWS' }] };
+  const result = applyAvailabilitySnapshot(slate, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, records: [{ playerName: 'Player', team: 'CHW', status: 'ACTIVE', confirmed: true }] });
+  assert.equal(result.playerPool[0].availability?.mappedBy, 'NAME_AND_TEAM');
+  assert.equal(result.playerPool[0].availability?.status, 'ACTIVE');
+};
+
+const testGate2SportDistributionAndFallbackParity = (): void => {
+  const basketballRules = { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } };
+  const slate = { ...baseSlate, sport: 'NBA' as const, league: 'NBA' as const, scoringRules: basketballRules, playerPool: baseSlate.playerPool.slice(0, 2).map((player) => ({ ...player, team: 'A', opponent: 'B', projectionInputs: { expectedMinutes: 30, pointsPerMinute: 1, reboundsPerMinute: 0.2, assistsPerMinute: 0.1, stealsPerMinute: 0.05, blocksPerMinute: 0.02, turnoversPerMinute: 0.1, threesPerMinute: 0.1 } })) };
+  const projected = projectSlate(slate, adjustSlate(slate, research, now), now);
+  assert.equal(projected.players[0].modelPath, 'SPORT_STRUCTURED');
+  assert.equal(projected.players[0].distribution?.family, 'SPORT_CORRELATED');
+  assert.equal(projected.players[0].distribution?.correlationGroup, projected.players[1].distribution?.correlationGroup, 'same verified team/opponent context must share a game correlation group');
+  assert.deepEqual(projected.players[0].simulatedFantasyPointSamples, projectSlate(slate, adjustSlate(slate, research, now), now).players[0].simulatedFantasyPointSamples, 'sport distributions must be deterministic for reproducible backtests');
+
+  const fallbackSlate = { ...slate, playerPool: [{ ...slate.playerPool[0], projectionInputs: undefined, providerFppg: 25 }] };
+  const fallback = projectSlate(fallbackSlate, adjustSlate(fallbackSlate, research, now), now).players[0];
+  assert.equal(fallback.modelPath, 'PROVIDER_FPPG_FALLBACK');
+  assert.equal(fallback.distribution?.family, 'AGGREGATE_FPPG');
+};
+
+const testGate2CalibrationMetricsParity = (): void => {
+  const packageForCalibration: ProjectionPackage = { ...projection, sport: 'NBA', players: projection.players.slice(0, 2).map((player, index) => ({ ...player, playerId: `cal-${index}`, projectedOutcomes: { floorP20: 8 + index, medianP50: 10 + index, ceilingP90: 14 + index }, componentProjection: { points: 10 + index } })) };
+  const metrics = evaluateProjectionCalibration(packageForCalibration, [{ playerId: 'cal-0', actualFantasyPoints: 12, actualComponents: { points: 12 }, actualPosition: 'G' }, { playerId: 'not-joined', actualFantasyPoints: 999 }, { playerId: 'cal-1', actualFantasyPoints: 9, actualComponents: { points: 9 }, actualPosition: 'F' }]);
+  assert.equal(metrics.sampleSize, 2, 'unjoined outcomes must not enter calibration metrics');
+  assert.equal(metrics.fantasyPointMae, 2);
+  assert.equal(metrics.componentMae.points, 2);
+  assert.equal(metrics.byRole.G.sampleSize, 1);
+  assert.deepEqual(validatePreLockBacktestRows([{ projectionGeneratedAt: '2026-08-23T11:00:00.000Z', lockTime: '2026-08-23T12:00:00.000Z', observation: { playerId: 'cal-0', actualFantasyPoints: 12 } }]), []);
+  assert.equal(validatePreLockBacktestRows([{ projectionGeneratedAt: '2026-08-23T12:00:00.000Z', lockTime: '2026-08-23T12:00:00.000Z', observation: { playerId: 'cal-0', actualFantasyPoints: 12 } }]).length, 1, 'post-lock projections must be rejected from pre-lock backtests');
+};
+
+const testGate3ContestSimulationParity = (): void => {
+  const slate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestSize: 10, paidPositions: 5, entryFee: 10, payoutStructure: [{ rank: 1, payout: 100 }, { rank: 2, payout: 50 }] } };
+  const candidates = optimizeLineups({ validatedSlate: slate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(candidates.contestSimulation?.status, 'COMPLETE');
+  assert.equal(candidates.contestSimulation?.fieldModel, 'HEURISTIC_CONSTRUCTION_PROXY');
+  assert.equal(candidates.contestSimulation?.payoutModel, 'CONTEST_PAYOUT_STRUCTURE');
+  assert.ok(candidates.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
+  assert.ok(candidates.candidates.every((candidate) => (candidate.winFrequency ?? -1) >= 0 && (candidate.winFrequency ?? 2) <= 1));
+  assert.ok(candidates.candidates.every((candidate) => (candidate.expectedDuplicates ?? -1) >= 0));
+};
+
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   await testMarketContextImpliedTotalParity();

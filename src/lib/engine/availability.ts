@@ -3,7 +3,7 @@ import type { SlatePlayer, Sport, ValidatedSlate } from './contracts.js';
 export interface AvailabilityRecord { playerName: string; team?: string; providerPlayerId?: string; status: NonNullable<SlatePlayer['availability']>['status']; confirmed: boolean; battingOrder?: number; updatedAt?: string; note?: string; }
 export interface AvailabilitySnapshot { source: string; retrievedAt: string; records: AvailabilityRecord[]; confirmedLineupAvailable: boolean; note?: string; }
 
-export function normalizeProviderName(value: string): string { return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+export function normalizeProviderName(value: string): string { return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, '').replace(/[^a-z0-9]/g, ''); }
 // Both DraftKings and provider (SportsDataIO/ESPN) team codes pass through this same function
 // before comparison, so it only matters that every known variant for one real team collapses
 // to the same value -- not which specific variant is picked as "canonical."
@@ -28,18 +28,14 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
     const records = byKey.get(identityKey(player.playerName, player.team)) ?? [];
     if (records.length !== 1) return { ...player, availability: { status: 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: records.length > 1 ? 'Provider identity match was ambiguous.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
     const record = records[0];
-    return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy: 'NAME_AND_TEAM' as const, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
+    return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy: 'NAME_AND_TEAM' as const, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
   const isOutOrInactive = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE';
   const removed = playerPool.filter(isOutOrInactive).length;
-  // MLB additionally requires an explicit CONFIRMED_STARTER/ACTIVE designation once a real
-  // confirmed batting order exists (non-starters have near-zero fantasy value there). Every
-  // other sport still must remove an explicit OUT/INACTIVE status -- this used to silently keep
-  // OUT players fully eligible for every non-MLB sport despite `removed`'s count/warning text
-  // claiming they were removed.
-  const filtered = slate.sport === 'MLB' && snapshot.confirmedLineupAvailable
-    ? playerPool.filter((player) => ['CONFIRMED_STARTER', 'ACTIVE'].includes(player.availability?.status ?? ''))
-    : playerPool.filter((player) => !isOutOrInactive(player));
+  // A confirmed lineup changes certainty, not identity eligibility. Only explicit non-participation
+  // removes a DraftKings player. UNKNOWN/UNMAPPED players remain eligible with visible low
+  // certainty so an incomplete provider response cannot silently delete valid players.
+  const filtered = playerPool.filter((player) => !isOutOrInactive(player));
   if (removed) warnings.push(`${removed} DraftKings player(s) removed after an explicit ${snapshot.source} OUT/INACTIVE status.`);
   warnings.push(snapshot.confirmedLineupAvailable ? `${snapshot.source} confirmed lineup state applied at ${snapshot.retrievedAt}.` : `${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
   return { ...slate, playerPool: filtered, validation: { ...slate.validation, warnings } };

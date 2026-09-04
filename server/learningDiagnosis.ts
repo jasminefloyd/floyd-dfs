@@ -9,6 +9,8 @@ export interface LineupDiagnosisInput {
   sport: string;
   lineupPayload: Json;
   actualDkPoints: number | null;
+  actualComponents?: Record<string, number>;
+  predictedComponents?: Record<string, number>;
   researchVersion: number;
   adjustmentVersion: number;
 }
@@ -52,7 +54,8 @@ export async function diagnoseLineupResult(db: SupabaseClient, input: LineupDiag
     else { errorStage = 'PROJECTION'; diagnosisText = 'Actual outcome fell materially outside the projected floor/ceiling range with no unresolved research gap or low-certainty adjustment flagged upstream.'; confidence = 'MEDIUM'; }
   }
 
-  const evidence = { withinRange, floor, median, ceiling, actual };
+  const componentErrors = Object.fromEntries(Object.entries(input.actualComponents ?? {}).flatMap(([key, actualComponent]) => { const predictedComponent = input.predictedComponents?.[key]; return Number.isFinite(actualComponent) && typeof predictedComponent === 'number' && Number.isFinite(predictedComponent) ? [[key, { actual: actualComponent, predicted: predictedComponent, error: actualComponent - predictedComponent }]] : []; }));
+  const evidence = { withinRange, floor, median, ceiling, actual, componentErrors, stageAttribution: errorStage };
   const diagnostic = { tenant_id: input.tenantId, generation_run_id: input.generationRunId, subject_type: 'GENERATED_LINEUP', subject_id: input.generatedLineupId, error_stage: errorStage, severity: errorStage === 'VARIANCE' ? 'LOW' : 'MEDIUM', confidence, assumption: `Projected floor ${floor}, median ${median}, ceiling ${ceiling}.`, actual_outcome: actual, evidence, diagnosis: diagnosisText };
   const inserted = await db.from('floyd_dfs_learning_diagnostics').insert(diagnostic).select('*').single();
   if (inserted.error) throw inserted.error;

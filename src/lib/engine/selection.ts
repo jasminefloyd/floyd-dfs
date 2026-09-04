@@ -10,7 +10,7 @@ export interface SelectionInput {
 
 export function selectLineups(input: SelectionInput, now = new Date()): SelectionPackage {
   const candidates = input.optimizerPackage.candidates;
-  if (!candidates.length) return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: [], optimizerGap: 'Optimizer returned no candidates for Selection.', warnings: [], status: 'BLOCKED' };
+  if (!candidates.length) return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: [], optimizerGap: 'Optimizer returned no candidates for Selection.', warnings: [], status: 'BLOCKED', engineState: 'MODEL_VALIDATION_REQUIRED' };
   const requested = Math.max(1, input.validatedSlate.contest.userEntryCount);
   const maximum = input.validatedSlate.contest.maxEntriesAllowed ?? requested;
   const count = Math.min(requested, maximum, candidates.length);
@@ -20,7 +20,7 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
   const nearDuplicateCount = selected.filter((candidate) => candidate.strategicSimilarity >= 0.8).length;
   if (nearDuplicateCount) warnings.push(`${nearDuplicateCount} of ${selected.length} selected lineups closely overlap (>=80% shared players) with another selected lineup because the candidate pool didn't contain enough sufficiently distinct high-quality builds.`);
-  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE' };
+  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED' };
 }
 
 // Default to the tournament-composite rank (already balances median/ceiling/frequency) — sorting
@@ -32,9 +32,14 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
 // shrinks the portfolio: choosePortfolio always fills from this ranking regardless of whether
 // any candidate actually clears the 85% target -- see explain() for how a shortfall is disclosed.
 function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined): LineupCandidate[] {
-  if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (resolveCashLineProbability(b, calibration).probability ?? -1) - (resolveCashLineProbability(a, calibration).probability ?? -1));
-  return [...candidates].sort((a, b) => a.tournamentRank - b.tournamentRank);
+  if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (cashRankScore(b, slate, calibration) - cashRankScore(a, slate, calibration)));
+  const hasContestMetrics = candidates.some((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION');
+  if (hasContestMetrics) return [...candidates].sort((a, b) => contestRankScore(b) - contestRankScore(a));
+  return [...candidates].sort((a, b) => heuristicTournamentRankOf(a) - heuristicTournamentRankOf(b));
 }
+
+function contestRankScore(candidate: LineupCandidate): number { return candidate.roi ?? candidate.topOnePercentFrequency ?? candidate.winFrequency ?? Number.NEGATIVE_INFINITY; }
+function cashRankScore(candidate: LineupCandidate, slate: ValidatedSlate, calibration: CashLineCalibration | undefined): number { return candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION' && slate.contest.paidPositions !== undefined ? (candidate.cashFrequency ?? -1) : (resolveCashLineProbability(candidate, calibration).probability ?? -1); }
 
 export interface CashLineResolution { probability?: number; confidence: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE'; }
 // Prefers real, historically-calibrated probability once enough resolved contest results exist
@@ -113,7 +118,7 @@ function explain(candidate: LineupCandidate, bulletNumber: number, input: Select
   // available candidate (choosePortfolio never blocks), this only makes clear when that candidate
   // didn't actually clear the 85% target rather than silently presenting it as if it had.
   if (isCashGame && cashLine.probability !== undefined && cashLine.probability < CASH_LINE_TARGET_PROBABILITY) rationale.push(`Best available cash-line confidence is ${Math.round(cashLine.probability * 100)}% (${cashLine.confidence === 'CALIBRATED' ? 'calibrated' : 'simulated estimate'}), below the ${Math.round(CASH_LINE_TARGET_PROBABILITY * 100)}% target — no candidate in this pool cleared it.`);
-  if (candidate.candidateTypes.includes('LEVERAGE') || candidate.candidateTypes.includes('LOW_DUPLICATION')) rationale.push('Leverage/duplication figures are a salary-efficiency heuristic, not real field-ownership data.');
+  if (candidate.candidateTypes.includes('LEVERAGE') || candidate.candidateTypes.includes('LOW_DUPLICATION')) rationale.push('Leverage and duplication figures are construction heuristics, not real field-ownership data.');
   if (candidate.strategicSimilarity >= 0.8) rationale.push('This lineup closely overlaps with another selected lineup due to a limited pool of distinct high-quality builds.');
   const watchItems = watchItemsFor(input.researchPackage, candidate.playerIds);
   return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: watchItems.length ? 'READY_WITH_WATCH' : 'READY', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
@@ -134,3 +139,4 @@ function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): st
 
 export function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }
 function format(value: number): string { return Number.isFinite(value) ? value.toFixed(1) : '—'; }
+function heuristicTournamentRankOf(candidate: LineupCandidate): number { return candidate.heuristicTournamentRank ?? candidate.tournamentRank ?? Number.MAX_SAFE_INTEGER; }

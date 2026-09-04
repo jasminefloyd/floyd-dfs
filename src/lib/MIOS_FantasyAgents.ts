@@ -154,6 +154,7 @@ export interface Player {
 }
 
 export type ReadinessStatus = 'ready' | 'caution' | 'blocked';
+export type EngineValidationState = 'MODEL_VALIDATION_REQUIRED';
 
 export interface ConfidenceBreakdown {
   data_completeness: number;
@@ -226,6 +227,7 @@ export interface SourceHealth {
 
 export interface Readiness {
   status: ReadinessStatus;
+  engine_state: EngineValidationState;
   eligible_for_lineups: boolean;
   eligible_for_tournament: boolean;
   hard_blocks: string[];

@@ -34,29 +34,35 @@ function teamAliases(team: string | undefined): string[] {
 }
 
 export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedSlate, now = new Date()): ResearchFinding[] {
-  return articles.map((article, index) => {
-    const text = `${article.title} ${article.summary ?? ''}`.toLowerCase();
-    const player = slate.playerPool.find((candidate) => termMatchesText(candidate.playerName, text));
-    const keywordBucket: ResearchBucket = /injur|out|questionable|available|lineup|starting|scratch/.test(text) ? 'AVAILABILITY' : /role|minutes|snap|usage|starter|form|recent/.test(text) ? 'RECENT_ROLE_FORM' : /odds|line|spread|total|market/.test(text) ? 'MARKET_SIGNALS' : /sentiment|chalk|ownership|popular/.test(text) ? 'FIELD_SENTIMENT' : /weather|wind|pace|matchup|defense|course|venue/.test(text) ? 'MATCHUP_ENVIRONMENT' : /playoff|seed|eliminat|qualif|advanc|rest|standings/.test(text) ? 'COMPETITIVE_CONTEXT' : 'NEWS_EXTERNAL_CONTEXT';
-    // Tier 4 (Reddit/social/unverified) sources may only ever populate FIELD_SENTIMENT — never a factual bucket, regardless of keyword match.
-    const bucket: ResearchBucket = article.sourceTier === 4 ? 'FIELD_SENTIMENT' : keywordBucket;
+  return articles.flatMap((article, index) => {
+    const sourceText = [article.title, article.summary, article.content].filter(Boolean).join(' ');
+    const sentences = sourceText.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+    const contexts = sentences.length ? sentences : [sourceText];
     const publishedAt = article.publishedAt;
     const ageMinutes = publishedAt ? Math.max(0, Math.floor((now.getTime() - Date.parse(publishedAt)) / 60_000)) : undefined;
-    return {
-      id: stableId(`${slate.slateId}:${article.url ?? article.title}:${index}`),
-      bucket,
-      subjectType: player ? 'PLAYER' : 'EVENT',
-      subjectId: player?.playerId ?? slate.event.eventId,
-      finding: article.summary || article.title,
-      sourceUrl: article.url,
-      sourceName: article.sourceName,
-      sourceTier: article.sourceTier,
-      sourcePurpose: bucket === 'FIELD_SENTIMENT' ? 'Field sentiment only; not factual player evidence.' : 'External context for the exact slate.',
-      publishedAt,
-      retrievedAt: now.toISOString(),
-      confidence: article.sourceTier <= 2 ? 'HIGH' : article.sourceTier === 3 ? 'MEDIUM' : 'LOW',
-      metadata: { title: article.title, tags: article.tags ?? [], ageMinutes },
-    };
+    return contexts.flatMap((context, sentenceIndex) => {
+      const text = context.toLowerCase();
+      const subjects = slate.playerPool.filter((candidate) => termMatchesText(candidate.playerName, context));
+      const keywordBucket: ResearchBucket = /injur|\bout\b|questionable|available|scratched|inactive|ruled out/.test(text) ? 'AVAILABILITY' : /role|minutes|snap|usage|starter|starting|starts|form|recent|routes|batting order/.test(text) ? 'RECENT_ROLE_FORM' : /odds|line|spread|total|market/.test(text) ? 'MARKET_SIGNALS' : /sentiment|chalk|ownership|popular/.test(text) ? 'FIELD_SENTIMENT' : /weather|wind|pace|matchup|defense|course|venue/.test(text) ? 'MATCHUP_ENVIRONMENT' : /playoff|seed|eliminat|qualif|advanc|rest|standings/.test(text) ? 'COMPETITIVE_CONTEXT' : 'NEWS_EXTERNAL_CONTEXT';
+      // Tier 4 (Reddit/social/unverified) sources may only ever populate FIELD_SENTIMENT — never a factual bucket.
+      const bucket: ResearchBucket = article.sourceTier === 4 ? 'FIELD_SENTIMENT' : keywordBucket;
+      const targets = subjects.length ? subjects : [undefined];
+      return targets.map((player) => ({
+        id: stableId(`${slate.slateId}:${article.url ?? article.title}:${index}:${sentenceIndex}:${player?.playerId ?? 'event'}`),
+        bucket,
+        subjectType: player ? 'PLAYER' as const : 'EVENT' as const,
+        subjectId: player?.playerId ?? slate.event.eventId,
+        finding: context,
+        sourceUrl: article.url,
+        sourceName: article.sourceName,
+        sourceTier: article.sourceTier,
+        sourcePurpose: bucket === 'FIELD_SENTIMENT' ? 'Field sentiment only; not factual player evidence.' : 'External context for the exact player/entity sentence.',
+        publishedAt,
+        retrievedAt: now.toISOString(),
+        confidence: article.sourceTier <= 2 ? 'HIGH' as const : article.sourceTier === 3 ? 'MEDIUM' as const : 'LOW' as const,
+        metadata: { title: article.title, context, sentenceIndex, tags: article.tags ?? [], ageMinutes },
+      }));
+    });
   });
 }
 

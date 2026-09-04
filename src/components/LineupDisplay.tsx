@@ -69,7 +69,6 @@ export interface Lineup {
   confidence_score: number;
   cash_line_confidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
   contest_kind?: 'CASH' | 'GPP' | 'UNKNOWN';
-  simulation_ev?: number;
   ceiling_score?: number;
   floor_score?: number;
   p99_score?: number;
@@ -77,7 +76,7 @@ export interface Lineup {
   top_n_rate?: number;
   expected_payout?: number;
   ownership_sum?: number;
-  lineup_type?: 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
+  lineup_type?: 'optimizer_ranked' | 'high_ev' | 'contrarian_tournament' | 'late_swap_candidate';
   lineup_intelligence_score?: number;
   stack_quality_score?: number;
   context_edge_score?: number;
@@ -131,7 +130,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
     <div className="space-y-4">
       {manifest?.readiness?.cautions?.length ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
-          <span className="font-black">Trust note:</span> {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
+          <span className="font-black">Engine state: {manifest.readiness.engine_state}.</span> This lineup set is not validated for real-money selection. {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
         </div>
       ) : null}
       {manifest?.sport?.toLowerCase() === 'mlb' ? (
@@ -192,9 +191,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </p>
               </div>
 
-              {(lineup.simulation_ev || lineup.ceiling_score) ? (
+              {(lineup.projected_points || lineup.ceiling_score) ? (
                 <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200">
-                  <Metric label="Expected FPTS" value={lineup.simulation_ev?.toFixed(1) ?? '—'} />
+                  <Metric label="Median FPTS" value={lineup.projected_points.toFixed(1)} />
                   <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
                 </div>
               ) : null}
@@ -428,7 +427,8 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function lineupTypeLabel(type: NonNullable<Lineup['lineup_type']>): string {
+  if (type === 'optimizer_ranked') return 'Optimizer Ranked';
   if (type === 'contrarian_tournament') return 'Contrarian Tournament';
   if (type === 'late_swap_candidate') return 'Late Swap Candidate';
-  return 'High EV';
+  return 'Optimizer Ranked';
 }

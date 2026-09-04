@@ -71,7 +71,7 @@ function deriveHitterInputs(row: Record<string, unknown>, gamesPlayed = 1): Reco
   const rbi = readNumber(row, ['RunsBattedIn', 'RBI', 'rbi']) ?? 0;
   const runs = readNumber(row, ['Runs', 'runs']) ?? 0;
   const stolenBases = readNumber(row, ['StolenBases', 'stolenBases']) ?? 0;
-  return { expectedPA: plateAppearances / gamesPlayed, hitRate: hits / plateAppearances, totalBasesPerPA: totalBases / plateAppearances, rbiPerPA: rbi / plateAppearances, runsPerPA: runs / plateAppearances, stolenBasesPerPA: stolenBases / plateAppearances };
+  return { expectedPA: plateAppearances / gamesPlayed, hitRate: hits / plateAppearances, singlesPerPA: singles / plateAppearances, doublesPerPA: doubles / plateAppearances, triplesPerPA: triples / plateAppearances, homeRunsPerPA: homeRuns / plateAppearances, walksPerPA: walks / plateAppearances, hitByPitchPerPA: hitByPitch / plateAppearances, totalBasesPerPA: totalBases / plateAppearances, rbiPerPA: rbi / plateAppearances, runsPerPA: runs / plateAppearances, stolenBasesPerPA: stolenBases / plateAppearances };
 }
 
 // PlayerSeasonStats rows carry a batter/pitcher split -- a pitcher's own real strikeouts/walks/

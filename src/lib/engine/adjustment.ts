@@ -60,7 +60,7 @@ export function netOpportunityDirectionFrom(adjustments: AdjustmentItem[]): Play
 function adjustPlayer(playerId: string, sport: Sport, findings: ResearchFinding[]): PlayerAdjustment {
   const evidence = findings.filter((finding) => finding.bucket !== 'FIELD_SENTIMENT');
   const interpreter = interpreterForSport(sport);
-  const adjustments = evidence.flatMap((finding) => finding.bucket === 'COMPETITIVE_CONTEXT' ? interpretCompetitiveContext(finding) : interpreter(finding));
+  const adjustments = dedupeAdjustments(evidence.flatMap((finding) => finding.bucket === 'COMPETITIVE_CONTEXT' ? interpretCompetitiveContext(finding) : interpreter(finding)));
   const neutral: AdjustmentItem = { adjustmentType: 'EVIDENCE_STATUS', direction: 'NEUTRAL', magnitude: 'NONE', rationale: 'No player-specific factual evidence was retrieved; no opportunity change is asserted.', evidenceFindingIds: [], confidence: 'LOW' };
   const applied = adjustments.length ? adjustments : [neutral];
   const roleCertainty = evidence.length === 0 ? 'LOW' : evidence.length >= 3 ? 'HIGH' : 'MEDIUM';
@@ -77,16 +77,55 @@ function redistributeForUnavailablePlayers(slate: ValidatedSlate, adjustments: P
     const outPlayer = playersById.get(outAdjustment.playerId);
     const groundingFindingId = outAdjustment.adjustments.find((item) => item.adjustmentType === 'AVAILABILITY')?.evidenceFindingIds?.[0];
     if (!outPlayer?.team || !groundingFindingId) continue;
-    const teammates = slate.playerPool.filter((player) => player.team === outPlayer.team && player.playerId !== outPlayer.playerId);
-    for (const teammate of teammates) {
+    const teammates = slate.playerPool.filter((player) => player.team === outPlayer.team && player.playerId !== outPlayer.playerId)
+      .map((player) => ({ player, score: beneficiaryScore(slate.sport, outPlayer.position, player.position) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 3);
+    for (const { player: teammate, score } of teammates) {
       const current = byId.get(teammate.playerId);
       if (!current || isMajorDownAvailability(current)) continue;
-      const redistribution: AdjustmentItem = { adjustmentType: 'REDISTRIBUTION', direction: 'UP', magnitude: 'SMALL', rationale: `${outPlayer.playerName} is unavailable; expect some of that opportunity to shift to same-team players including ${teammate.playerName}.`, evidenceFindingIds: [groundingFindingId], confidence: 'LOW' };
+      const magnitude: Magnitude = score >= 5 ? 'MATERIAL' : score >= 3 ? 'MODERATE' : 'SMALL';
+      const redistribution: AdjustmentItem = { adjustmentType: redistributionDimension(slate.sport, teammate.position), direction: 'UP', magnitude, rationale: `${outPlayer.playerName} is unavailable; role proximity indicates that ${teammate.playerName} is a direct same-team opportunity beneficiary.`, evidenceFindingIds: [groundingFindingId], confidence: 'LOW' };
       const mergedAdjustments = [...current.adjustments, redistribution];
       byId.set(teammate.playerId, { ...current, adjustments: mergedAdjustments, netOpportunityDirection: netOpportunityDirectionFrom(mergedAdjustments), netSignedMagnitude: netSignedMagnitude(mergedAdjustments), keyDeltas: [...current.keyDeltas, redistribution.rationale ?? ''] });
     }
   }
   return adjustments.map((adjustment) => byId.get(adjustment.playerId) ?? adjustment);
+}
+
+function beneficiaryScore(sport: Sport, unavailablePosition?: string, teammatePosition?: string): number {
+  const out = (unavailablePosition ?? '').toUpperCase();
+  const teammate = (teammatePosition ?? '').toUpperCase();
+  if (sport === 'NBA' || sport === 'WNBA') {
+    if (out === 'PG') return teammate === 'PG' ? 5 : ['SG', 'SF'].includes(teammate) ? 3 : 1;
+    if (['SG', 'SF', 'PF', 'C'].includes(out)) return teammate === out ? 5 : ['SG', 'SF', 'PF', 'C'].includes(teammate) ? 3 : 1;
+  }
+  if (sport === 'NFL') {
+    if (out === 'QB') return ['WR', 'TE', 'RB'].includes(teammate) ? 4 : 1;
+    if (['WR', 'TE'].includes(out)) return teammate === out ? 5 : ['WR', 'TE', 'RB'].includes(teammate) ? 3 : 1;
+    if (out === 'RB') return teammate === 'RB' ? 5 : ['WR', 'TE'].includes(teammate) ? 2 : 1;
+  }
+  if (sport === 'MLB' && !/^(SP|RP|P)$/.test(out)) return /^(C|1B|2B|3B|SS|OF|DH)$/.test(teammate) ? 3 : 0;
+  return 0;
+}
+
+function redistributionDimension(sport: Sport, teammatePosition?: string): string {
+  const position = (teammatePosition ?? '').toUpperCase();
+  if (sport === 'NBA' || sport === 'WNBA') return 'MINUTES';
+  if (sport === 'NFL') return position === 'RB' ? 'CARRY_SHARE' : 'TARGET_SHARE';
+  if (sport === 'MLB') return 'PLATE_APPEARANCES';
+  return 'ROLE_OPPORTUNITY';
+}
+
+function dedupeAdjustments(items: AdjustmentItem[]): AdjustmentItem[] {
+  const seen = new Map<string, AdjustmentItem>();
+  for (const item of items) {
+    const evidence = [...(item.evidenceFindingIds ?? [])].sort().join(',');
+    const key = `${evidence}:${item.adjustmentType ?? 'UNKNOWN'}`;
+    seen.set(key, item);
+  }
+  return [...seen.values()];
 }
 
 function interpreterForSport(sport: Sport): (finding: ResearchFinding) => AdjustmentItem[] {

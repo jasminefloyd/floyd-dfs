@@ -294,7 +294,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
     <div className="space-y-4 text-slate-900">
       <div>
         <p className="text-[11px] font-black uppercase tracking-wide text-cyan-700">Build A Slate</p>
-        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Build Tournament Lineups</h2>
+        <h2 className="mt-1 text-xl font-black text-[#0b1f3a]">Build DFS Lineups</h2>
         <p className="mt-1 text-sm text-slate-500">Pick a sport, contest type, slate, and payout goal.</p>
       </div>
 
@@ -349,8 +349,8 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
             className={fieldClass}
           >
             <option value="max_fpts">Max Fantasy Points</option>
-            <option value="tournament">Tournament EV</option>
-            <option value="balanced_ev">Balanced EV</option>
+            <option value="tournament">Tournament ranking (heuristic)</option>
+            <option value="balanced_ev">Balanced ranking (heuristic)</option>
             <option value="safe">Cash / Safe</option>
           </select>
         </label>

@@ -63,12 +63,21 @@ export interface SlatePlayer {
     retrievedAt: string;
     providerPlayerId?: string;
     mappedBy?: 'NAME_AND_TEAM' | 'UNMAPPED';
+    battingOrder?: number;
     note?: string;
   };
   /** Real Vegas market data (implied team total from game total + spread) for this player's
    * team, when a match against The Odds API's data was found -- see oddsProvider.ts's
    * getTeamMarketContext. Absent (not fabricated) when the fetch failed or no team match. */
   marketContext?: { impliedTeamTotal: number; spread: number; gameTotal: number };
+  /** Optional provider-derived context. Missing fields are unknown, never inferred. */
+  sportContext?: {
+    nba?: { activeRotation?: boolean; starter?: boolean; minutesP10?: number; minutesP50?: number; minutesP90?: number; paceMultiplier?: number; usageMultiplier?: number };
+    mlb?: { battingOrder?: number; expectedPA?: number; platoonMultiplier?: number; parkRunMultiplier?: number; opposingStarterQuality?: number; bullpenQuality?: number; weatherRunMultiplier?: number };
+    nfl?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
+    golf?: { strokesGainedTotal?: number; courseFit?: number; weatherMultiplier?: number; cutProbability?: number; finishPositionP50?: number };
+  };
+  projectedOwnership?: { classic?: number; captain?: number; utility?: number; source: 'PROVIDER' | 'CALIBRATED_MODEL'; observedAt?: string };
 }
 
 export interface ValidatedSlate {
@@ -99,6 +108,8 @@ export interface ValidatedSlate {
     cashLine?: number;
     contestKind?: 'CASH' | 'GPP' | 'UNKNOWN';
     paidPositions?: number;
+    entryFee?: number;
+    payoutStructure?: Array<{ rank: number; payout: number }>;
   };
   salaryCap: number;
   rosterRules: RosterRules;
@@ -165,11 +176,19 @@ export interface PlayerProjection {
   opportunityDelta: Record<string, number>;
   componentProjection: Record<string, number>;
   projectedOutcomes: { floorP20: number; medianP50: number; ceilingP90: number };
+  simulatedFantasyPointSamples?: number[];
   salaryEfficiency: { medianPer1k: number; ceilingPer1k: number };
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
   uncertaintyFactors: string[];
   watchDependencies: string[];
   modelVersion: string;
+  /** Present on new projections; optional only for persisted pre-Gate-2 records. */
+  modelPath?: 'SPORT_STRUCTURED' | 'PROVIDER_FPPG_FALLBACK';
+  distribution?: {
+    family: 'SPORT_CORRELATED' | 'AGGREGATE_FPPG';
+    correlationGroup?: string;
+    drivers: string[];
+  };
 }
 
 export interface ProjectionPackage {
@@ -185,7 +204,7 @@ export interface ProjectionPackage {
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
 }
 
-export type CandidateType = 'HIGHEST_MEDIAN' | 'HIGHEST_CEILING' | 'BEST_TOURNAMENT_EV' | 'LEVERAGE' | 'LOW_DUPLICATION' | 'ALTERNATE_GAME_SCRIPT';
+export type CandidateType = 'HIGHEST_MEDIAN' | 'HIGHEST_CEILING' | 'HEURISTIC_TOURNAMENT_RANK' | 'LEVERAGE' | 'LOW_DUPLICATION' | 'ALTERNATE_GAME_SCRIPT';
 export type DuplicationRisk = 'LOW' | 'MEDIUM' | 'HIGH';
 
 export interface ObjectiveProfile {
@@ -207,19 +226,44 @@ export interface LineupCandidate {
   median: number;
   ceiling: number;
   correlationScore: number;
-  optimalLineupFrequency: number;
-  topOnePercentFrequency: number;
-  ownershipEstimate: number;
-  leverageScore: number;
-  duplicationRisk: DuplicationRisk;
-  estimatedDuplicates: number;
+  /** Deterministic ranking score; not a simulated frequency or contest EV. */
+  heuristicTournamentScore?: number;
+  /** Salary/value and construction proxy; not measured field ownership. */
+  heuristicOwnershipProxy?: number;
+  heuristicLeverageScore?: number;
+  heuristicDuplicationRisk?: DuplicationRisk;
+  /** Construction-risk proxy; not an expected duplicate count. */
+  heuristicDuplicationRiskScore?: number;
   medianRank: number;
   ceilingRank: number;
-  tournamentRank: number;
+  heuristicTournamentRank?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  optimalLineupFrequency?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  topOnePercentFrequency?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  ownershipEstimate?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  leverageScore?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  duplicationRisk?: DuplicationRisk;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  estimatedDuplicates?: number;
+  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
+  tournamentRank?: number;
   candidateTypes: CandidateType[];
   gameScriptCluster: string;
   strategicSimilarity: number;
   riskFlags: string[];
+  /** Contest metrics computed from explicit joint field simulations. */
+  simulatedScoreSamples?: number[];
+  variance?: number;
+  winFrequency?: number;
+  cashFrequency?: number;
+  expectedDuplicates?: number;
+  expectedPayout?: number;
+  roi?: number;
+  contestMetricProvenance?: 'JOINT_FIELD_SIMULATION' | 'UNAVAILABLE';
   cashLineProbability?: number;
 }
 
@@ -234,7 +278,16 @@ export interface OptimizerPackage {
   warnings: string[];
   gaps: string[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
+  engineState: 'MODEL_VALIDATION_REQUIRED';
   cashLineEstimate?: { value: number; source: 'MANUAL' | 'SIMULATED' };
+  contestSimulation?: {
+    status: 'COMPLETE' | 'UNAVAILABLE';
+    simulations: number;
+    fieldEntries?: number;
+    fieldModel: 'HEURISTIC_CONSTRUCTION_PROXY' | 'PROJECTED_OWNERSHIP';
+    payoutModel: 'CONTEST_PAYOUT_STRUCTURE' | 'UNAVAILABLE';
+    reason?: string;
+  };
 }
 
 export interface ResearchFinding {
@@ -365,4 +418,5 @@ export interface SelectionPackage {
   optimizerGap?: string;
   warnings: string[];
   status: 'COMPLETE' | 'BLOCKED';
+  engineState: 'MODEL_VALIDATION_REQUIRED';
 }
