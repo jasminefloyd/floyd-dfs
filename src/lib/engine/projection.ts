@@ -15,13 +15,13 @@ const REQUIRED_GOLF = ['birdiesPerRound', 'eaglesPerRound', 'bogeysPerRound', 'p
 // Noise width feeds simulateScores' floor/ceiling band. Grounded in signals the pipeline
 // already computes -- roleCertainty (evidence-backed) as a coarse tier, refined by how much
 // corroborating evidence exists -- rather than a single flat width for every player and sport.
-const PERFORMANCE_NOISE_WIDTH: Record<Sport | 'FPPG', number> = { NBA: 0.2, WNBA: 0.2, NFL: 0.24, MLB: 0.28, GOLF: 0.22, FPPG: 0.2 };
+const PERFORMANCE_NOISE_WIDTH: Record<Sport | 'FPPG', number> = { NBA: 0.2, WNBA: 0.2, NFL: 0.24, CFB: 0.26, MLB: 0.28, GOLF: 0.22, FPPG: 0.2 };
 function noiseWidthFor(sport: Sport | 'FPPG'): number { return PERFORMANCE_NOISE_WIDTH[sport]; }
 
 function requiredFieldsFor(sport: Sport, player: SlatePlayer): string[] {
   if (sport === 'NBA' || sport === 'WNBA') return REQUIRED_BASKETBALL;
   if (sport === 'MLB') return isPitcher(player) ? REQUIRED_MLB_PITCHER : REQUIRED_MLB_HITTER;
-  if (sport === 'NFL') return isQuarterback(player) ? REQUIRED_NFL_QB : REQUIRED_NFL_SKILL;
+  if (sport === 'NFL' || sport === 'CFB') return isQuarterback(player) ? REQUIRED_NFL_QB : REQUIRED_NFL_SKILL;
   return REQUIRED_GOLF;
 }
 
@@ -72,13 +72,18 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const adjusted = applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
   const components = componentsFor(slate, player, adjusted);
   const rules = scoringRulesFor(slate, components);
-  const median = scoreComponents(components, rules);
+  const analyticalMedian = scoreComponents(components, rules);
   const noiseWidth = noiseWidthFor(slate.sport);
   const samples = simulateSportScores(slate.sport, player, components, rules, `${player.playerId}:${slate.sport}`, noiseWidth);
   const orderedSamples = [...samples].sort((a, b) => a - b);
   const floor = quantile(orderedSamples, 0.2);
+  // Report all outcome quantiles from the same simulated distribution. The analytical
+  // score can sit outside the sampled band when scoring includes asymmetric negative
+  // components (for example CFB interceptions), which would violate floor <= median <= ceiling.
+  const median = quantile(orderedSamples, 0.5);
   const ceiling = quantile(orderedSamples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
+  if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling reflect sport performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
   const opportunityDelta = Object.fromEntries(Object.keys(values).map((key) => [key, (adjusted[key] ?? 0) - (values[key] ?? 0)]));
@@ -88,9 +93,31 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
 function componentsFor(slate: ValidatedSlate, player: SlatePlayer, v: Record<string, number>): Record<string, number> {
   const sport = slate.sport;
   if (sport === 'NBA' || sport === 'WNBA') return { points: v.expectedMinutes * v.pointsPerMinute, threePointersMade: v.expectedMinutes * v.threesPerMinute, rebounds: v.expectedMinutes * v.reboundsPerMinute, assists: v.expectedMinutes * v.assistsPerMinute, steals: v.expectedMinutes * v.stealsPerMinute, blocks: v.expectedMinutes * v.blocksPerMinute, turnovers: v.expectedMinutes * v.turnoversPerMinute };
-  if (sport === 'NFL') {
-    if (isQuarterback(player)) { const completions = v.passAttempts * v.completionRate; return { passingYards: completions * v.yardsPerCompletion, passingTouchdown: v.passAttempts * v.passingTouchdownRate, interception: v.passAttempts * v.interceptionRate, rushingYards: v.carries * v.yardsPerCarry, rushingTouchdown: v.touchdownProbability }; }
-    return { reception: v.targets * v.catchRate, receivingYards: v.targets * v.yardsPerTarget, rushingYards: v.carries * v.yardsPerCarry, receivingTouchdown: v.touchdownProbability };
+  if (sport === 'NFL' || sport === 'CFB') {
+    if (isQuarterback(player)) {
+      const completions = v.passAttempts * v.completionRate;
+      const passingYards = completions * v.yardsPerCompletion;
+      const rushingYards = v.carries * v.yardsPerCarry;
+      return {
+        passingYards,
+        passingTouchdown: v.passAttempts * v.passingTouchdownRate,
+        passingYardBonus: sport === 'CFB' && passingYards >= 300 ? 3 : 0,
+        interception: v.passAttempts * v.interceptionRate,
+        rushingYards,
+        rushingTouchdown: v.touchdownProbability,
+        ...(sport === 'CFB' ? { rushingYardBonus: rushingYards >= 100 ? 3 : 0 } : {}),
+      };
+    }
+    const receivingYards = v.targets * v.yardsPerTarget;
+    const rushingYards = v.carries * v.yardsPerCarry;
+    return {
+      reception: v.targets * v.catchRate,
+      receivingYards,
+      receivingTouchdown: v.touchdownProbability,
+      ...(sport === 'CFB' ? { receivingYardBonus: receivingYards >= 100 ? 3 : 0 } : {}),
+      rushingYards,
+      ...(sport === 'CFB' ? { rushingYardBonus: rushingYards >= 100 ? 3 : 0 } : {}),
+    };
   }
   if (sport === 'MLB') {
     if (isPitcher(player)) return { inningPitched: v.expectedInnings, strikeout: v.expectedInnings * v.strikeoutsPerInning, walkAgainst: v.expectedInnings * v.walksPerInning, hitAgainst: v.expectedInnings * v.hitsAllowedPerInning, earnedRun: v.expectedInnings * v.earnedRunsPerInning };
@@ -115,8 +142,8 @@ function scoringRulesFor(slate: ValidatedSlate, components: Record<string, numbe
 
 function scoreComponents(components: Record<string, number>, rules: Record<string, { value: number }>): number { for (const [key, value] of Object.entries(components)) { if (!Number.isFinite(value)) throw new Error(`Projection produced a non-finite scoring component: ${key}.`); if (!rules[key] || !Number.isFinite(rules[key].value)) throw new Error(`Projection scoring component ${key} is missing from the DraftKings scoring contract.`); } return Object.entries(components).reduce((total, [key, value]) => total + value * rules[key].value, 0); }
 function simulateSportScores(sport: Sport | 'FPPG', player: SlatePlayer, components: Record<string, number>, rules: Record<string, { value: number }>, seedText: string, noiseWidth: number): number[] { let seed = hash(seedText); let environmentSeed = hash(`${sport}:${gameGroup(player)}`); const scores: number[] = []; for (let i = 0; i < SIMULATION_RUNS; i += 1) { environmentSeed = next(environmentSeed); const gameNoise = (environmentSeed / 4294967296 - 0.5) * sportEnvironmentWidth(sport); const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => { seed = next(seed); const playerNoise = (seed / 4294967296 - 0.5) * noiseWidth; const totalNoise = sport === 'FPPG' ? playerNoise : gameNoise * 0.7 + playerNoise * 0.3; return [key, Math.max(0, value * (1 + totalNoise))]; })); scores.push(scoreComponents(sampled, rules)); } return scores; }
-function distributionFor(sport: Sport, player: SlatePlayer): PlayerProjection['distribution'] { if (sport === 'NBA' || sport === 'WNBA') return { family: 'SPORT_CORRELATED', correlationGroup: `${sport}:${gameGroup(player)}`, drivers: ['active rotation', 'minutes conservation', 'shared game environment', 'role-rate variance'] }; if (sport === 'NFL') return { family: 'SPORT_CORRELATED', correlationGroup: `NFL:${gameGroup(player)}`, drivers: ['play volume', 'game script', 'role share', 'efficiency and touchdown variance'] }; if (sport === 'MLB') return { family: 'SPORT_CORRELATED', correlationGroup: `MLB:${gameGroup(player)}`, drivers: ['plate appearances or innings', 'team run environment', 'matchup outcome variance', 'shared team outcomes'] }; return { family: 'SPORT_CORRELATED', correlationGroup: `GOLF:${player.playerId}`, drivers: ['component-rate variance'] }; }
-function sportEnvironmentWidth(sport: Sport | 'FPPG'): number { return sport === 'NBA' || sport === 'WNBA' ? 0.22 : sport === 'NFL' ? 0.26 : sport === 'MLB' ? 0.3 : 0.2; }
+function distributionFor(sport: Sport, player: SlatePlayer): PlayerProjection['distribution'] { if (sport === 'NBA' || sport === 'WNBA') return { family: 'SPORT_CORRELATED', correlationGroup: `${sport}:${gameGroup(player)}`, drivers: ['active rotation', 'minutes conservation', 'shared game environment', 'role-rate variance'] }; if (sport === 'NFL' || sport === 'CFB') return { family: 'SPORT_CORRELATED', correlationGroup: `${sport}:${gameGroup(player)}`, drivers: ['play volume', 'game script', 'role share', 'efficiency and touchdown variance'] }; if (sport === 'MLB') return { family: 'SPORT_CORRELATED', correlationGroup: `MLB:${gameGroup(player)}`, drivers: ['plate appearances or innings', 'team run environment', 'matchup outcome variance', 'shared team outcomes'] }; return { family: 'SPORT_CORRELATED', correlationGroup: `GOLF:${player.playerId}`, drivers: ['component-rate variance'] }; }
+function sportEnvironmentWidth(sport: Sport | 'FPPG'): number { return sport === 'NBA' || sport === 'WNBA' ? 0.22 : sport === 'NFL' ? 0.26 : sport === 'CFB' ? 0.3 : sport === 'MLB' ? 0.3 : 0.2; }
 function hash(value: string): number { return [...value].reduce((sum, character) => (sum * 31 + character.charCodeAt(0)) >>> 0, 7); }
 function next(seed: number): number { return (1664525 * seed + 1013904223) >>> 0; }
 function gameGroup(player: SlatePlayer): string { return [player.team ?? 'UNKNOWN', player.opponent ?? 'UNKNOWN'].sort().join(':'); }
@@ -147,8 +174,8 @@ function applySportContext(slate: ValidatedSlate, player: SlatePlayer, values: R
     const environment = [context?.platoonMultiplier, context?.parkRunMultiplier, context?.weatherRunMultiplier].filter((value): value is number => value !== undefined && Number.isFinite(value)).reduce((product, value) => product * value, 1);
     for (const field of ['singlesPerPA', 'doublesPerPA', 'triplesPerPA', 'homeRunsPerPA', 'walksPerPA', 'hitByPitchPerPA', 'rbiPerPA', 'runsPerPA', 'stolenBasesPerPA']) if (Number.isFinite(adjusted[field])) adjusted[field] *= environment;
   }
-  if (slate.sport === 'NFL') {
-    const context = player.sportContext?.nfl;
+  if (slate.sport === 'NFL' || slate.sport === 'CFB') {
+    const context = slate.sport === 'CFB' ? player.sportContext?.cfb : player.sportContext?.nfl;
     if (context?.expectedPlays !== undefined && Number.isFinite(context.expectedPlays)) { if (isQuarterback(player)) adjusted.passAttempts = context.expectedPlays * (context.passRate ?? 0); else { adjusted.targets = context.expectedPlays * (context.passRate ?? 0) * (context.targetShare ?? 0); adjusted.carries = context.expectedPlays * (1 - (context.passRate ?? 0)) * (context.carryShare ?? 0); } }
     if (context?.touchdownRateMultiplier !== undefined && Number.isFinite(adjusted.touchdownProbability)) adjusted.touchdownProbability *= context.touchdownRateMultiplier;
   }

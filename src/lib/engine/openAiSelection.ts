@@ -1,6 +1,7 @@
 import type { CashLineCalibration } from './cashLineCalibration.js';
 import type { LineupCandidate, ResearchPackage, SelectionPackage, ValidatedSlate } from './contracts.js';
 import { overlap, resolveCashLineProbability } from './selection.js';
+import { providerHttpError } from './providerDiagnostics.js';
 
 export interface OpenAiSelectionOptions { apiKey: string; model?: string; endpoint?: string; fetcher?: typeof fetch; }
 export async function selectWithOpenAi(input: { slate: ValidatedSlate; research: ResearchPackage; candidates: LineupCandidate[]; selection: SelectionPackage; cashLineCalibration?: CashLineCalibration }, options: OpenAiSelectionOptions): Promise<SelectionPackage> {
@@ -10,7 +11,7 @@ export async function selectWithOpenAi(input: { slate: ValidatedSlate; research:
     input: `You are a friendly, knowledgeable DFS expert choosing the final lineup(s) for a DraftKings contest. Choose only existing candidate IDs. Never create or modify a lineup. Contest size: ${input.slate.contest.contestSize ?? 'unknown'}. Entries: ${input.slate.contest.userEntryCount}. Candidates: ${JSON.stringify(input.candidates.map((candidate) => ({ id: candidate.id, median: candidate.median, ceiling: candidate.ceiling, heuristicTournamentRank: candidate.heuristicTournamentRank, heuristicLeverageScore: candidate.heuristicLeverageScore, heuristicDuplicationRisk: candidate.heuristicDuplicationRisk, playerIds: candidate.playerIds })))}. Note: all heuristic tournament, leverage, and duplication fields are construction proxies, not simulated contest or measured field data. Do not present them as tournament EV, ownership, or expected duplicates. Return the strongest candidates in order, each with a concise (1-2 sentence), plain-English explanation of why it was chosen. Be concrete and grounded; no hype, no "lock of the century", no false certainty.`,
     text: { format: { type: 'json_schema', name: 'selection', strict: true, schema: { type: 'object', additionalProperties: false, properties: { selections: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { candidateId: { type: 'string' }, explanation: { type: 'string' } }, required: ['candidateId', 'explanation'] } } }, required: ['selections'] } } },
   }) });
-  if (!response.ok) throw new Error(`OpenAI Selection API returned HTTP ${response.status}.`);
+  if (!response.ok) throw await providerHttpError('OpenAI Selection API', response);
   const payload = await response.json() as Record<string, unknown>;
   const text = typeof payload.output_text === 'string' ? payload.output_text : extractOutputText(payload.output);
   if (!text) throw new Error('OpenAI Selection returned no structured output.');

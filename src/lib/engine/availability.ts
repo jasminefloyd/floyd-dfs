@@ -34,18 +34,20 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
     const exactRecords = byKey.get(identityKey(player.playerName, player.team)) ?? [];
     const nameOnlyRecords = snapshot.records.filter((record) => normalizeProviderName(record.playerName) === normalizeProviderName(player.playerName) && !record.team);
     const records = providerIdRecords.length ? providerIdRecords : exactRecords.length ? exactRecords : nameOnlyRecords;
-    if (records.length !== 1) return { ...player, availability: { status: 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: records.length > 1 ? 'Provider identity match was ambiguous.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
+    const confirmedMlbLineup = snapshot.source === 'SPORTSDATAIO' && snapshot.confirmedLineupAvailable;
+    if (records.length !== 1) return { ...player, availability: { status: confirmedMlbLineup ? 'NOT_IN_CONFIRMED_LINEUP' as const : 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: records.length > 1 ? 'Provider identity match was ambiguous.' : confirmedMlbLineup ? 'No matching record in the confirmed lineup; treated as a non-starter for primary optimization.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
     const record = records[0];
     const mappedBy: NonNullable<SlatePlayer['availability']>['mappedBy'] = providerIdRecords.length ? 'PROVIDER_ID' : exactRecords.length ? 'NAME_AND_TEAM' : 'NAME_ONLY';
     return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
-  const isOutOrInactive = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE';
-  const removed = playerPool.filter(isOutOrInactive).length;
-  // A confirmed lineup changes certainty, not identity eligibility. Only explicit non-participation
-  // removes a DraftKings player. UNKNOWN/UNMAPPED players remain eligible with visible low
-  // certainty so an incomplete provider response cannot silently delete valid players.
-  const filtered = playerPool.filter((player) => !isOutOrInactive(player));
-  if (removed) warnings.push(`${removed} DraftKings player(s) removed after an explicit ${snapshot.source} OUT/INACTIVE status.`);
+  const isExcluded = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE' || player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP';
+  const removed = playerPool.filter(isExcluded).length;
+  // DraftKings exposes every eligible player, including bench and bullpen players. Once both
+  // MLB lineups are confirmed, the primary slate must be the confirmed starters only; otherwise
+  // downstream research/projection treats every unlisted draftable as an unresolved starter.
+  // The raw DraftKings snapshot remains in the run request payload for auditability.
+  const filtered = playerPool.filter((player) => !isExcluded(player));
+  if (removed) warnings.push(`${removed} DraftKings player(s) removed from the primary slate after ${snapshot.source} confirmed the starting lineups or an explicit OUT/INACTIVE status.`);
   warnings.push(snapshot.confirmedLineupAvailable ? `${snapshot.source} confirmed lineup state applied at ${snapshot.retrievedAt}.` : `${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
   return { ...slate, playerPool: filtered, validation: { ...slate.validation, warnings } };
 }

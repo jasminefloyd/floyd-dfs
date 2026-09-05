@@ -170,7 +170,7 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   const cautions = pipeline.stages.filter((stage) => !['COMPLETE', 'READY', 'SUCCEEDED'].includes(stage.status.toUpperCase())).map((stage) => `${stage.stage} stage: ${stage.status}`);
   const validationCaution = input.sport.toLowerCase() === 'golf'
     ? 'Golf is fallback-only: its sport-specific quantitative projection model is not populated.'
-    : 'MODEL_VALIDATION_REQUIRED: Gate 1 mechanical correctness and sport-specific validation are not yet complete; do not treat tournament heuristics as contest EV.';
+    : 'Tournament ranking and cash-line probabilities remain disclosed heuristics or simulations; they are not guaranteed contest outcomes.';
   const allCautions = [...cautions, validationCaution];
   return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : 'caution', engine_state: 'MODEL_VALIDATION_REQUIRED', eligible_for_lineups: !blocked, eligible_for_tournament: false, hard_blocks: blocked ? cautions : [], cautions: allCautions }, model_version: 'floyd-dfs', data_warnings: allCautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
 }
@@ -270,6 +270,7 @@ function mapAvailability(value?: string): Player['injury_status'] {
 
 function sportLogoUrl(sport: string): string | undefined {
   const league = sport.toLowerCase();
+  if (league === 'cfb') return '/ncaa-college-football.webp';
   return ['nba', 'wnba', 'mlb', 'nfl'].includes(league) ? `https://a.espncdn.com/i/teamlogos/leagues/500/${league}.png` : undefined;
 }
 

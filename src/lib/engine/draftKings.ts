@@ -90,6 +90,7 @@ function contestMatchesSport(contest: Record<string, unknown>, sport: Sport): bo
     NBA: /(^|[^A-Z])NBA([^A-Z]|$)/,
     MLB: /(^|[^A-Z])MLB([^A-Z]|$)/,
     NFL: /(^|[^A-Z])NFL([^A-Z]|$)/,
+    CFB: /(^|[^A-Z])(CFB|NCAAF|NCAA|COLLEGE[ -]?FOOTBALL)([^A-Z]|$)/,
     GOLF: /(^|[^A-Z])(GOLF|PGA)([^A-Z]|$)/,
   };
   return aliases[sport].test(name);

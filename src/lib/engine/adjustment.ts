@@ -6,6 +6,7 @@ const SPORT_PRIORITY: Record<Sport, string[]> = {
   MLB: ['batting order', 'plate appearances', 'handedness', 'starting pitcher', 'pitch-type', 'quality of contact', 'strikeout', 'bullpen', 'park/weather', 'competitive context'],
   GOLF: ['strokes gained', 'tee-to-green', 'approach', 'off-the-tee', 'putting', 'birdie', 'course fit', 'weather wave', 'leaderboard', 'competitive context'],
   NFL: ['snap share', 'routes', 'targets', 'carries', 'red-zone role', 'quarterback', 'line matchup', 'pace', 'game script', 'weather', 'competitive context'],
+  CFB: ['snap share', 'routes', 'targets', 'carries', 'red-zone role', 'quarterback', 'depth chart', 'game script', 'weather', 'competitive context'],
 };
 
 type Magnitude = PlayerAdjustment['adjustments'][number]['magnitude'];
@@ -106,7 +107,7 @@ function beneficiaryScore(sport: Sport, unavailablePosition?: string, teammatePo
     if (out === 'PG') return teammate === 'PG' ? 5 : ['SG', 'SF'].includes(teammate) ? 3 : 1;
     if (['SG', 'SF', 'PF', 'C'].includes(out)) return teammate === out ? 5 : ['SG', 'SF', 'PF', 'C'].includes(teammate) ? 3 : 1;
   }
-  if (sport === 'NFL') {
+  if (sport === 'NFL' || sport === 'CFB') {
     if (out === 'QB') return ['WR', 'TE', 'RB'].includes(teammate) ? 4 : 1;
     if (['WR', 'TE'].includes(out)) return teammate === out ? 5 : ['WR', 'TE', 'RB'].includes(teammate) ? 3 : 1;
     if (out === 'RB') return teammate === 'RB' ? 5 : ['WR', 'TE'].includes(teammate) ? 2 : 1;
@@ -118,7 +119,7 @@ function beneficiaryScore(sport: Sport, unavailablePosition?: string, teammatePo
 function redistributionDimension(sport: Sport, teammatePosition?: string): string {
   const position = (teammatePosition ?? '').toUpperCase();
   if (sport === 'NBA' || sport === 'WNBA') return 'MINUTES';
-  if (sport === 'NFL') return position === 'RB' ? 'CARRY_SHARE' : 'TARGET_SHARE';
+  if (sport === 'NFL' || sport === 'CFB') return position === 'RB' ? 'CARRY_SHARE' : 'TARGET_SHARE';
   if (sport === 'MLB') return 'PLATE_APPEARANCES';
   return 'ROLE_OPPORTUNITY';
 }
@@ -137,6 +138,7 @@ function interpreterForSport(sport: Sport): (finding: ResearchFinding) => Adjust
   if (sport === 'NBA' || sport === 'WNBA') return interpretBasketballFinding;
   if (sport === 'MLB') return interpretMlbFinding;
   if (sport === 'GOLF') return interpretGolfFinding;
+  if (sport === 'CFB') return interpretCollegeFootballFinding;
   return interpretNflFinding;
 }
 
@@ -204,6 +206,16 @@ function interpretNflFinding(finding: ResearchFinding): AdjustmentItem[] {
   if (/target share|more routes|red[- ]?zone (role|looks|targets)/.test(text)) return [{ ...base, adjustmentType: 'TARGET_SHARE', direction: 'UP' as Direction, magnitude: 'MODERATE' as Magnitude, rationale: `${finding.finding} Evidence supports increased route participation or red-zone opportunity.` }];
   if (/favorable (matchup|game script)|shootout expected|high total|pass-funnel defense/.test(text)) return [{ ...base, adjustmentType: 'GAME_SCRIPT', direction: 'UP' as Direction, magnitude: 'SMALL' as Magnitude, rationale: `${finding.finding} Evidence supports a favorable game-script environment.` }];
   if (/reduced snaps|fewer targets|committee backfield|timeshare/.test(text)) return [{ ...base, adjustmentType: 'SNAP_SHARE', direction: 'DOWN' as Direction, magnitude: 'SMALL' as Magnitude, rationale: `${finding.finding} Evidence supports a reduced snap share or crowded backfield.` }];
+  return genericRoleOpportunity(text, finding) ?? neutralContext(finding);
+}
+
+function interpretCollegeFootballFinding(finding: ResearchFinding): AdjustmentItem[] {
+  const text = findingText(finding); const base = baseFields(finding);
+  const availability = baseAvailability(text, finding); if (availability) return availability;
+  if (/depth chart|starting (quarterback|qb|role)|named the starter|starter announced|full participant/.test(text)) return [{ ...base, adjustmentType: 'SNAP_SHARE', direction: 'UP' as Direction, magnitude: 'MODERATE' as Magnitude, rationale: `${finding.finding} Evidence supports a stronger confirmed college-football role.` }];
+  if (/transfer portal|transferred|eligible|eligibility|suspension/.test(text)) return [{ ...base, adjustmentType: 'ROLE_OPPORTUNITY', direction: /suspension/.test(text) ? 'DOWN' as Direction : 'UP' as Direction, magnitude: 'MODERATE' as Magnitude, rationale: `${finding.finding} College-football roster or eligibility news changes role availability.` }];
+  if (/target share|more routes|red[- ]?zone|goal[- ]?line|favorable (matchup|game script)|high total/.test(text)) return [{ ...base, adjustmentType: 'TARGET_SHARE', direction: 'UP' as Direction, magnitude: 'SMALL' as Magnitude, rationale: `${finding.finding} Evidence supports increased college-football opportunity.` }];
+  if (/reduced snaps|fewer targets|committee backfield|timeshare|limited role/.test(text)) return [{ ...base, adjustmentType: 'SNAP_SHARE', direction: 'DOWN' as Direction, magnitude: 'SMALL' as Magnitude, rationale: `${finding.finding} Evidence supports reduced college-football opportunity.` }];
   return genericRoleOpportunity(text, finding) ?? neutralContext(finding);
 }
 

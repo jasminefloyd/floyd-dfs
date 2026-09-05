@@ -14,14 +14,14 @@ import { normalizeProviderName, normalizeTeamCode } from './availability.js';
 // expectedInnings, passAttempts/targets/carries) must become a per-game average, not the raw
 // season sum. `gamesPlayed` does exactly that division; callers passing single-game rows keep
 // today's behavior unchanged via the default of 1.
-export function deriveSeasonBasedInputs(sport: Sport, player: SlatePlayer, seasonRows: Record<string, unknown>[]): Record<string, number> | undefined {
-  const row = findRow(player, seasonRows);
+export function deriveSeasonBasedInputs(sport: Sport, player: SlatePlayer, seasonRows: Record<string, unknown>[], options: { allowTeamMismatch?: boolean } = {}): Record<string, number> | undefined {
+  const row = findRow(player, seasonRows, options.allowTeamMismatch === true);
   if (!row) return undefined;
   const gamesPlayed = gamesPlayedFromRow(row);
   if (gamesPlayed <= 0) return undefined;
   if (sport === 'NBA' || sport === 'WNBA') return deriveBasketballInputs(row, gamesPlayed);
   if (sport === 'MLB') return isPitcher(player) ? derivePitcherInputs(row, gamesPlayed) : deriveHitterInputs(row, gamesPlayed);
-  if (sport === 'NFL') return isQuarterback(player) ? deriveQuarterbackInputs(row, gamesPlayed) : deriveSkillPlayerInputs(row, gamesPlayed);
+  if (sport === 'NFL' || sport === 'CFB') return isQuarterback(player) ? deriveQuarterbackInputs(row, gamesPlayed) : deriveSkillPlayerInputs(row, gamesPlayed);
   return undefined;
 }
 
@@ -32,13 +32,13 @@ export function isQuarterback(player: { position?: string }): boolean { return /
 // (verified live -- `Games` comes back undefined for every NFL row on this account).
 export function gamesPlayedFromRow(row: Record<string, unknown>): number { return readNumber(row, ['Games', 'Played', 'games']) ?? 0; }
 
-export function findRow(player: SlatePlayer, rows: Record<string, unknown>[]): Record<string, unknown> | undefined {
+export function findRow(player: SlatePlayer, rows: Record<string, unknown>[], allowTeamMismatch = false): Record<string, unknown> | undefined {
   const targetName = normalizeProviderName(player.playerName);
   const targetTeam = normalizeTeamCode(player.team);
   const matches = rows.filter((row) => {
     const name = normalizeProviderName(readString(row, ['Name', 'PlayerName', 'name']) ?? providerFullName(row));
     const team = normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']));
-    return name === targetName && (!targetTeam || !team || team === targetTeam);
+    return name === targetName && (allowTeamMismatch || !targetTeam || !team || team === targetTeam);
   });
   if (!matches.length) return undefined;
   // Prefer an exact team match. A name-only match is safe only when the provider

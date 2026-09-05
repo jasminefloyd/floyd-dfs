@@ -7,6 +7,7 @@ const SPORT_LABELS: Record<string, string> = {
   nba: 'NBA',
   mlb: 'MLB',
   nfl: 'NFL',
+  cfb: 'College Football',
   golf: 'GOLF',
 };
 
@@ -15,6 +16,7 @@ const SPORT_LOGOS: Record<string, string> = {
   nba: 'https://a.espncdn.com/i/teamlogos/leagues/500/nba.png',
   mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
   nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
+  cfb: '/ncaa-college-football.webp',
   golf: 'https://a.espncdn.com/i/teamlogos/leagues/500/golf.png',
 };
 

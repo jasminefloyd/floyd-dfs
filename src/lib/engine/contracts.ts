@@ -1,4 +1,4 @@
-export type Sport = 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL';
+export type Sport = 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' | 'CFB';
 export type ContestFormat = 'SHOWDOWN' | 'CLASSIC';
 
 export type EngineStage =
@@ -57,7 +57,7 @@ export interface SlatePlayer {
   teamLogoUrl?: string;
   projectionInputs?: Record<string, number>;
   availability?: {
-    status: 'CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' | 'INACTIVE' | 'OUT' | 'UNKNOWN';
+    status: 'CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' | 'NOT_IN_CONFIRMED_LINEUP' | 'INACTIVE' | 'OUT' | 'UNKNOWN';
     confirmed: boolean;
     source: string;
     retrievedAt: string;
@@ -75,6 +75,7 @@ export interface SlatePlayer {
     nba?: { activeRotation?: boolean; starter?: boolean; minutesP10?: number; minutesP50?: number; minutesP90?: number; paceMultiplier?: number; usageMultiplier?: number };
     mlb?: { battingOrder?: number; expectedPA?: number; platoonMultiplier?: number; parkRunMultiplier?: number; opposingStarterQuality?: number; bullpenQuality?: number; weatherRunMultiplier?: number };
     nfl?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
+    cfb?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
     golf?: { strokesGainedTotal?: number; courseFit?: number; weatherMultiplier?: number; cutProbability?: number; finishPositionP50?: number };
   };
   projectedOwnership?: { classic?: number; captain?: number; utility?: number; source: 'PROVIDER' | 'CALIBRATED_MODEL'; observedAt?: string };
@@ -352,7 +353,7 @@ export interface ResearchPackage {
   freshThrough: string;
   findings: ResearchFinding[];
   unknowns?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>;
-  providerResults?: Array<{ provider: string; tier?: SourceTier; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; articleCount: number; acceptedArticleCount?: number; rejectedArticleCount?: number; rejectionSamples?: string[]; error?: string }>;
+  providerResults?: Array<{ provider: string; tier?: SourceTier; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; articleCount: number; acceptedArticleCount?: number; rejectedArticleCount?: number; rejectionSamples?: string[]; error?: string; attempted?: boolean; fallbackUsed?: boolean; httpStatus?: number; responseHeaders?: Record<string, string> }>;
   conflicts?: ResearchConflict[];
   watchItems?: Array<{ subjectId?: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; expectedChangeBeforeLock: boolean }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';

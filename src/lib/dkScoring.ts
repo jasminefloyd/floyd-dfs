@@ -5,7 +5,7 @@
 // DK basketball rules define double/triple categories as points, rebounds, assists,
 // steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
 
-export type DkSport = 'nba' | 'wnba' | 'nfl' | 'mlb' | 'golf';
+export type DkSport = 'nba' | 'wnba' | 'mlb' | 'nfl' | 'cfb' | 'golf';
 export type DkContestType = 'classic' | 'showdown';
 export type DkRole = 'hitter' | 'pitcher' | 'dst' | 'kicker';
 export type StatLine = Record<string, number>;
@@ -194,6 +194,15 @@ export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {
     + stat(statLine, ['offensiveFumbleRecoveryTouchdowns', 'offensive_fumble_recovery_touchdowns']) * DK_SCORING.nfl.offensiveFumbleRecoveryTouchdown;
 }
 
+// DraftKings CFB uses the same verified football offensive scoring profile as its daily
+// football rules: 0.04 passing yards, 4-point passing TDs, 0.1 rushing/receiving yards,
+// full-point receptions, 6-point rushing/receiving TDs, 3-point yardage bonuses, -1
+// interceptions/fumbles, and 2-point conversions. Keep this explicit so CFB is not silently
+// mislabeled as NFL in diagnostics or future scoring changes.
+export function dkCfbFantasyPoints(statLine: StatLine, role?: DkRole): number {
+  return dkNflFantasyPoints(statLine, role);
+}
+
 function returnTouchdowns(statLine: StatLine): number {
   const combined = stat(statLine, ['returnTouchdowns', 'return_tds']);
   if (combined) return combined;
@@ -325,6 +334,7 @@ export function dkGolfFantasyPoints(statLine: StatLine, contestType: DkContestTy
 export function dkFantasyPoints(statLine: StatLine, sport: DkSport, role?: DkRole, contestType?: DkContestType): number {
   if (sport === 'nba' || sport === 'wnba') return dkBasketballFantasyPoints(statLine);
   if (sport === 'nfl') return dkNflFantasyPoints(statLine, role);
+  if (sport === 'cfb') return dkCfbFantasyPoints(statLine, role);
   if (sport === 'mlb') return dkMlbFantasyPoints(statLine, role);
   if (sport === 'golf') return dkGolfFantasyPoints(statLine, contestType);
   return 0;

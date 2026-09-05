@@ -3,8 +3,11 @@ import type { ResearchSynthesizerInput } from './openAiTypes.js';
 import { createResearchPlan } from './researchPlan.js';
 import { explainArticleRejection, filterArticlesForSlate, findConflicts, findingsFromAvailability, linkConflicts, normalizeArticles } from './researchEvidence.js';
 
-export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]> }; now?: () => Date; version?: number; }
+export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]>; lastDiagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'FAILED'; error?: string }> }; now?: () => Date; version?: number; }
 export interface ResearchAgentInput { validatedSlate: ValidatedSlate; researchGaps?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>; }
+
+const PROVIDER_TIMEOUT_MS = 8_000;
+const SYNTHESIS_TIMEOUT_MS = 25_000;
 
 export class ResearchAgent {
   private readonly now: () => Date;
@@ -19,20 +22,23 @@ export class ResearchAgent {
     const articles = [] as Awaited<ReturnType<ResearchSourceProvider['fetch']>>;
     const providerResults: NonNullable<ResearchPackage['providerResults']> = [];
     const unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }> = [];
-    for (const provider of this.options.providers) {
+    // Providers are independent enrichments. Fetch them concurrently and give each one a
+    // bounded lifetime so one slow RSS/API source cannot strand the whole serverless run
+    // before RESEARCH is persisted. The exact timeout is retained in providerResults.
+    const providerPasses = await Promise.all(this.options.providers.map(async (provider) => {
       try {
-        const fetched = await provider.fetch({ slate: input.validatedSlate, plan });
-        articles.push(...fetched);
+        const fetched = await withTimeout(
+          (signal) => provider.fetch({ slate: input.validatedSlate, plan, signal }),
+          PROVIDER_TIMEOUT_MS,
+        );
         const accepted = filterArticlesForSlate(fetched, input.validatedSlate); const rejected = fetched.filter((article) => !accepted.includes(article));
-        providerResults.push({ provider: provider.name, tier: provider.tier, status: fetched.length ? 'SUCCEEDED' : 'EMPTY', articleCount: fetched.length, acceptedArticleCount: accepted.length, rejectedArticleCount: rejected.length, rejectionSamples: [...new Set(rejected.map((article) => explainArticleRejection(article, input.validatedSlate)))].filter(Boolean).slice(0, 3) });
+        return { fetched, result: { provider: provider.name, tier: provider.tier, status: fetched.length ? 'SUCCEEDED' as const : 'EMPTY' as const, articleCount: fetched.length, acceptedArticleCount: accepted.length, rejectedArticleCount: rejected.length, rejectionSamples: [...new Set(rejected.map((article) => explainArticleRejection(article, input.validatedSlate)))].filter(Boolean).slice(0, 3) } };
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Provider failed.';
-        providerResults.push({ provider: provider.name, tier: provider.tier, status: 'FAILED', articleCount: 0, error: reason });
-        // Providers are optional enrichments. Keep each exact failure in
-        // providerResults for diagnostics, but do not make the research
-        // contract incomplete when other evidence or synthesis succeeded.
+        return { fetched: [], result: { provider: provider.name, tier: provider.tier, status: 'FAILED' as const, articleCount: 0, error: reason } };
       }
-    }
+    }));
+    for (const pass of providerPasses) { articles.push(...pass.fetched); providerResults.push(pass.result); }
     const slateArticles = filterArticlesForSlate(articles, input.validatedSlate);
     // Availability data already fetched onto the slate (e.g. SportsDataIO's confirmed-lineup
     // feed, applied before Research runs) is seeded in first so the per-player gap check below
@@ -40,12 +46,20 @@ export class ResearchAgent {
     let findings: ResearchFinding[] = [...findingsFromAvailability(input.validatedSlate), ...normalizeArticles(slateArticles, input.validatedSlate, now)];
     if (this.options.synthesizer) {
       try {
-        const synthesized = await this.options.synthesizer.synthesize({ slate: input.validatedSlate, plan, articles: slateArticles });
+        const synthesized = await withTimeout(
+          (signal) => this.options.synthesizer!.synthesize({ slate: input.validatedSlate, plan, articles: slateArticles, signal }),
+          SYNTHESIS_TIMEOUT_MS,
+        );
         findings = [...findings, ...synthesized];
-        providerResults.push({ provider: 'OpenAI Research Synthesis', status: synthesized.length ? 'SUCCEEDED' : 'EMPTY', articleCount: synthesized.length, acceptedArticleCount: synthesized.length, rejectedArticleCount: 0 });
+        const diagnostics = this.options.synthesizer?.lastDiagnostics;
+        if (diagnostics?.length) {
+          for (const attempt of diagnostics) providerResults.push({ provider: attempt.provider, status: attempt.status, articleCount: attempt.status === 'SUCCEEDED' ? synthesized.length : 0, acceptedArticleCount: attempt.status === 'SUCCEEDED' ? synthesized.length : 0, rejectedArticleCount: 0, error: attempt.error, attempted: true, fallbackUsed: attempt.provider.includes('Anthropic') });
+        } else providerResults.push({ provider: 'Research Synthesis', status: synthesized.length ? 'SUCCEEDED' : 'EMPTY', articleCount: synthesized.length, acceptedArticleCount: synthesized.length, rejectedArticleCount: 0, attempted: true });
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Research synthesizer failed.';
-        providerResults.push({ provider: 'OpenAI Research Synthesis', status: 'FAILED', articleCount: 0, error: reason });
+        const diagnostics = this.options.synthesizer?.lastDiagnostics;
+        if (diagnostics?.length) for (const attempt of diagnostics) providerResults.push({ provider: attempt.provider, status: 'FAILED', articleCount: 0, error: attempt.error ?? reason, attempted: true, fallbackUsed: attempt.provider.includes('Anthropic') });
+        else providerResults.push({ provider: 'Research Synthesis', status: 'FAILED', articleCount: 0, error: reason, attempted: true });
         unknowns.push({ question: 'Synthesize research with OpenAI.', importance: 'MEDIUM', reason });
       }
     }
@@ -73,6 +87,13 @@ export class ResearchAgent {
     const status = uniqueUnknowns.length || conflicts.some((conflict) => !conflict.resolved) ? 'PARTIAL' : 'COMPLETE';
     return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, now, this.version);
   }
+}
+
+async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`Research request timed out after ${timeoutMs / 1000} seconds.`)), timeoutMs);
+  try { return await operation(controller.signal); }
+  finally { clearTimeout(timer); }
 }
 
 function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[], conflicts: ReturnType<typeof findConflicts>, unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>, providerResults: NonNullable<ResearchPackage['providerResults']>, status: 'COMPLETE' | 'PARTIAL', now: Date, version: number): ResearchPackage {

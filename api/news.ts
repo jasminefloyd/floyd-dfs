@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLeagueNewsProviders } from '../src/lib/engine/rssProvider.js';
+import { createEspnLeagueNewsProvider } from '../src/lib/engine/espnNewsProvider.js';
 import type { ResearchArticle } from '../src/lib/engine/contracts.js';
 import { cors, method, respondError } from '../server/runtime.js';
 
@@ -18,7 +19,7 @@ function categorize(article: ResearchArticle): 'injury' | 'trade' | 'transaction
   if (TRANSACTION_PATTERN.test(text)) return 'transaction';
   return 'news';
 }
-const KNOWN_SPORTS = new Set(['nfl', 'nba', 'mlb', 'golf', 'wnba']);
+const KNOWN_SPORTS = new Set(['nfl', 'nba', 'mlb', 'golf', 'wnba', 'cfb']);
 function sportFor(article: ResearchArticle): string {
   const tag = article.tags?.find((candidate) => KNOWN_SPORTS.has(candidate.toLowerCase()));
   return tag ? tag.toLowerCase() : 'general';
@@ -39,12 +40,15 @@ function stableArticleId(article: ResearchArticle): string {
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
   try {
-    const providers = createLeagueNewsProviders();
+    const providers = [
+      ...createLeagueNewsProviders(),
+      ...(['NFL', 'NBA', 'WNBA', 'MLB', 'GOLF', 'CFB'] as const).map((sport) => createEspnLeagueNewsProvider(sport)),
+    ];
     const sourceStatus: Record<string, 'ok' | 'unavailable'> = {};
     const items = (await Promise.all(providers.map(async (provider) => {
       try { const fetched = await provider.fetch({ slate: {} as never, plan: { slateId: 'news', generatedAt: new Date().toISOString(), questions: [] } }); sourceStatus[provider.name] = 'ok'; return fetched; }
       catch { sourceStatus[provider.name] = 'unavailable'; return []; }
-    }))).flat().filter(isLeagueNews).sort((left, right) => Date.parse(right.publishedAt ?? '') - Date.parse(left.publishedAt ?? '')).slice(0, 40).map((article) => ({
+    }))).flat().filter(isLeagueNews).sort((left, right) => Date.parse(right.publishedAt ?? '') - Date.parse(left.publishedAt ?? '')).map((article) => ({
       id: stableArticleId(article),
       sport: sportFor(article),
       title: article.title,
@@ -53,7 +57,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       category: categorize(article),
       source_name: article.sourceName,
       source_kind: article.sourceName.toUpperCase().includes('ESPN') ? 'espn' as const : 'league' as const,
-    }));
+    })).filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index).slice(0, 40);
     cors(req, res);
     res.status(200).json({ items, generated_at: new Date().toISOString(), source_status: sourceStatus });
   } catch (error) { respondError(req, res, error); }

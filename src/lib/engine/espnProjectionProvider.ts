@@ -1,5 +1,6 @@
 import type { ValidatedSlate } from './contracts.js';
 import { normalizeTeamCode, type AvailabilityRecord, type AvailabilitySnapshot } from './availability.js';
+import { fetchEspnJson } from './espnApiClient.js';
 
 export interface BasketballProjectionRecord { name: string; team: string; providerFppg: number; source: string; }
 
@@ -7,6 +8,7 @@ const ESPN_AVAILABILITY_SPORT_PATH: Partial<Record<ValidatedSlate['sport'], { sp
   NBA: { sportGroup: 'basketball', league: 'nba' },
   WNBA: { sportGroup: 'basketball', league: 'wnba' },
   NFL: { sportGroup: 'football', league: 'nfl' },
+  CFB: { sportGroup: 'football', league: 'college-football' },
 };
 
 export class EspnProjectionClient {
@@ -87,10 +89,8 @@ export class EspnProjectionClient {
   }
 
   private async getJson(url: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const response = await this.fetcher(url, { signal, headers: { accept: 'application/json' } });
-    if (!response.ok) throw new Error(`ESPN projection endpoint returned HTTP ${response.status}.`);
-    const payload = await response.json() as unknown;
-    return asRecord(payload) ?? {};
+    const { payload } = await fetchEspnJson(url, { signal, fetcher: this.fetcher });
+    return payload;
   }
 }
 

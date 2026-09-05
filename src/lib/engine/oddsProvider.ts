@@ -18,7 +18,7 @@ export class OddsResearchProvider implements ResearchSourceProvider {
 }
 
 function oddsApiSportKey(sport: ValidatedSlate['sport']): string | undefined {
-  return ({ MLB: 'baseball_mlb', NBA: 'basketball_nba', WNBA: 'basketball_wnba', NFL: 'americanfootball_nfl', GOLF: 'golf_pga' } as const)[sport];
+  return ({ MLB: 'baseball_mlb', NBA: 'basketball_nba', WNBA: 'basketball_wnba', NFL: 'americanfootball_nfl', CFB: 'americanfootball_ncaaf', GOLF: 'golf_pga' } as const)[sport];
 }
 
 export interface TeamMarketContext { team: string; opponent: string; gameTotal: number; spread: number; impliedTeamTotal: number; }

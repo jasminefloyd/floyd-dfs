@@ -1,4 +1,5 @@
 import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, SourceTier, Sport, ValidatedSlate } from './contracts.js';
+import { providerHttpError } from './providerDiagnostics.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -16,10 +17,10 @@ function summarize(row: JsonObject): string {
   return (values.length ? values.join('; ') : JSON.stringify(row)).slice(0, 1400);
 }
 function dateForSlate(slate: ValidatedSlate): string { const date = new Date(slate.event.eventDate); if (date.getUTCHours() < 6) date.setUTCDate(date.getUTCDate() - 1); return date.toISOString().slice(0, 10).replaceAll('-', ''); }
-function sportPath(sport: Sport): string { return ({ NBA: 'basketball/nba', WNBA: 'basketball/wnba', MLB: 'baseball/mlb', NFL: 'football/nfl', GOLF: 'golf/pga' } as Record<Sport, string>)[sport]; }
+function sportPath(sport: Sport): string { return ({ NBA: 'basketball/nba', WNBA: 'basketball/wnba', MLB: 'baseball/mlb', NFL: 'football/nfl', CFB: 'football/college-football', GOLF: 'golf/pga' } as Record<Sport, string>)[sport]; }
 function withTimeout(signal?: AbortSignal): AbortSignal | undefined { return signal; }
 
-export interface JsonSportsProviderOptions { name: string; tier: SourceTier; apiKey?: string; baseUrl: string; path: (slate: ValidatedSlate) => string; headers?: Record<string, string>; fetcher?: typeof fetch; tags?: string[]; }
+export interface JsonSportsProviderOptions { name: string; tier: SourceTier; apiKey?: string; baseUrl: string; path: (slate: ValidatedSlate) => string; headers?: Record<string, string>; fetcher?: typeof fetch; tags?: string[]; excludeSports?: Sport[]; }
 export class JsonSportsResearchProvider implements ResearchSourceProvider {
   readonly name: string;
   readonly tier: SourceTier;
@@ -27,9 +28,10 @@ export class JsonSportsResearchProvider implements ResearchSourceProvider {
   private readonly fetcher: typeof fetch;
   constructor(options: JsonSportsProviderOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; this.name = options.name; this.tier = options.tier; }
   async fetch(input: { slate: ValidatedSlate; plan: ResearchPlan; signal?: AbortSignal }): Promise<ResearchArticle[]> {
+    if (this.options.excludeSports?.includes(input.slate.sport)) return [];
     const url = new URL(this.options.path(input.slate), this.options.baseUrl.replace(/\/+$/, '') + '/');
     const response = await this.fetcher(url, { signal: withTimeout(input.signal), headers: { accept: 'application/json', ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}`, 'Ocp-Apim-Subscription-Key': this.options.apiKey } : {}), ...(this.options.headers ?? {}) } });
-    if (!response.ok) throw new Error(`${this.name} returned HTTP ${response.status}.`);
+    if (!response.ok) throw await providerHttpError(this.name, response);
     const payload = await response.json() as unknown;
     return rows(payload).slice(0, 20).map((row, index) => ({
       title: text(row.title ?? row.headline ?? row.name, `${input.slate.sport} ${this.name} event ${index + 1}`),
@@ -45,8 +47,8 @@ export class JsonSportsResearchProvider implements ResearchSourceProvider {
 
 function parseDate(value: unknown): string | undefined { const valueText = text(value); return valueText && !Number.isNaN(Date.parse(valueText)) ? new Date(valueText).toISOString() : undefined; }
 
-export function espnProvider(baseUrl: string, fetcher?: typeof fetch): JsonSportsResearchProvider {
-  return new JsonSportsResearchProvider({ name: 'ESPN API', tier: 2, baseUrl, fetcher, path: (slate) => `/sports/${sportPath(slate.sport)}/scoreboard?dates=${dateForSlate(slate)}`, tags: ['ESPN'] });
+export function espnProvider(baseUrl: string, fetcher?: typeof fetch, options: { excludeSports?: Sport[] } = {}): JsonSportsResearchProvider {
+  return new JsonSportsResearchProvider({ name: 'ESPN API', tier: 2, baseUrl, fetcher, excludeSports: options.excludeSports, path: (slate) => `/sports/${sportPath(slate.sport)}/scoreboard?dates=${dateForSlate(slate)}`, tags: ['ESPN'] });
 }
 
 export function ballDontLieProvider(baseUrl: string, apiKey: string, fetcher?: typeof fetch): JsonSportsResearchProvider {

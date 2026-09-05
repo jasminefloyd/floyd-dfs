@@ -42,7 +42,7 @@ export class SportsDataIoClient {
   }
 }
 
-// MLB/NBA accept a bare year; NFL requires the season-type suffix ('REG' = regular season).
+// MLB/NBA/CFB accept a bare year; NFL requires the season-type suffix ('REG' = regular season).
 export function seasonParamFor(sport: Sport, eventDate: string, yearOffset = 0): string {
   const year = new Date(eventDate).getUTCFullYear() + yearOffset;
   return sport === 'NFL' ? `${year}REG` : String(year);

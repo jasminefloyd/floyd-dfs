@@ -17,7 +17,10 @@ import { OddsResearchProvider, getTeamMarketContext } from '../src/lib/engine/od
 import { adjustWithOpenAi } from '../src/lib/engine/openAiAdjustment.js';
 import { ConfiguredResearchProvider } from '../src/lib/engine/configuredResearchProvider.js';
 import { OpenAiResearchSynthesizer } from '../src/lib/engine/openAiSynthesizer.js';
+import { AnthropicResearchSynthesizer, FallbackResearchSynthesizer } from '../src/lib/engine/anthropicResearchSynthesizer.js';
+import { adjustWithAnthropic, selectWithAnthropic } from '../src/lib/engine/anthropicStageFallback.js';
 import { ballDontLieProvider, espnProvider } from '../src/lib/engine/structuredSportsProvider.js';
+import { EspnStructuredResearchProvider } from '../src/lib/engine/espnStructuredResearchProvider.js';
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
@@ -57,10 +60,22 @@ export function cors(req: VercelRequest, res: VercelResponse): void {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
-export function respondError(req: VercelRequest, res: VercelResponse, error: unknown): void { cors(req, res); const message = error instanceof Error ? error.message : 'Server request failed.'; res.status(500).json({ error: message }); }
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const value = error as { message?: unknown; details?: unknown; hint?: unknown; code?: unknown };
+    const message = typeof value.message === 'string' ? value.message : 'Server request failed.';
+    const details = typeof value.details === 'string' ? ` ${value.details}` : '';
+    const hint = typeof value.hint === 'string' ? ` Hint: ${value.hint}` : '';
+    const code = typeof value.code === 'string' ? ` [${value.code}]` : '';
+    return `${message}${code}.${details}${hint}`.replace('..', '.');
+  }
+  return 'Server request failed.';
+}
+export function respondError(req: VercelRequest, res: VercelResponse, error: unknown): void { cors(req, res); res.status(500).json({ error: errorMessage(error) }); }
 export function method(req: VercelRequest, res: VercelResponse, allowed: string[]): boolean { cors(req, res); if (req.method === 'OPTIONS') { res.status(204).end(); return false; } if (!allowed.includes(req.method ?? '')) { res.status(405).json({ error: 'Method not allowed.' }); return false; } return true; }
 
-export function draftKingsClient(sportCodes: Partial<Record<'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL', string>> = {}): DraftKingsClient { return new DraftKingsClient({ sportCodes }); }
+export function draftKingsClient(sportCodes: Partial<Record<'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' | 'CFB', string>> = {}): DraftKingsClient { return new DraftKingsClient({ sportCodes }); }
 export function requestId(): string { return crypto.randomUUID(); }
 
 export async function createRun(db: SupabaseClient, input: { tenantId: string; userId: string; requestId: string; entries: number; payload: unknown }): Promise<Json> {
@@ -88,7 +103,7 @@ async function nextVersion(db: SupabaseClient, table: string, generationRunId: s
 }
 function stateForStage(stage: EngineStage): string { return ({ SLATE: 'slate_validated', RESEARCH: 'researching', SPORT_ADJUSTMENT: 'adjusting', PROJECTION: 'projecting', OPTIMIZE: 'optimizing', SELECTION: 'selecting' } as Record<string, string>)[stage] ?? 'created'; }
 
-export function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient; espnProjection?: EspnProjectionClient } {
+export function providerSet(): { agent: ResearchAgent; availability?: SportsDataIoClient; espnProjection?: EspnProjectionClient; anthropicKey?: string; anthropicModel?: string } {
   const providers = [...createDefaultRssProviders() as import('../src/lib/engine/contracts.js').ResearchSourceProvider[]];
   const sportsKey = env('SPORTS_DATA_IO_KEY');
   let availability: SportsDataIoClient | undefined;
@@ -98,7 +113,15 @@ export function providerSet(): { agent: ResearchAgent; availability?: SportsData
   const sentimentUrl = env('FIELD_SENTIMENT_URL');
   if (sentimentUrl) providers.push(new ConfiguredResearchProvider({ name: 'Configured Field Sentiment', url: sentimentUrl, tier: 4 }));
   const espnBaseUrl = env('ESPN_BASE_URL');
-  if (espnBaseUrl) providers.push(espnProvider(espnBaseUrl));
+  // SportsDataIO is the authoritative MLB slate/lineup source. ESPN's MLB
+  // scoreboard endpoint is edge-blocked from the production server runtime
+  // (HTTP 403), so do not make that optional enrichment request for MLB. This
+  // keeps an ESPN access-policy failure out of the MLB research contract while
+  // retaining ESPN structured research for the other supported sports.
+  if (espnBaseUrl) {
+    providers.push(espnProvider(espnBaseUrl, undefined, { excludeSports: ['MLB'] }));
+    providers.push(new EspnStructuredResearchProvider(espnBaseUrl));
+  }
   const ballDontLieKey = env('BALLDONTLIE_KEY');
   if (ballDontLieKey && env('BALLDONTLIE_BASE_URL')) providers.push(ballDontLieProvider(env('BALLDONTLIE_BASE_URL') as string, ballDontLieKey));
   const serpApiKey = env('SERPAPI_API_KEY');
@@ -109,8 +132,11 @@ export function providerSet(): { agent: ResearchAgent; availability?: SportsData
     if (firecrawlKey) providers.push(new FirecrawlResearchProvider(firecrawlKey, serp));
   }
   const openAiKey = env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY');
-  const synthesizer = openAiKey ? new OpenAiResearchSynthesizer({ apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }) : undefined;
-  return { agent: new ResearchAgent({ providers, synthesizer }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined };
+  const anthropicKey = env('ANTHROPIC_API_KEY');
+  const openAiSynthesizer = openAiKey ? new OpenAiResearchSynthesizer({ apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }) : undefined;
+  const anthropicSynthesizer = anthropicKey ? new AnthropicResearchSynthesizer({ apiKey: anthropicKey, model: env('ANTHROPIC_MODEL') }) : undefined;
+  const synthesizer = anthropicSynthesizer ? new FallbackResearchSynthesizer({ primary: openAiSynthesizer, fallback: anthropicSynthesizer }) : openAiSynthesizer;
+  return { agent: new ResearchAgent({ providers, synthesizer }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined, anthropicKey, anthropicModel: env('ANTHROPIC_MODEL') };
 }
 
 export interface RunOptions { lineupMode?: string; minSalaryUsed?: number; }
@@ -118,7 +144,7 @@ export interface RunOptions { lineupMode?: string; minSalaryUsed?: number; }
 export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate, runOptions: RunOptions = {}): Promise<Json> {
   assertSlate(slate);
   await persistConfiguration(db, String(run.tenant_id));
-  const { agent, availability, espnProjection } = providerSet();
+  const { agent, availability, espnProjection, anthropicKey, anthropicModel } = providerSet();
   const stages: Record<string, unknown> = {};
   let workingSlate = slate;
   if (availability) {
@@ -130,29 +156,30 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     // is quantitatively projectable; excluding them upstream would silently drop a player who
     // could still be projected from rate stats even without a raw FPPG number.
     //
-    // MLB/NBA/NFL use real season-to-date stats (PlayerSeasonStats) rather than SportsDataIO's
+    // MLB/NBA/NFL/CFB use real season-to-date stats (PlayerSeasonStats) rather than SportsDataIO's
     // PlayerGameProjectionStatsByDate -- verified live that the latter is obfuscated/scaled down
     // on this account's free trial tier (every text field literally reads "Scrambled", and a real
     // game's combined plate-appearance total came back at ~1/3 of a plausible value), while
     // PlayerSeasonStats' numeric totals check out as real. WNBA is excluded: every player-level
     // stats endpoint on this account 404s for WNBA specifically, so it keeps using its existing,
     // already-real ESPN season-average providerFppg below instead.
-    if (['MLB', 'NBA', 'NFL'].includes(workingSlate.sport)) {
+    if (['MLB', 'NBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
       try {
         let seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate);
         let seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
         let seasonFallbackNote = '';
-        // NFL specifically: early in a season, the current year has 0 games played yet. Fall back
-        // to the most recently completed season rather than projecting from an empty data set.
-        if (workingSlate.sport === 'NFL' && !seasonRows.some((row) => gamesPlayedFromRow(row) > 0)) {
+        // NFL/CFB specifically: early in a season, the current year may have no usable rows for
+        // the selected players. Fall back to the most recently completed season rather than
+        // projecting from an empty data set.
+        if ((workingSlate.sport === 'NFL' || workingSlate.sport === 'CFB') && !seasonRows.some((row) => gamesPlayedFromRow(row) > 0)) {
           seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
           seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
           seasonFallbackNote = ` (current season not yet underway; using ${seasonParam} instead)`;
         }
         let priorSeasonRows: Record<string, unknown>[] = [];
         let priorSeasonParam = '';
-        if (workingSlate.sport === 'MLB') {
-          const currentSeasonMissing = workingSlate.playerPool.some((player) => { const row = findRow(player, seasonRows); return !row || gamesPlayedFromRow(row) <= 0; });
+        if (workingSlate.sport === 'MLB' || workingSlate.sport === 'CFB') {
+          const currentSeasonMissing = workingSlate.playerPool.some((player) => { const row = findRow(player, seasonRows, workingSlate.sport === 'MLB'); return !row || gamesPlayedFromRow(row) <= 0; });
           if (currentSeasonMissing) {
             priorSeasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
             priorSeasonRows = await availability.getSeasonStats(workingSlate.sport, priorSeasonParam);
@@ -160,21 +187,28 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         }
         const missingPlayers: string[] = [];
         const priorSeasonPlayers: string[] = [];
+        const teamMismatchPlayers: string[] = [];
         const refreshedPlayers = workingSlate.playerPool.map((player) => {
-          const currentRow = findRow(player, seasonRows);
+          const allowTeamMismatch = workingSlate.sport === 'MLB' || workingSlate.sport === 'CFB';
+          const currentRow = findRow(player, seasonRows, allowTeamMismatch);
           const currentGames = currentRow ? gamesPlayedFromRow(currentRow) : 0;
-          const row = currentRow && currentGames > 0 ? currentRow : findRow(player, priorSeasonRows);
+          const priorRow = findRow(player, priorSeasonRows, allowTeamMismatch);
+          const row = currentRow && currentGames > 0 ? currentRow : priorRow;
           const games = row ? gamesPlayedFromRow(row) : 0;
           if (!row || games <= 0) { missingPlayers.push(player.playerName); return player; }
           if (row !== currentRow) priorSeasonPlayers.push(player.playerName);
+          const providerTeam = String(row.Team ?? row.team ?? row.TeamAbbreviation ?? '').trim().toUpperCase();
+          const slateTeam = String(player.team ?? '').trim().toUpperCase();
+          if (providerTeam && slateTeam && providerTeam !== slateTeam) teamMismatchPlayers.push(`${player.playerName} (${slateTeam} slate / ${providerTeam} stats)`);
           const dkPoints = Number(row.FantasyPointsDraftKings ?? NaN);
-          const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, row === currentRow ? seasonRows : priorSeasonRows);
+          const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, row === currentRow ? seasonRows : priorSeasonRows, { allowTeamMismatch });
           return { ...player, ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
         });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
         const dataSourceNote = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
         const warnings = [dataSourceNote];
         if (priorSeasonPlayers.length) warnings.push(`Used ${priorSeasonParam} season baseline for ${priorSeasonPlayers.length} ${workingSlate.sport} players without current-season stats: ${priorSeasonPlayers.join(', ')}.`);
+        if (teamMismatchPlayers.length) warnings.push(`Matched unique player-name stats across a team change for ${teamMismatchPlayers.length} ${workingSlate.sport} players: ${teamMismatchPlayers.join(', ')}.`);
         if (missingPlayers.length) warnings.push(`No current or ${priorSeasonParam || 'prior'} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`);
         stages.projectionDataSourceWarnings = warnings;
       } catch (error) { stages.projectionDataSourceWarnings = [error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.']; }
@@ -185,7 +219,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   // this plan), so ESPN's roster status/injuries endpoint is the availability source for these
   // sports -- applied after the SportsDataIO pass above so it overwrites that pass's empty,
   // "no configured feed" result for these sports with real per-player status.
-  if (espnProjection && ['NBA', 'WNBA', 'NFL'].includes(workingSlate.sport)) {
+  if (espnProjection && ['NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
     try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate)); }
     catch (error) { const message = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `ESPN availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
   }
@@ -232,10 +266,22 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if ((research.unknowns ?? []).length) { const watchItems = await db.from('floyd_dfs_watch_items').insert((research.unknowns ?? []).map((unknown) => ({ tenant_id: run.tenant_id, generation_run_id: run.id, subject: unknown.question, importance: unknown.importance, current_state: { reason: unknown.reason }, trigger_condition: { expectedChangeBeforeLock: true }, affected_player_ids: workingSlate.playerPool.map((player) => player.playerId), affected_lineup_ids: [], expected_update_at: workingSlate.contest.lockTime, status: 'active' }))); if (watchItems.error) throw watchItems.error; }
   let adjustment = adjustSlate(workingSlate, research);
   const adjustmentKey = env('OPENAI_API_KEY');
-  if (adjustmentKey && adjustment.status !== 'BLOCKED') { try { adjustment = await adjustWithOpenAi({ slate: workingSlate, research, baseline: adjustment }, { apiKey: adjustmentKey, model: openAiModel() }); } catch (error) { const message = error instanceof Error ? error.message : 'OpenAI Sport Adjustment failed; deterministic specialist retained.'; stages.adjustmentWarning = message; adjustment = { ...adjustment, warnings: [...(adjustment.warnings ?? []), message] }; } }
+  if ((adjustmentKey || anthropicKey) && adjustment.status !== 'BLOCKED') {
+    try {
+      if (adjustmentKey) adjustment = await adjustWithOpenAi({ slate: workingSlate, research, baseline: adjustment }, { apiKey: adjustmentKey, model: openAiModel() });
+      else adjustment = await adjustWithAnthropic({ slate: workingSlate, research, baseline: adjustment }, { apiKey: anthropicKey!, model: anthropicModel });
+    }
+    catch (error) {
+      const message = error instanceof Error ? error.message : 'OpenAI Sport Adjustment failed.';
+      if (anthropicKey) {
+        try { adjustment = await adjustWithAnthropic({ slate: workingSlate, research, baseline: adjustment }, { apiKey: anthropicKey, model: anthropicModel }); stages.adjustmentWarning = `${message} Anthropic fallback used successfully.`; }
+        catch (fallbackError) { const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : 'Anthropic Sport Adjustment fallback failed.'; stages.adjustmentWarning = `${message} Anthropic fallback failed: ${fallbackMessage} Deterministic specialist retained.`; adjustment = { ...adjustment, warnings: [...(adjustment.warnings ?? []), stages.adjustmentWarning as string] }; }
+      } else { stages.adjustmentWarning = `${message} Anthropic fallback unavailable because ANTHROPIC_API_KEY is not configured.`; adjustment = { ...adjustment, warnings: [...(adjustment.warnings ?? []), stages.adjustmentWarning as string] }; }
+    }
+  }
   assertAdjustment(adjustment, research);
   stages.adjustment = adjustment;
-  await saveStage(db, run, 'SPORT_ADJUSTMENT', { slate: workingSlate, research }, adjustment, adjustment.status, adjustment.warnings ?? []);
+  await saveStage(db, run, 'SPORT_ADJUSTMENT', { slate: workingSlate, research }, adjustment, adjustment.status, [...(adjustment.warnings ?? []), ...((stages.adjustmentWarning as string | undefined) ? [stages.adjustmentWarning as string] : [])]);
   const adjustmentVersion = await nextVersion(db, 'floyd_dfs_adjustment_runs', String(run.id));
   const adjustmentRun = await db.from('floyd_dfs_adjustment_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, version: adjustmentVersion, sport: adjustment.sport, adjustment_package: adjustment, status: adjustment.status, model_name: openAiModel(), prompt_version: 'sport-adjustment.deterministic.v1' }).select('id').single();
   if (adjustmentRun.error) throw adjustmentRun.error;
@@ -263,8 +309,18 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const calibration = await loadCashLineCalibration(db, String(run.tenant_id));
   let selection = selectLineups({ validatedSlate: workingSlate, researchPackage: research, optimizerPackage: optimizer, cashLineCalibration: calibration });
   const openAiKey = env('OPENAI_API_KEY') ?? env('VITE_OPENAI_API_KEY');
-  if (openAiKey && selection.status === 'COMPLETE' && selection.selectedLineups.length) {
-    try { selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') }); } catch (error) { const message = error instanceof Error ? error.message : 'OpenAI Selection failed; deterministic selection retained.'; stages.selectionWarning = message; selection = { ...selection, warnings: [...(selection.warnings ?? []), message] }; }
+  if ((openAiKey || anthropicKey) && selection.status === 'COMPLETE' && selection.selectedLineups.length) {
+    try {
+      if (openAiKey) selection = await selectWithOpenAi({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration }, { apiKey: openAiKey, model: env('OPENAI_MODEL') ?? env('AI_MODEL') });
+      else selection = await selectWithAnthropic({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration, apiKey: anthropicKey!, model: anthropicModel });
+    }
+    catch (error) {
+      const message = error instanceof Error ? error.message : 'OpenAI Selection failed.';
+      if (anthropicKey) {
+        try { selection = await selectWithAnthropic({ slate: workingSlate, research, candidates: optimizer.candidates, selection, cashLineCalibration: calibration, apiKey: anthropicKey, model: anthropicModel }); stages.selectionWarning = `${message} Anthropic fallback used successfully.`; }
+        catch (fallbackError) { const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : 'Anthropic Selection fallback failed.'; stages.selectionWarning = `${message} Anthropic fallback failed: ${fallbackMessage} Deterministic selection retained.`; selection = { ...selection, warnings: [...(selection.warnings ?? []), stages.selectionWarning as string] }; }
+      } else { stages.selectionWarning = `${message} Anthropic fallback unavailable because ANTHROPIC_API_KEY is not configured.`; selection = { ...selection, warnings: [...(selection.warnings ?? []), stages.selectionWarning as string] }; }
+    }
   }
   assertSelection(selection, optimizer);
   stages.selection = selection;
@@ -317,5 +373,5 @@ function openAiModel(): string | undefined { return env('OPENAI_MODEL') ?? env('
 function normalizeProjectionName(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function normalizeProjectionTeam(value: string): string { return normalizeTeamCode(value); }
 export function asFormat(value: unknown): ContestFormat { return String(value ?? 'SHOWDOWN').toUpperCase() === 'CLASSIC' ? 'CLASSIC' : 'SHOWDOWN'; }
-export function asSport(value: unknown): 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' { const sport = String(value ?? '').toUpperCase(); if (['WNBA', 'NBA', 'MLB', 'GOLF', 'NFL'].includes(sport)) return sport as 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL'; throw new Error(`Unsupported sport: ${sport}.`); }
+export function asSport(value: unknown): 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' | 'CFB' { const sport = String(value ?? '').toUpperCase(); if (['WNBA', 'NBA', 'MLB', 'GOLF', 'NFL', 'CFB'].includes(sport)) return sport as 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' | 'CFB'; throw new Error(`Unsupported sport: ${sport}.`); }
 export type { Json };

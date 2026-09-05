@@ -11,11 +11,11 @@ export function explainArticleRejection(article: ResearchArticle, slate: Validat
 function articleSlateMatch(article: ResearchArticle, slate: ValidatedSlate): { accepted: boolean; reason: string } {
   const target = slate.sport.toUpperCase();
   const acceptedSports = target === 'WNBA' ? ['WNBA', 'NBA'] : [target];
-  const foreignSports = ['NBA', 'WNBA', 'NFL', 'MLB', 'GOLF'].filter((sport) => !acceptedSports.includes(sport));
+  const foreignSports = ['NBA', 'WNBA', 'NFL', 'CFB', 'MLB', 'GOLF'].filter((sport) => !acceptedSports.includes(sport));
   const targetTerms = [...slate.event.participants, ...slate.playerPool.flatMap((player) => [player.playerName, player.team ?? '', player.opponent ?? '', ...teamAliases(player.team), ...teamAliases(player.opponent)])]
     .map((term) => term.trim()).filter((term) => term.length >= 3);
   const text = `${article.title} ${article.summary ?? ''} ${article.content ?? ''} ${article.sourceName} ${(article.tags ?? []).join(' ')}`;
-  const taggedSports = (article.tags ?? []).map((tag) => tag.toUpperCase()).filter((tag) => ['NBA', 'WNBA', 'NFL', 'MLB', 'GOLF'].includes(tag));
+  const taggedSports = (article.tags ?? []).map((tag) => tag.toUpperCase()).filter((tag) => ['NBA', 'WNBA', 'NFL', 'CFB', 'MLB', 'GOLF'].includes(tag));
   if (taggedSports.length && taggedSports.some((sport) => !acceptedSports.includes(sport))) return { accepted: false, reason: `wrong sport tag (${taggedSports.join(', ')})` };
   if (!taggedSports.length && foreignSports.some((sport) => new RegExp(`\\b${escapeRegExp(sport)}\\b`, 'i').test(text))) return { accepted: false, reason: 'foreign sport detected in untagged content' };
   if (!targetTerms.some((term) => termMatchesText(term, text))) return { accepted: false, reason: 'no participant, team, opponent, or player match' };
@@ -72,6 +72,7 @@ const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
   PROJECTED: 'projected to play, not yet confirmed',
   INACTIVE: 'inactive',
   OUT: 'ruled out',
+  NOT_IN_CONFIRMED_LINEUP: 'not in the confirmed starting lineup',
 };
 
 // Converts the confirmed-lineup/availability data already fetched onto the slate (before

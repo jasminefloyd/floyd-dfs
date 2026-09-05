@@ -10,6 +10,10 @@ export const DEFAULT_RSS_FEEDS: readonly RssFeedConfig[] = [
   { url: 'https://www.espn.com/espn/rss/wnba/news', name: 'ESPN WNBA', tier: 2, tags: ['WNBA'] },
   { url: 'https://www.espn.com/espn/rss/mlb/news', name: 'ESPN MLB', tier: 2, tags: ['MLB'] },
   { url: 'https://www.espn.com/espn/rss/golf/news', name: 'ESPN Golf', tier: 2, tags: ['GOLF'] },
+  { url: 'https://www.espn.com/espn/rss/ncf/news', name: 'ESPN College Football', tier: 2, tags: ['CFB'] },
+  { url: 'https://www.ncaa.com/news/football/fbs/rss.xml', name: 'NCAA FBS Football', tier: 1, tags: ['CFB'] },
+  { url: 'https://sports.yahoo.com/college-football/rss/', name: 'Yahoo College Football', tier: 2, tags: ['CFB'] },
+  { url: 'https://www.yardbarker.com/rss/sport_merged/5', name: 'Yardbarker College Football', tier: 3, tags: ['CFB'] },
   { url: 'https://www.rotowire.com/rss/news.php?sport=NFL', name: 'RotoWire NFL', tier: 3, tags: ['NFL'] },
   { url: 'https://www.rotowire.com/rss/news.php?sport=MLB', name: 'RotoWire MLB', tier: 3, tags: ['MLB'] },
   { url: 'https://www.rotowire.com/rss/news.php?sport=NBA', name: 'RotoWire NBA', tier: 3, tags: ['NBA'] },
@@ -20,7 +24,7 @@ export const DEFAULT_RSS_FEEDS: readonly RssFeedConfig[] = [
 // source allowlist separate from DEFAULT_RSS_FEEDS because the engine's
 // research stage may use fantasy-oriented context while the global ticker may
 // not.
-export const LEAGUE_NEWS_RSS_FEEDS: readonly RssFeedConfig[] = DEFAULT_RSS_FEEDS.filter((feed) => feed.name.startsWith('ESPN ') && feed.tags?.some((tag) => ['NFL', 'NBA', 'WNBA', 'MLB', 'GOLF'].includes(tag)));
+export const LEAGUE_NEWS_RSS_FEEDS: readonly RssFeedConfig[] = DEFAULT_RSS_FEEDS.filter((feed) => feed.tags?.some((tag) => ['NFL', 'NBA', 'WNBA', 'MLB', 'GOLF', 'CFB'].includes(tag)) && ['ESPN ', 'NCAA ', 'Yahoo ', 'Yardbarker '].some((prefix) => feed.name.startsWith(prefix)));
 
 export class RssResearchProvider implements ResearchSourceProvider {
   readonly name: string;

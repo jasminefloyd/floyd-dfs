@@ -1,4 +1,5 @@
 import type { ResearchArticle, ResearchBucket, ResearchFinding, ResearchPlan, ResearchSynthesizerInput, ValidatedSlate } from './openAiTypes.js';
+import { providerHttpError } from './providerDiagnostics.js';
 
 type JsonFinding = { sourceIndex: number; bucket: ResearchBucket; subjectId: string; finding: string; confidence: 'LOW' | 'MEDIUM' | 'HIGH' };
 export interface OpenAiResearchSynthesizerOptions { apiKey: string; model?: string; endpoint?: string; fetcher?: typeof fetch; }
@@ -12,7 +13,7 @@ export class OpenAiResearchSynthesizer {
     if (!this.options.apiKey) throw new Error('OPENAI_API_KEY is required.');
     const request: RequestInit = { method: 'POST', signal: input.signal, headers: { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: this.options.model ?? 'gpt-5', store: false, input: buildPrompt(input.slate, input.plan, input.articles), text: { format: { type: 'json_schema', name: 'research_findings', strict: true, schema: schema() } } }) };
     const response = await requestWithRetry(this.fetcher, this.options.endpoint ?? 'https://api.openai.com/v1/responses', request, input.signal);
-    if (!response.ok) throw new Error(`OpenAI Responses API returned HTTP ${response.status}.`);
+    if (!response.ok) throw await providerHttpError('OpenAI Responses API', response);
     const payload = await response.json() as Record<string, unknown>;
     const text = typeof payload.output_text === 'string' ? payload.output_text : extractOutputText(payload.output);
     if (!text) throw new Error('OpenAI returned no structured research output.');

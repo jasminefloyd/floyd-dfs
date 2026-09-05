@@ -16,7 +16,7 @@ import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
-import { dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
+import { dkCfbFantasyPoints, dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 
 const now = new Date('2026-08-23T12:00:00.000Z');
@@ -179,7 +179,7 @@ const testSelectionWatchItemsParity = (): void => {
 const testAvailabilityParity = (): void => {
   const mlb = { ...baseSlate, sport: 'MLB' as const, league: 'MLB' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player One', team: 'CWS' }, { ...baseSlate.playerPool[1], playerName: 'Player Two', team: 'NYY' }] };
   const result = applyAvailabilitySnapshot(mlb, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: true, records: [{ playerName: 'Player One', team: 'CWS', status: 'CONFIRMED_STARTER', confirmed: true, battingOrder: 1 }] });
-  assert.equal(result.playerPool.length, 2, 'a confirmed lineup must not silently remove an otherwise unmapped player'); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER'); assert.equal(result.playerPool[1].availability?.status, 'UNKNOWN');
+  assert.equal(result.playerPool.length, 1, 'a confirmed MLB lineup must exclude DraftKings players without a matching starter record from the primary slate'); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
 };
 
 const testOutPlayersRemovedForNonMlbSportsParity = (): void => {
@@ -692,9 +692,49 @@ const testResearchDateNormalizationParity = (): void => {
   assert.equal(normalizeResearchPublishedAt('not a timestamp'), undefined);
 };
 
+const testResearchProviderFailureDoesNotBlockParity = async (): Promise<void> => {
+  const result = await new ResearchAgent({
+    providers: [
+      { name: 'failing-provider', tier: 3, fetch: async () => { throw new Error('provider unavailable'); } },
+      { name: 'healthy-provider', tier: 2, fetch: async () => [{ title: 'Verified slate update', sourceName: 'healthy-provider', sourceTier: 2, tags: ['NBA'] }] },
+    ],
+  }).run({ validatedSlate: baseSlate });
+  assert.equal(result.providerResults?.find((provider) => provider.provider === 'failing-provider')?.status, 'FAILED');
+  assert.equal(result.providerResults?.find((provider) => provider.provider === 'healthy-provider')?.status, 'SUCCEEDED');
+};
+
+const testCollegeFootballSupportParity = (): void => {
+  assert.equal(dkCfbFantasyPoints({ passingYards: 300, passingTouchdowns: 2, interceptions: 1, rushingYards: 100, rushingTouchdowns: 1 }), 41, 'CFB scoring must include verified yardage bonuses and football touchdown/interception values');
+  const slate: ValidatedSlate = {
+    ...baseSlate,
+    sport: 'CFB',
+    league: 'CFB',
+    scoringRules: { passingYards: { value: 0.04 }, passingTouchdown: { value: 4 }, passingYardBonus: { value: 3 }, interception: { value: -1 }, rushingYards: { value: 0.1 }, rushingTouchdown: { value: 6 }, rushingYardBonus: { value: 3 }, reception: { value: 1 }, receivingYards: { value: 0.1 }, receivingTouchdown: { value: 6 }, receivingYardBonus: { value: 3 }, fumbleLost: { value: -1 }, twoPointConversion: { value: 2 } },
+    playerPool: [
+      { ...baseSlate.playerPool[0], playerId: 'cfb-qb', playerName: 'CFB Quarterback', position: 'QB', projectionInputs: { passAttempts: 35, completionRate: 0.7, yardsPerCompletion: 12.3, passingTouchdownRate: 0.08, interceptionRate: 0.02, carries: 8, yardsPerCarry: 6, touchdownProbability: 0.4 } },
+      { ...baseSlate.playerPool[1], playerId: 'cfb-wr', playerName: 'CFB Receiver', position: 'WR', projectionInputs: { snaps: 60, routes: 35, targets: 9, carries: 0, catchRate: 0.7, yardsPerTarget: 14, yardsPerCarry: 0, touchdownProbability: 0.25 } },
+    ],
+    rosterRules: { rosterSize: 2, slots: { QB: { count: 1 }, WR: { count: 1 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } },
+  };
+  const projected = projectSlate(slate, adjustSlate(slate, research, now), now);
+  assert.equal(projected.players.length, 2);
+  assert.equal(projected.players[0].modelPath, 'SPORT_STRUCTURED');
+  assert.equal(projected.players[0].distribution?.correlationGroup?.startsWith('CFB:'), true);
+  assert.ok(projected.players[0].componentProjection.passingYardBonus !== undefined, 'CFB projection must model the 300-yard passing bonus');
+};
+
+const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
+  const slate: ValidatedSlate = { ...baseSlate, sport: 'CFB', league: 'CFB', scoringRules: { passingYards: { value: 0.04 }, passingTouchdown: { value: 4 }, passingYardBonus: { value: 3 }, interception: { value: -1 }, rushingYards: { value: 0.1 }, rushingTouchdown: { value: 6 }, rushingYardBonus: { value: 3 }, reception: { value: 1 }, receivingYards: { value: 0.1 }, receivingTouchdown: { value: 6 }, receivingYardBonus: { value: 3 }, fumbleLost: { value: -1 }, twoPointConversion: { value: 2 } }, playerPool: [{ ...baseSlate.playerPool[0], playerId: 'cfb-quantile', position: 'QB', projectionInputs: { passAttempts: 12, completionRate: 0.5, yardsPerCompletion: 8, passingTouchdownRate: 0, interceptionRate: 0.12, carries: 1, yardsPerCarry: 2, touchdownProbability: 0 } }] };
+  const projected = projectSlate(slate, adjustSlate(slate, research, now), now).players[0];
+  assert.ok(projected.projectedOutcomes.floorP20 <= projected.projectedOutcomes.medianP50);
+  assert.ok(projected.projectedOutcomes.medianP50 <= projected.projectedOutcomes.ceilingP90);
+};
+
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
   await testAvailabilitySeedsResearchParity();
+  await testResearchProviderFailureDoesNotBlockParity();
+  testProjectionQuantilesUseOneOrderedDistribution();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   await testMarketContextImpliedTotalParity();
   console.log('engine parity tests passed');

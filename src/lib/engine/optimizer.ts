@@ -55,7 +55,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const projectionByPlayer = new Map(input.projectionPackage.players.map((player) => [player.playerId, player]));
   const excludedPlayers = input.validatedSlate.playerPool.filter((player) => !projectionByPlayer.has(player.playerId));
   if (excludedPlayers.length) { const names = excludedPlayers.map((player) => player.playerName); warnings.push(`${excludedPlayers.length} player(s) have no projection and were excluded from lineup generation: ${names.slice(0, 10).join(', ')}${names.length > 10 ? `, and ${names.length - 10} more` : ''}.`); }
-  const ineligiblePlayers = input.validatedSlate.playerPool.filter((player) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE');
+  const ineligiblePlayers = input.validatedSlate.playerPool.filter((player) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE' || player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP');
   if (ineligiblePlayers.length) warnings.push(`${ineligiblePlayers.length} player(s) excluded from lineup generation because availability is explicitly OUT/INACTIVE: ${ineligiblePlayers.map((player) => player.playerName).slice(0, 10).join(', ')}.`);
   // An MLB starting pitcher is not interchangeable with an unconfirmed player. A DraftKings
   // slate can contain eligible players before the official starters are posted, and UNKNOWN or
@@ -68,7 +68,9 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
     : [];
   if (unconfirmedMlbStarters.length) warnings.push(`${unconfirmedMlbStarters.length} MLB starting pitcher(s) excluded because they were not confirmed starters: ${unconfirmedMlbStarters.map((player) => player.playerName).slice(0, 10).join(', ')}${unconfirmedMlbStarters.length > 10 ? `, and ${unconfirmedMlbStarters.length - 10} more` : ''}.`);
   const excludedIds = new Set(unconfirmedMlbStarters.map((player) => player.playerId));
-  const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId) && player.availability?.status !== 'OUT' && player.availability?.status !== 'INACTIVE' && !excludedIds.has(player.playerId)) } };
+  const nonStarters = input.validatedSlate.sport === 'MLB' ? input.validatedSlate.playerPool.filter((player) => player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP') : [];
+  if (nonStarters.length) warnings.push(`${nonStarters.length} MLB player(s) excluded because they were not in the confirmed starting lineup: ${nonStarters.map((player) => player.playerName).slice(0, 10).join(', ')}${nonStarters.length > 10 ? `, and ${nonStarters.length - 10} more` : ''}.`);
+  const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId) && player.availability?.status !== 'OUT' && player.availability?.status !== 'INACTIVE' && player.availability?.status !== 'NOT_IN_CONFIRMED_LINEUP' && !excludedIds.has(player.playerId)) } };
 
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
@@ -235,6 +237,7 @@ function baseSlot(slot: string): string { return slot.replace(/_\d+$/, ''); }
 // deterministic engine.
 const POSITION_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; weight: number }>>> = {
   NFL: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.18 }, { a: /^RB$/i, b: /^DST$/i, weight: -0.05 }],
+  CFB: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.18 }],
   NBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
   WNBA: [{ a: /^PG$/i, b: /^(SG|SF)$/i, weight: 0.08 }],
   // A team's own pitcher and its hitters are largely independent outcomes (not a real stack),
@@ -249,6 +252,7 @@ const POSITION_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; 
 // actually facing (strikeouts/quality starts directly suppress those hitters' output).
 const BRING_BACK_CORRELATION: Partial<Record<Sport, Array<{ a: RegExp; b: RegExp; weight: number }>>> = {
   NFL: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.08 }],
+  CFB: [{ a: /^QB$/i, b: /^(WR|TE)$/i, weight: 0.08 }],
   NBA: [{ a: /^(PG|SG|SF|PF|C)$/i, b: /^(PG|SG|SF|PF|C)$/i, weight: 0.02 }],
   WNBA: [{ a: /^(PG|SG|SF|PF|C)$/i, b: /^(PG|SG|SF|PF|C)$/i, weight: 0.02 }],
   MLB: [{ a: /^P$/i, b: /^(C|1B|2B|3B|SS|OF)$/i, weight: -0.05 }],

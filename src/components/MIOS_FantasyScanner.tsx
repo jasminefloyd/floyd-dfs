@@ -77,6 +77,8 @@ const PAYOUT_SHAPES = [
   { value: 'double_up', label: 'Double Up' },
 ];
 
+const SPORT_LABELS: Record<string, string> = { nba: 'NBA', wnba: 'WNBA', mlb: 'MLB', nfl: 'NFL', cfb: 'College Football', golf: 'Golf' };
+
 const SLATES_PER_PAGE = 7;
 const SCAN_WINDOW_HOURS = 7 * 24;
 
@@ -389,7 +391,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
                 disabled={loading}
                 className="sr-only"
               />
-              <span>{s}</span>
+              <span>{SPORT_LABELS[s] ?? s.toUpperCase()}</span>
             </label>
           ))}
         </div>
@@ -636,6 +638,7 @@ function sportLogoFallback(sport: string): string | undefined {
     wnba: 'https://a.espncdn.com/i/teamlogos/leagues/500/wnba.png',
     mlb: 'https://a.espncdn.com/i/teamlogos/leagues/500/mlb.png',
     nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
+    cfb: '/ncaa-college-football.webp',
   };
   return logos[sport];
 }
@@ -739,6 +742,7 @@ function numberOrDefault(value: unknown, fallback: number): number {
 function classicRosterSize(sport: string): number {
   if (sport === 'wnba') return 6;
   if (sport === 'nfl') return 9;
+  if (sport === 'cfb') return 8;
   if (sport === 'mlb') return 10;
   if (sport === 'golf') return 6;
   return 8;
