@@ -57,7 +57,7 @@ export interface SlatePlayer {
   teamLogoUrl?: string;
   projectionInputs?: Record<string, number>;
   availability?: {
-    status: 'CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' | 'NOT_IN_CONFIRMED_LINEUP' | 'INACTIVE' | 'OUT' | 'UNKNOWN';
+    status: 'CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' | 'NOT_IN_CONFIRMED_LINEUP' | 'NOT_IN_PROVIDER_ROSTER' | 'INACTIVE' | 'OUT' | 'UNKNOWN';
     confirmed: boolean;
     source: string;
     retrievedAt: string;

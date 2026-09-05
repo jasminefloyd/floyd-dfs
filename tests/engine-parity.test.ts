@@ -190,6 +190,24 @@ const testOutPlayersRemovedForNonMlbSportsParity = (): void => {
   assert.ok(result.validation.warnings.some((warning) => warning.includes('removed')));
 };
 
+const testCollegeFootballRosterSemanticsParity = async (): Promise<void> => {
+  const cfb: ValidatedSlate = { ...baseSlate, sport: 'CFB', league: 'CFB', playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Rostered Player', team: 'CLEM' }, { ...baseSlate.playerPool[1], playerName: 'Unmatched Player', team: 'LSU' }] };
+  const result = applyAvailabilitySnapshot(cfb, {
+    source: 'ESPN',
+    retrievedAt: now.toISOString(),
+    confirmedLineupAvailable: false,
+    rosterComplete: true,
+    records: [{ playerName: 'Rostered Player', team: 'CLEM', status: 'ACTIVE', confirmed: false, note: 'Listed on ESPN roster; starting role was not confirmed by this source.' }],
+  });
+  assert.equal(result.playerPool.length, 1, 'a complete CFB provider roster must remove unmatched DraftKings players from the primary optimization pool');
+  assert.equal(result.playerPool[0].availability?.status, 'ACTIVE');
+  assert.equal(result.playerPool[0].availability?.confirmed, false, 'CFB roster membership must not be represented as a confirmed starter');
+  const agent = new ResearchAgent({ providers: [{ name: 'stub', tier: 3, fetch: async () => [] }], now: () => now });
+  const researchResult = await agent.run({ validatedSlate: result });
+  assert.equal(researchResult.unknowns?.some((unknown) => unknown.subjectId === result.playerPool[0].playerId), false, 'direct roster evidence should resolve the missing availability evidence gap');
+  assert.ok(researchResult.findings.some((finding) => finding.subjectId === result.playerPool[0].playerId && finding.finding.includes('starting role was not confirmed')), 'research evidence must preserve that roster membership does not verify a CFB starting role');
+};
+
 const testAvailabilitySeedsResearchParity = async (): Promise<void> => {
   const slateWithAvailability: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player, index) => index === 0 ? { ...player, availability: { status: 'CONFIRMED_STARTER', confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' } } : player) };
   const seeds = findingsFromAvailability(slateWithAvailability);
@@ -732,6 +750,7 @@ const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
 
 (async () => {
   testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
+  await testCollegeFootballRosterSemanticsParity();
   await testAvailabilitySeedsResearchParity();
   await testResearchProviderFailureDoesNotBlockParity();
   testProjectionQuantilesUseOneOrderedDistribution();

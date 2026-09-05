@@ -61,31 +61,57 @@ export class EspnProjectionClient {
     return rosterRows.flat();
   }
 
-  // NBA/WNBA/NFL availability, sourced from ESPN's team roster endpoint (already reachable via
+  // NBA/WNBA/NFL/CFB availability, sourced from ESPN's team roster endpoint (already reachable via
   // this.baseUrl; no dedicated confirmed-lineup feed like MLB's SportsDataIO integration exists
   // for these sports). Each athlete carries a `status` object and an `injuries` array; the exact
   // non-"active" status.type/injury-status taxonomy wasn't verified against a real
   // injured/questionable player during implementation, so unrecognized values fall back to
-  // UNKNOWN (never guessed as OUT) rather than risk excluding a healthy player.
+  // UNKNOWN (never guessed as OUT) rather than risk excluding a healthy player. For CFB,
+  // roster membership is deliberately not treated as a confirmed starting role.
   async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
     const sportPath = ESPN_AVAILABILITY_SPORT_PATH[slate.sport];
     if (!sportPath) return { source: 'ESPN', retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured ESPN availability mapping.` };
     const teams = [...new Set(slate.playerPool.map((player) => normalizeTeamCode(player.team)).filter(Boolean))];
+    const teamIds = slate.sport === 'CFB' ? await this.resolveCollegeTeamIds(slate, teams, signal) : new Map<string, string>();
     const rosterRows = await Promise.all(teams.map(async (team) => {
       try {
-        const roster = await this.getJson(`${this.baseUrl}/sports/${sportPath.sportGroup}/${sportPath.league}/teams/${team.toLowerCase()}/roster`, signal);
+        const teamResource = teamIds.get(team) ?? team.toLowerCase();
+        const roster = await this.getJson(`${this.baseUrl}/sports/${sportPath.sportGroup}/${sportPath.league}/teams/${teamResource}/roster`, signal);
         const groups = listRecords(roster.athletes);
         const athletes = groups.length && groups[0].items !== undefined ? groups.flatMap((group) => listRecords(group.items)) : groups;
         return athletes.flatMap((athlete): AvailabilityRecord[] => {
           const name = text(athlete.fullName ?? athlete.displayName);
           if (!name) return [];
-          return [{ playerName: name, team, status: espnAvailabilityStatus(athlete), confirmed: true, updatedAt: new Date().toISOString() }];
+          const status = espnAvailabilityStatus(athlete);
+          return [{ playerName: name, team, status, confirmed: false, updatedAt: new Date().toISOString(), note: slate.sport === 'CFB' ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
         });
       } catch { return []; }
     }));
     const records = rosterRows.flat();
     const teamsWithRecords = new Set(records.map((record) => record.team));
-    return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: teams.length > 0 && teams.every((team) => teamsWithRecords.has(team)), note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
+    const rosterComplete = teams.length > 0 && teams.every((team) => teamsWithRecords.has(team));
+    return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: false, rosterComplete, note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
+  }
+
+  private async resolveCollegeTeamIds(slate: ValidatedSlate, teams: string[], signal?: AbortSignal): Promise<Map<string, string>> {
+    try {
+      const date = espnDate(slate);
+      const scoreboard = await this.getJson(`${this.baseUrl}/sports/football/college-football/scoreboard?dates=${date}`, signal);
+      const resolved = new Map<string, string>();
+      for (const event of listRecords(scoreboard.events)) {
+        for (const competition of listRecords(event.competitions)) {
+          for (const competitor of listRecords(competition.competitors)) {
+            const team = asRecord(competitor.team);
+            const code = normalizeTeamCode(text(team?.abbreviation));
+            const id = text(team?.id);
+            if (code && id && teams.includes(code)) resolved.set(code, id);
+          }
+        }
+      }
+      return resolved;
+    } catch {
+      return new Map();
+    }
   }
 
   private async getJson(url: string, signal?: AbortSignal): Promise<Record<string, unknown>> {

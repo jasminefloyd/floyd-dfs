@@ -73,6 +73,7 @@ const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
   INACTIVE: 'inactive',
   OUT: 'ruled out',
   NOT_IN_CONFIRMED_LINEUP: 'not in the confirmed starting lineup',
+  NOT_IN_PROVIDER_ROSTER: 'not found on the provider roster',
 };
 
 // Converts the confirmed-lineup/availability data already fetched onto the slate (before
@@ -83,7 +84,7 @@ const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
 export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding[] {
   return slate.playerPool.flatMap((player, index) => {
     const availability = player.availability;
-    if (!availability || availability.mappedBy === 'UNMAPPED' || availability.status === 'UNKNOWN') return [];
+    if (!availability || availability.mappedBy === 'UNMAPPED' || availability.status === 'NOT_IN_PROVIDER_ROSTER') return [];
     const statusText = AVAILABILITY_STATUS_TEXT[availability.status] ?? availability.status.toLowerCase();
     const finding = `${player.playerName} is ${statusText} per ${availability.source}${availability.note ? ` (${availability.note})` : ''}.`;
     return [{
@@ -94,7 +95,7 @@ export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding
       finding,
       sourceName: availability.source,
       sourceTier: 1 as const,
-      sourcePurpose: 'Directly fetched confirmed-lineup/availability data for this exact slate.',
+        sourcePurpose: availability.status === 'UNKNOWN' ? 'Directly fetched roster/availability data for this exact slate; starting role remains unconfirmed.' : 'Directly fetched confirmed-lineup/availability data for this exact slate.',
       publishedAt: availability.retrievedAt,
       retrievedAt: availability.retrievedAt,
       confidence: availability.confirmed ? 'HIGH' as const : 'MEDIUM' as const,
