@@ -51,12 +51,20 @@ export class SportsDataIoClient {
     const records: AvailabilityRecord[] = [];
     const notes: string[] = [];
     let complete = true;
+    // The account-accessible CFB roster operation is PlayersByActive. The older
+    // PlayerDetailsByTeam operation is listed in legacy client metadata but returns
+    // HTTP 404 for this account, so fetch the verified active-player roster once and
+    // partition it by the provider's unique team Key.
+    const activePlayers = rowsFromPayload(await this.get<unknown>('CFB', 'scores', 'PlayersByActive', undefined, signal));
     for (const slateTeam of slateTeams) {
       const fallbackTeam = teamRows.map((value) => asRecord(value)).find((row) => row && normalizeProviderName(readString(row, ['Abbreviation', 'abbreviation']) ?? '') === normalizeProviderName(slateTeam));
       const providerKey = teamKeys.get(slateTeam) ?? (fallbackTeam ? readString(fallbackTeam, ['Key', 'key']) : undefined);
       if (typeof providerKey !== 'string' || !providerKey) { complete = false; notes.push(`SportsDataIO CFB team key was not resolved for ${slateTeam}.`); continue; }
-      const payload = await this.get<unknown>('CFB', 'scores', 'PlayerDetailsByTeam', providerKey, signal);
-      const rosterRows = rowsFromPayload(payload);
+      const rosterRows = activePlayers.filter((value) => {
+        const row = asRecord(value); if (!row) return false;
+        const providerTeam = readString(row, ['Team', 'team']);
+        return providerTeam ? normalizeTeamCode(providerTeam) === normalizeTeamCode(providerKey) : false;
+      });
       if (!rosterRows.length) { complete = false; notes.push(`SportsDataIO CFB roster returned no players for ${slateTeam} (${providerKey}).`); continue; }
       for (const value of rosterRows) {
         const row = asRecord(value); if (!row) continue;

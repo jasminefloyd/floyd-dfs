@@ -240,17 +240,19 @@ const testCfbSportsDataIoRosterAndInjuryParity = async (): Promise<void> => {
   const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
     const url = String(input); requested.push(url);
     if (url.endsWith('/cfb/scores/json/Teams')) return new Response(JSON.stringify([
-      { Key: 'CLEM', ShortDisplayName: 'Clemson', School: 'Clemson', Abbreviation: 'CLEM' },
+      { Key: 'CLMSN', ShortDisplayName: 'CLEM', School: 'Clemson', Abbreviation: 'CLEM' },
       { Key: 'LSU', ShortDisplayName: 'LSU', School: 'Louisiana State', Abbreviation: 'LSU' },
     ]), { status: 200 });
-    if (url.endsWith('/cfb/scores/json/PlayerDetailsByTeam/CLEM')) return new Response(JSON.stringify([{ PlayerID: 501, Name: 'Quarterback One', InjuryStatus: null }]), { status: 200 });
-    if (url.endsWith('/cfb/scores/json/PlayerDetailsByTeam/LSU')) return new Response(JSON.stringify([{ PlayerID: 502, Name: 'Receiver Two', InjuryStatus: 'Questionable', InjuryNotes: 'Lower body' }]), { status: 200 });
+    if (url.endsWith('/cfb/scores/json/PlayersByActive')) return new Response(JSON.stringify([
+      { PlayerID: 501, FirstName: 'Quarterback', LastName: 'One', Team: 'CLMSN', InjuryStatus: null },
+      { PlayerID: 502, FirstName: 'Receiver', LastName: 'Two', Team: 'LSU', InjuryStatus: 'Questionable', InjuryNotes: 'Lower body' },
+    ]), { status: 200 });
     return new Response('{}', { status: 404 });
   } });
   const snapshot = await client.getAvailabilitySnapshot(cfb);
   assert.equal(snapshot.rosterComplete, true, 'CFB SportsDataIO team-key and roster lookups must resolve every slate team');
   assert.equal(snapshot.confirmedLineupAvailable, false, 'SportsDataIO CFB roster data must not be represented as confirmed starters');
-  assert.ok(requested.some((url) => url.endsWith('/PlayerDetailsByTeam/CLEM')));
+  assert.ok(requested.some((url) => url.endsWith('/PlayersByActive')));
   assert.equal(snapshot.records.find((record) => record.playerName === 'Quarterback One')?.providerPlayerId, '501');
   assert.equal(snapshot.records.find((record) => record.playerName === 'Receiver Two')?.status, 'PROJECTED');
   const enriched = applyAvailabilitySnapshot(cfb, snapshot);
