@@ -133,19 +133,20 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
   // on completely healthy runs. 300 attempts (5 minutes) gives real runs comfortable headroom;
   // a genuinely stuck run still surfaces immediately via processError without waiting it out.
   for (let attempt = 0; attempt < 300; attempt += 1) {
-    const payload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
+    const payload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}?poll=1`);
     current = payload.run as JsonRecord;
     onProgress?.(stageProgress(payload.stages));
     if (processError) throw processError;
     if (['ready', 'blocked', 'failed', 'complete'].includes(String(current.state))) {
       await processPromise;
       if (processError) throw processError;
-      const enrichedSlate = enrichedSlateFrom(payload.stages, queued.slate);
-      const lineups = mapLineups(payload.lineups, enrichedSlate, payload.stages);
+      const completedPayload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
+      const enrichedSlate = enrichedSlateFrom(completedPayload.stages, queued.slate);
+      const lineups = mapLineups(completedPayload.lineups, enrichedSlate, completedPayload.stages);
       if (current.state !== 'ready' && current.state !== 'complete') throw new Error(String((current.error as JsonRecord | undefined)?.message ?? 'Floyd DFS blocked lineup generation.'));
-      return { manifest: mapManifest(input, enrichedSlate, payload), lineups, data_warnings: [] };
+      return { manifest: mapManifest(input, enrichedSlate, completedPayload), lineups, data_warnings: [] };
     }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
   }
   throw new Error('Floyd DFS lineup generation timed out while waiting for the durable run.');
 }

@@ -3,6 +3,12 @@ import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, ValidatedSl
 type ObjectRow = Record<string, unknown>;
 function object(value: unknown): ObjectRow | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as ObjectRow : undefined; }
 function string(value: unknown): string | undefined { return typeof value === 'string' && value.trim() ? value.trim() : undefined; }
+export function normalizeResearchPublishedAt(value: unknown): string | undefined {
+  const raw = string(value);
+  if (!raw) return undefined;
+  const timestamp = Date.parse(raw);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
 function searchTerms(slate: ValidatedSlate): string { return `${slate.sport} ${slate.event.participants.join(' ')} ${slate.playerPool.slice(0, 8).map((player) => player.playerName).join(' ')}`.trim(); }
 
 export class SerpApiResearchProvider implements ResearchSourceProvider {
@@ -13,7 +19,7 @@ export class SerpApiResearchProvider implements ResearchSourceProvider {
     const url = new URL(this.baseUrl); url.searchParams.set('engine', 'google_news'); url.searchParams.set('q', searchTerms(input.slate)); url.searchParams.set('api_key', this.apiKey); url.searchParams.set('num', '5');
     const response = await this.fetcher(url, { signal: input.signal, headers: { accept: 'application/json' } }); if (!response.ok) throw new Error(`SerpAPI returned HTTP ${response.status}.`);
     const payload = object(await response.json()); const news = Array.isArray(payload?.news_results) ? payload.news_results : [];
-    return news.flatMap((item, index) => { const row = object(item); if (!row) return []; const title = string(row.title); const link = string(row.link); return [{ title: title ?? `SerpAPI result ${index + 1}`, url: link, sourceName: this.name, sourceTier: this.tier, publishedAt: string(row.date), summary: string(row.snippet) ?? title, tags: [input.slate.sport, 'SERPAPI'] }]; });
+    return news.flatMap((item, index) => { const row = object(item); if (!row) return []; const title = string(row.title); const link = string(row.link); return [{ title: title ?? `SerpAPI result ${index + 1}`, url: link, sourceName: this.name, sourceTier: this.tier, publishedAt: normalizeResearchPublishedAt(row.date), summary: string(row.snippet) ?? title, tags: [input.slate.sport, 'SERPAPI'] }]; });
   }
 }
 

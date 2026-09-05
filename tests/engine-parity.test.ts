@@ -14,6 +14,7 @@ import { deriveSeasonBasedInputs, gamesPlayedFromRow } from '../src/lib/engine/p
 import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
 import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
+import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
 import { dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
@@ -86,6 +87,16 @@ const testMlbUnconfirmedStarterExclusion = (): void => {
   const confirmed = { ...mlbSlate, playerPool: mlbSlate.playerPool.map((player, index) => index === 0 ? { ...player, availability: { ...player.availability!, status: 'CONFIRMED_STARTER' as const, confirmed: true } } : player) };
   const confirmedResult = optimizeLineups({ validatedSlate: confirmed, projectionPackage: { ...projection, sport: 'MLB' } }, { maxCandidates: 20 }, now);
   assert.ok(confirmedResult.candidates.some((candidate) => candidate.playerIds.includes('p1')), 'a confirmed MLB starting pitcher must remain eligible');
+};
+
+const testNegativeProviderFppgFallbackParity = (): void => {
+  const slate: ValidatedSlate = { ...baseSlate, sport: 'MLB', league: 'MLB', playerPool: [{ ...baseSlate.playerPool[0], providerFppg: -1.6 }] };
+  const adjustment = adjustSlate(slate, research, now);
+  const result = projectSlate(slate, adjustment, now);
+  const player = result.players[0];
+  assert.ok(player.projectedOutcomes.floorP20 <= player.projectedOutcomes.medianP50);
+  assert.ok(player.projectedOutcomes.medianP50 <= player.projectedOutcomes.ceilingP90);
+  assert.ok(player.uncertaintyFactors.some((factor) => factor.includes('clamped to zero')));
 };
 
 const testCashLineFieldEstimateParity = (): void => {
@@ -669,8 +680,13 @@ const testGate3ContestSimulationParity = (): void => {
   assert.ok(candidates.candidates.every((candidate) => (candidate.expectedDuplicates ?? -1) >= 0));
 };
 
+const testResearchDateNormalizationParity = (): void => {
+  assert.equal(normalizeResearchPublishedAt('06/30/2026, 07:00 AM, +0000 UTC'), '2026-06-30T07:00:00.000Z');
+  assert.equal(normalizeResearchPublishedAt('not a timestamp'), undefined);
+};
+
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity();
   await testAvailabilitySeedsResearchParity();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   await testMarketContextImpliedTotalParity();

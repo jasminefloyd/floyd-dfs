@@ -51,7 +51,11 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
 // of a (coarser) distribution rather than a flat +-15% guess.
 function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
   const factor = adjustmentFactor(adjustment);
-  const median = (player.providerFppg ?? 0) * factor;
+  const rawMedian = (player.providerFppg ?? 0) * factor;
+  // FPPG fallback samples are non-negative by construction (the simulated fantasy-point
+  // component is clamped at zero). Derive the reported median from that same distribution so a
+  // negative provider value cannot make P50 fall below P20 and violate the projection contract.
+  const median = Math.max(0, rawMedian);
   const components = { fantasyPoints: median };
   const rules = { fantasyPoints: { value: 1 } };
   const noiseWidth = noiseWidthFor('FPPG');
@@ -60,7 +64,8 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const floor = quantile(orderedSamples, 0.2);
   const ceiling = quantile(orderedSamples, 0.9);
   const confidence = adjustment?.roleCertainty ?? 'LOW';
-  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors: ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`], watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
+  const uncertaintyFactors = ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`, ...(rawMedian < 0 ? ['Provider FPPG was negative and was clamped to zero for the non-negative fallback distribution.'] : [])];
+  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
 }
 
 function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
