@@ -78,6 +78,7 @@ const PAYOUT_SHAPES = [
 ];
 
 const SLATES_PER_PAGE = 7;
+const SCAN_WINDOW_HOURS = 7 * 24;
 
 export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidationError }: MIOS_FantasyScannerProps) {
   const [sport, setSport] = useState('nba');
@@ -560,13 +561,13 @@ function isWithinScanWindow(slate: DraftKingsSlate): boolean {
   if (Number.isNaN(startTime.getTime())) return false;
 
   const now = new Date();
-  const latestAllowedTime = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+  const latestAllowedTime = new Date(now.getTime() + SCAN_WINDOW_HOURS * 60 * 60 * 1000);
   return startTime >= now && startTime <= latestAllowedTime;
 }
 
 function availabilityMessage(sport: string, contestType: string): string {
   const label = `${sport.toUpperCase()} ${contestType}`;
-  return `No DraftKings ${label} contests were found for the next 3 days.`;
+  return `No DraftKings ${label} contests were found for the next 7 days.`;
 }
 
 function formatSlateDateTime(value: string): string {
