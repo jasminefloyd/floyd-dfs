@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { applyAvailabilitySnapshot, withDegradedAvailability } from '../src/lib/engine/availability';
 import { adjustSlate } from '../src/lib/engine/adjustment';
 import { projectSlate } from '../src/lib/engine/projection';
+import { projectionReadiness } from '../src/lib/engine/projection';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
 import { classifyContestKind, buildValidatedSlateFromBundle } from '../src/lib/engine/draftKingsSlate';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
@@ -12,12 +13,13 @@ import { normalizeArticles } from '../src/lib/engine/researchEvidence';
 import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
-import { seasonParamFor } from '../src/lib/engine/sportsDataIoProvider';
+import { seasonParamFor, SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
 import { assertProjection, assertSlate } from '../src/lib/engine/validation';
 import { dkCfbFantasyPoints, dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
+import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider';
 
 const now = new Date('2026-08-23T12:00:00.000Z');
 const baseSlate: ValidatedSlate = {
@@ -206,6 +208,84 @@ const testCollegeFootballRosterSemanticsParity = async (): Promise<void> => {
   const researchResult = await agent.run({ validatedSlate: result });
   assert.equal(researchResult.unknowns?.some((unknown) => unknown.subjectId === result.playerPool[0].playerId), false, 'direct roster evidence should resolve the missing availability evidence gap');
   assert.ok(researchResult.findings.some((finding) => finding.subjectId === result.playerPool[0].playerId && finding.finding.includes('starting role was not confirmed')), 'research evidence must preserve that roster membership does not verify a CFB starting role');
+};
+
+const testNflIdentityAndEventResolutionParity = async (): Promise<void> => {
+  const nfl: ValidatedSlate = { ...baseSlate, sport: 'NFL', league: 'NFL', event: { ...baseSlate.event, eventDate: '2026-09-13T17:00:00.000Z', participants: ['NE', 'SEA'] }, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Quarterback One', team: 'NE', position: 'QB' }] };
+  const requested: string[] = [];
+  const client = new EspnProjectionClient('https://espn.test', async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.includes('/scoreboard?dates=')) return new Response(JSON.stringify({ events: [{ competitions: [{ competitors: [{ team: { abbreviation: 'NE', id: '17' } }, { team: { abbreviation: 'SEA', id: '18' } }] }] }] }), { status: 200 });
+    if (url.endsWith('/teams/17/roster')) return new Response(JSON.stringify({ athletes: [{ id: 'espn-qb-1', fullName: 'Quarterback One', status: { type: 'active' }, injuries: [] }] }), { status: 200 });
+    if (url.endsWith('/teams/18/roster')) return new Response(JSON.stringify({ athletes: [{ id: 'espn-wr-1', fullName: 'Opponent Receiver', status: { type: 'active' }, injuries: [] }] }), { status: 200 });
+    return new Response('{}', { status: 404 });
+  });
+  const snapshot = await client.getAvailabilitySnapshot(nfl);
+  assert.ok(requested.some((url) => url.endsWith('/teams/17/roster')), 'NFL roster lookup must use the ESPN event team ID, not only the DraftKings abbreviation');
+  assert.equal(snapshot.rosterComplete, true);
+  assert.equal(snapshot.records.find((record) => record.playerName === 'Quarterback One')?.providerPlayerId, 'espn-qb-1');
+  const enriched = applyAvailabilitySnapshot(nfl, snapshot);
+  assert.equal(enriched.playerPool[0].identity?.espnId, 'espn-qb-1');
+  assert.equal(enriched.playerPool[0].availability?.confirmed, false, 'NFL roster membership must not be treated as confirmed starter status');
+  assert.ok(enriched.validation.warnings.some((warning) => warning.includes('did not verify starters')));
+};
+
+const testCfbSportsDataIoRosterAndInjuryParity = async (): Promise<void> => {
+  const cfb: ValidatedSlate = { ...baseSlate, sport: 'CFB', league: 'CFB', playerPool: [
+    { ...baseSlate.playerPool[0], playerId: 'cfb-1', playerName: 'Quarterback One', team: 'CLEM' },
+    { ...baseSlate.playerPool[1], playerId: 'cfb-2', playerName: 'Receiver Two', team: 'LSU' },
+  ] };
+  const requested: string[] = [];
+  const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.endsWith('/cfb/scores/json/Teams')) return new Response(JSON.stringify([
+      { Key: 'CLEM', ShortDisplayName: 'Clemson', School: 'Clemson', Abbreviation: 'CLEM' },
+      { Key: 'LSU', ShortDisplayName: 'LSU', School: 'Louisiana State', Abbreviation: 'LSU' },
+    ]), { status: 200 });
+    if (url.endsWith('/cfb/scores/json/PlayerDetailsByTeam/CLEM')) return new Response(JSON.stringify([{ PlayerID: 501, Name: 'Quarterback One', InjuryStatus: null }]), { status: 200 });
+    if (url.endsWith('/cfb/scores/json/PlayerDetailsByTeam/LSU')) return new Response(JSON.stringify([{ PlayerID: 502, Name: 'Receiver Two', InjuryStatus: 'Questionable', InjuryNotes: 'Lower body' }]), { status: 200 });
+    return new Response('{}', { status: 404 });
+  } });
+  const snapshot = await client.getAvailabilitySnapshot(cfb);
+  assert.equal(snapshot.rosterComplete, true, 'CFB SportsDataIO team-key and roster lookups must resolve every slate team');
+  assert.equal(snapshot.confirmedLineupAvailable, false, 'SportsDataIO CFB roster data must not be represented as confirmed starters');
+  assert.ok(requested.some((url) => url.endsWith('/PlayerDetailsByTeam/CLEM')));
+  assert.equal(snapshot.records.find((record) => record.playerName === 'Quarterback One')?.providerPlayerId, '501');
+  assert.equal(snapshot.records.find((record) => record.playerName === 'Receiver Two')?.status, 'PROJECTED');
+  const enriched = applyAvailabilitySnapshot(cfb, snapshot);
+  assert.equal(enriched.playerPool[0].identity?.sportsDataIoId, '501', 'CFB roster records must seed SportsDataIO identity mapping');
+  assert.equal(enriched.playerPool[1].availability?.confirmed, false);
+  assert.ok(enriched.validation.warnings.some((warning) => warning.includes('did not verify starters')));
+};
+
+const testNflProjectionReadinessParity = (): void => {
+  const qb: ValidatedSlate['playerPool'][number] = { ...baseSlate.playerPool[0], position: 'QB' };
+  assert.equal(projectionReadiness('NFL', qb).ready, false);
+  assert.equal(projectionReadiness('NFL', { ...qb, providerFppg: 18 }).ready, true);
+  assert.equal(projectionReadiness('NFL', { ...qb, projectionInputs: { passAttempts: 30, completionRate: 0.65, yardsPerCompletion: 11, passingTouchdownRate: 0.05, interceptionRate: 0.02, carries: 4, yardsPerCarry: 4, touchdownProbability: 0.2 } }).ready, true);
+};
+
+const testNflFullStageReadinessParity = (): void => {
+  const slate: ValidatedSlate = {
+    ...baseSlate,
+    sport: 'NFL',
+    league: 'NFL',
+    scoringRules: { reception: { value: 1 }, receivingYards: { value: 0.1 }, receivingTouchdown: { value: 6 }, rushingYards: { value: 0.1 }, rushingTouchdown: { value: 6 }, passingYards: { value: 0.04 }, passingTouchdown: { value: 4 }, interception: { value: -1 } },
+    rosterRules: { rosterSize: 2, slots: { WR: { count: 1 }, FLEX: { count: 1 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } },
+    playerPool: [
+      { ...baseSlate.playerPool[0], playerId: 'nfl-wr-1', playerName: 'NFL Receiver One', team: 'NE', position: 'WR', eligibility: { WR: true, FLEX: true }, availability: { status: 'ACTIVE', confirmed: false, source: 'ESPN', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM', note: 'Listed on ESPN roster; starting role was not confirmed by this source.' }, projectionInputs: { snaps: 50, routes: 35, targets: 8, carries: 1, catchRate: 0.7, yardsPerTarget: 10, yardsPerCarry: 4, touchdownProbability: 0.2 } },
+      { ...baseSlate.playerPool[1], playerId: 'nfl-wr-2', playerName: 'NFL Receiver Two', team: 'SEA', position: 'WR', eligibility: { WR: true, FLEX: true }, availability: { status: 'ACTIVE', confirmed: false, source: 'ESPN', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM', note: 'Listed on ESPN roster; starting role was not confirmed by this source.' }, projectionInputs: { snaps: 48, routes: 32, targets: 7, carries: 0, catchRate: 0.72, yardsPerTarget: 9, yardsPerCarry: 0, touchdownProbability: 0.18 } },
+    ],
+  };
+  const researchResult: ResearchPackage = { ...research, slateId: slate.slateId, tenantId: slate.tenantId, findings: slate.playerPool.map((player) => ({ id: `availability-${player.playerId}`, subjectId: player.playerId, bucket: 'AVAILABILITY' as const, subjectType: 'PLAYER' as const, finding: `${player.playerName} is active per ESPN (listed on ESPN roster; starting role was not confirmed by this source).`, sourceName: 'ESPN', sourceTier: 1 as const, confidence: 'MEDIUM' as const })), unknowns: [], status: 'COMPLETE' };
+  const adjustment = adjustSlate(slate, researchResult, now);
+  const projectionResult = projectSlate(slate, adjustment, now);
+  const optimizerResult = optimizeLineups({ validatedSlate: slate, projectionPackage: projectionResult }, { maxCandidates: 10 }, now);
+  assert.equal(adjustment.status, 'COMPLETE');
+  assert.equal(projectionResult.status, 'COMPLETE');
+  assert.equal(optimizerResult.status, 'COMPLETE');
+  assert.ok(optimizerResult.candidates.length > 0);
 };
 
 const testAvailabilitySeedsResearchParity = async (): Promise<void> => {
@@ -751,6 +831,10 @@ const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
 (async () => {
   testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
   await testCollegeFootballRosterSemanticsParity();
+  await testNflIdentityAndEventResolutionParity();
+  await testCfbSportsDataIoRosterAndInjuryParity();
+  testNflProjectionReadinessParity();
+  testNflFullStageReadinessParity();
   await testAvailabilitySeedsResearchParity();
   await testResearchProviderFailureDoesNotBlockParity();
   testProjectionQuantilesUseOneOrderedDistribution();

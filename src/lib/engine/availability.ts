@@ -30,18 +30,26 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
   }
   const warnings = [...slate.validation.warnings];
   const playerPool = slate.playerPool.map((player) => {
-    const providerIdRecords = byProviderId.get(player.playerId) ?? [];
+    const sourceName = snapshot.source.toUpperCase();
+    const identityProviderIds = sourceName.includes('ESPN')
+      ? [player.identity?.espnId]
+      : sourceName.includes('SPORTSDATAIO')
+        ? [player.identity?.sportsDataIoId]
+        : [];
+    const providerIds = identityProviderIds.filter((value): value is string => Boolean(value));
+    const providerIdRecords = providerIds.flatMap((id) => byProviderId.get(id) ?? []);
     const exactRecords = byKey.get(identityKey(player.playerName, player.team)) ?? [];
     const nameOnlyRecords = snapshot.records.filter((record) => normalizeProviderName(record.playerName) === normalizeProviderName(player.playerName) && !record.team);
     const records = providerIdRecords.length ? providerIdRecords : exactRecords.length ? exactRecords : nameOnlyRecords;
     const confirmedMlbLineup = snapshot.source === 'SPORTSDATAIO' && snapshot.confirmedLineupAvailable;
     if (records.length !== 1) {
-      const notInProviderRoster = snapshot.rosterComplete === true && slate.sport === 'CFB' && records.length === 0;
+      const notInProviderRoster = snapshot.rosterComplete === true && ['NFL', 'CFB'].includes(slate.sport) && records.length === 0;
       return { ...player, availability: { status: confirmedMlbLineup ? 'NOT_IN_CONFIRMED_LINEUP' as const : notInProviderRoster ? 'NOT_IN_PROVIDER_ROSTER' as const : 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: records.length > 1 ? 'Provider identity match was ambiguous.' : confirmedMlbLineup ? 'No matching record in the confirmed lineup; treated as a non-starter for primary optimization.' : notInProviderRoster ? 'DraftKings player could not be matched to the complete provider roster; excluded from the primary slate.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
     }
     const record = records[0];
     const mappedBy: NonNullable<SlatePlayer['availability']>['mappedBy'] = providerIdRecords.length ? 'PROVIDER_ID' : exactRecords.length ? 'NAME_AND_TEAM' : 'NAME_ONLY';
-    return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
+    const identity = record.providerPlayerId ? snapshot.source.toUpperCase().includes('ESPN') ? { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : mappedBy } : snapshot.source.toUpperCase().includes('SPORTSDATAIO') ? { ...player.identity, sportsDataIoId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : mappedBy } : player.identity : player.identity;
+    return { ...player, ...(identity ? { identity } : {}), availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
   const isExcluded = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE' || player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP' || player.availability?.status === 'NOT_IN_PROVIDER_ROSTER';
   const removed = playerPool.filter(isExcluded).length;
@@ -52,7 +60,7 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
   const filtered = playerPool.filter((player) => !isExcluded(player));
   if (removed) warnings.push(`${removed} DraftKings player(s) removed from the primary slate after ${snapshot.source} returned an explicit OUT/INACTIVE/non-roster status.`);
   if (snapshot.confirmedLineupAvailable) warnings.push(`${snapshot.source} confirmed lineup state applied at ${snapshot.retrievedAt}.`);
-  else if (snapshot.rosterComplete && slate.sport === 'CFB') warnings.push(`${snapshot.source} verified roster membership for the primary CFB slate, but did not verify starters; remaining role status is not a confirmed starting lineup.`);
+  else if (snapshot.rosterComplete && ['NFL', 'CFB'].includes(slate.sport)) warnings.push(`${snapshot.source} verified roster membership for the primary ${slate.sport} slate, but did not verify starters; remaining role status is not a confirmed starting lineup.`);
   else warnings.push(`${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
   return { ...slate, playerPool: filtered, validation: { ...slate.validation, warnings } };
 }

@@ -33,6 +33,11 @@ export function isQuarterback(player: { position?: string }): boolean { return /
 export function gamesPlayedFromRow(row: Record<string, unknown>): number { return readNumber(row, ['Games', 'Played', 'games']) ?? 0; }
 
 export function findRow(player: SlatePlayer, rows: Record<string, unknown>[], allowTeamMismatch = false): Record<string, unknown> | undefined {
+  const providerId = player.identity?.sportsDataIoId;
+  if (providerId) {
+    const idMatch = rows.find((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId', 'PlayerKey', 'playerKey']) === providerId);
+    if (idMatch) return idMatch;
+  }
   const targetName = normalizeProviderName(player.playerName);
   const targetTeam = normalizeTeamCode(player.team);
   const matches = rows.filter((row) => {

@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { DraftKingsClient } from '../src/lib/engine/draftKings.js';
 import { adjustSlate } from '../src/lib/engine/adjustment.js';
-import { projectSlate } from '../src/lib/engine/projection.js';
+import { projectSlate, projectionReadiness } from '../src/lib/engine/projection.js';
 import { optimizeLineups } from '../src/lib/engine/optimizer.js';
 import { selectLineups } from '../src/lib/engine/selection.js';
 import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
@@ -147,8 +147,13 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const { agent, availability, espnProjection, anthropicKey, anthropicModel } = providerSet();
   const stages: Record<string, unknown> = {};
   let workingSlate = slate;
+  let cfbSportsDataRosterAvailable = false;
   if (availability) {
-    try { workingSlate = applyAvailabilitySnapshot(workingSlate, await availability.getAvailabilitySnapshot(workingSlate)); }
+    try {
+      const availabilitySnapshot = await availability.getAvailabilitySnapshot(workingSlate);
+      cfbSportsDataRosterAvailable = workingSlate.sport === 'CFB' && availabilitySnapshot.rosterComplete === true;
+      workingSlate = applyAvailabilitySnapshot(workingSlate, availabilitySnapshot);
+    }
     catch (error) { const message = error instanceof Error ? error.message : 'Availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `Availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
     // Providers may not return a matching row for every player. That no longer removes the
     // player from the slate here — projectSlate's own gap logic (which also checks
@@ -178,7 +183,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         }
         let priorSeasonRows: Record<string, unknown>[] = [];
         let priorSeasonParam = '';
-        if (workingSlate.sport === 'MLB' || workingSlate.sport === 'CFB') {
+        if (['MLB', 'NFL', 'CFB'].includes(workingSlate.sport)) {
           const currentSeasonMissing = workingSlate.playerPool.some((player) => { const row = findRow(player, seasonRows, workingSlate.sport === 'MLB'); return !row || gamesPlayedFromRow(row) <= 0; });
           if (currentSeasonMissing) {
             priorSeasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
@@ -189,7 +194,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         const priorSeasonPlayers: string[] = [];
         const teamMismatchPlayers: string[] = [];
         const refreshedPlayers = workingSlate.playerPool.map((player) => {
-          const allowTeamMismatch = workingSlate.sport === 'MLB' || workingSlate.sport === 'CFB';
+          const allowTeamMismatch = ['MLB', 'NFL', 'CFB'].includes(workingSlate.sport);
           const currentRow = findRow(player, seasonRows, allowTeamMismatch);
           const currentGames = currentRow ? gamesPlayedFromRow(currentRow) : 0;
           const priorRow = findRow(player, priorSeasonRows, allowTeamMismatch);
@@ -202,7 +207,9 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           if (providerTeam && slateTeam && providerTeam !== slateTeam) teamMismatchPlayers.push(`${player.playerName} (${slateTeam} slate / ${providerTeam} stats)`);
           const dkPoints = Number(row.FantasyPointsDraftKings ?? NaN);
           const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, row === currentRow ? seasonRows : priorSeasonRows, { allowTeamMismatch });
-          return { ...player, ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
+          const providerId = String(row.PlayerID ?? row.PlayerId ?? row.playerId ?? row.PlayerKey ?? row.playerKey ?? '').trim();
+          const identity = providerId ? { ...player.identity, sportsDataIoId: providerId, confidence: 'HIGH' as const, matchedBy: player.identity?.matchedBy === 'DRAFTKINGS' ? 'NAME_AND_TEAM' as const : player.identity?.matchedBy ?? 'NAME_AND_TEAM' as const } : player.identity;
+          return { ...player, ...(identity ? { identity } : {}), ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
         });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
         const dataSourceNote = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
@@ -215,13 +222,24 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     }
     if (workingSlate.sport === 'WNBA') stages.projectionDataSourceWarnings = ['WNBA rate-stat inputs are not available on the current SportsDataIO plan (player-level stats endpoints are inaccessible for this sport); projections use the ESPN season-average baseline only.'];
   }
-  // No dedicated confirmed-lineup feed exists for NBA/WNBA/NFL (SportsDataIO's is MLB-only on
-  // this plan), so ESPN's roster status/injuries endpoint is the availability source for these
-  // sports -- applied after the SportsDataIO pass above so it overwrites that pass's empty,
-  // "no configured feed" result for these sports with real per-player status.
+  // SportsDataIO is authoritative for CFB roster membership and injury status when its complete
+  // team rosters resolve. It intentionally cannot confirm college starters. ESPN remains a
+  // fallback only when SportsDataIO could not resolve a complete CFB roster.
   if (espnProjection && ['NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
-    try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate)); }
+    if (workingSlate.sport !== 'CFB' || !cfbSportsDataRosterAvailable) try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate)); }
     catch (error) { const message = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `ESPN availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
+  }
+  if (['NFL', 'CFB'].includes(workingSlate.sport)) {
+    const notReady = workingSlate.playerPool.flatMap((player) => {
+      const readiness = projectionReadiness(workingSlate.sport, player);
+      return readiness.ready ? [] : [{ player, missing: readiness.missing }];
+    });
+    if (notReady.length) {
+      const names = notReady.map(({ player }) => player.playerName);
+      const warning = `${notReady.length} ${workingSlate.sport} player(s) removed from the primary slate because neither complete structured projection inputs nor an explicit provider FPPG fallback was available: ${names.slice(0, 12).join(', ')}${names.length > 12 ? `, and ${names.length - 12} more` : ''}.`;
+      stages.projectionDataSourceWarnings = [...((stages.projectionDataSourceWarnings as string[] | undefined) ?? []), warning];
+      workingSlate = { ...workingSlate, playerPool: workingSlate.playerPool.filter((player) => !notReady.some((item) => item.player.playerId === player.playerId)) };
+    }
   }
   if (espnProjection && (workingSlate.sport === 'NBA' || workingSlate.sport === 'WNBA')) {
     try {

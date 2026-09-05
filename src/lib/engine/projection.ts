@@ -18,11 +18,16 @@ const REQUIRED_GOLF = ['birdiesPerRound', 'eaglesPerRound', 'bogeysPerRound', 'p
 const PERFORMANCE_NOISE_WIDTH: Record<Sport | 'FPPG', number> = { NBA: 0.2, WNBA: 0.2, NFL: 0.24, CFB: 0.26, MLB: 0.28, GOLF: 0.22, FPPG: 0.2 };
 function noiseWidthFor(sport: Sport | 'FPPG'): number { return PERFORMANCE_NOISE_WIDTH[sport]; }
 
-function requiredFieldsFor(sport: Sport, player: SlatePlayer): string[] {
+export function requiredProjectionFields(sport: Sport, player: SlatePlayer): string[] {
   if (sport === 'NBA' || sport === 'WNBA') return REQUIRED_BASKETBALL;
   if (sport === 'MLB') return isPitcher(player) ? REQUIRED_MLB_PITCHER : REQUIRED_MLB_HITTER;
   if (sport === 'NFL' || sport === 'CFB') return isQuarterback(player) ? REQUIRED_NFL_QB : REQUIRED_NFL_SKILL;
   return REQUIRED_GOLF;
+}
+
+export function projectionReadiness(sport: Sport, player: SlatePlayer): { ready: boolean; missing: string[] } {
+  const missing = requiredProjectionFields(sport, player).filter((key) => !player.projectionInputs || !Number.isFinite(player.projectionInputs[key]));
+  return { ready: missing.length === 0 || Number.isFinite(player.providerFppg), missing };
 }
 
 export function projectSlate(slate: ValidatedSlate, adjustmentPackage: AdjustmentPackage, now = new Date()): ProjectionPackage {
@@ -30,7 +35,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
   const gaps: ProjectionPackage['gaps'] = [];
   for (const player of slate.playerPool) {
     const values = player.projectionInputs;
-    const missing = requiredFieldsFor(slate.sport, player).filter((key) => !values || !Number.isFinite(values[key]));
+    const missing = requiredProjectionFields(slate.sport, player).filter((key) => !values || !Number.isFinite(values[key]));
     if (missing.length && !Number.isFinite(player.providerFppg)) {
       gaps.push({ reason: `Missing required quantitative inputs for ${player.playerName}: ${missing.join(', ')}.` });
       continue;

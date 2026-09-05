@@ -66,13 +66,13 @@ export class EspnProjectionClient {
   // for these sports). Each athlete carries a `status` object and an `injuries` array; the exact
   // non-"active" status.type/injury-status taxonomy wasn't verified against a real
   // injured/questionable player during implementation, so unrecognized values fall back to
-  // UNKNOWN (never guessed as OUT) rather than risk excluding a healthy player. For CFB,
+  // UNKNOWN (never guessed as OUT) rather than risk excluding a healthy player. For NFL/CFB,
   // roster membership is deliberately not treated as a confirmed starting role.
   async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
     const sportPath = ESPN_AVAILABILITY_SPORT_PATH[slate.sport];
     if (!sportPath) return { source: 'ESPN', retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured ESPN availability mapping.` };
     const teams = [...new Set(slate.playerPool.map((player) => normalizeTeamCode(player.team)).filter(Boolean))];
-    const teamIds = slate.sport === 'CFB' ? await this.resolveCollegeTeamIds(slate, teams, signal) : new Map<string, string>();
+    const teamIds = ['NFL', 'CFB'].includes(slate.sport) ? await this.resolveEventTeamIds(slate, teams, sportPath, signal) : new Map<string, string>();
     const rosterRows = await Promise.all(teams.map(async (team) => {
       try {
         const teamResource = teamIds.get(team) ?? team.toLowerCase();
@@ -83,7 +83,7 @@ export class EspnProjectionClient {
           const name = text(athlete.fullName ?? athlete.displayName);
           if (!name) return [];
           const status = espnAvailabilityStatus(athlete);
-          return [{ playerName: name, team, status, confirmed: false, updatedAt: new Date().toISOString(), note: slate.sport === 'CFB' ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
+          return [{ playerName: name, team, providerPlayerId: text(athlete.id) || undefined, status, confirmed: false, updatedAt: new Date().toISOString(), note: ['NFL', 'CFB'].includes(slate.sport) ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
         });
       } catch { return []; }
     }));
@@ -93,10 +93,10 @@ export class EspnProjectionClient {
     return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: false, rosterComplete, note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
   }
 
-  private async resolveCollegeTeamIds(slate: ValidatedSlate, teams: string[], signal?: AbortSignal): Promise<Map<string, string>> {
+  private async resolveEventTeamIds(slate: ValidatedSlate, teams: string[], sportPath: { sportGroup: string; league: string }, signal?: AbortSignal): Promise<Map<string, string>> {
     try {
       const date = espnDate(slate);
-      const scoreboard = await this.getJson(`${this.baseUrl}/sports/football/college-football/scoreboard?dates=${date}`, signal);
+      const scoreboard = await this.getJson(`${this.baseUrl}/sports/${sportPath.sportGroup}/${sportPath.league}/scoreboard?dates=${date}`, signal);
       const resolved = new Map<string, string>();
       for (const event of listRecords(scoreboard.events)) {
         for (const competition of listRecords(event.competitions)) {

@@ -44,6 +44,13 @@ export interface RosterRules {
 export interface SlatePlayer {
   playerId: string;
   playerName: string;
+  identity?: {
+    draftKingsId?: string;
+    espnId?: string;
+    sportsDataIoId?: string;
+    confidence: 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW';
+    matchedBy: 'DRAFTKINGS' | 'PROVIDER_ID' | 'NAME_AND_TEAM' | 'NAME_ONLY' | 'UNMAPPED';
+  };
   team?: string;
   opponent?: string;
   position?: string;
