@@ -149,18 +149,34 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
           seasonFallbackNote = ` (current season not yet underway; using ${seasonParam} instead)`;
         }
+        let priorSeasonRows: Record<string, unknown>[] = [];
+        let priorSeasonParam = '';
+        if (workingSlate.sport === 'MLB') {
+          const currentSeasonMissing = workingSlate.playerPool.some((player) => { const row = findRow(player, seasonRows); return !row || gamesPlayedFromRow(row) <= 0; });
+          if (currentSeasonMissing) {
+            priorSeasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
+            priorSeasonRows = await availability.getSeasonStats(workingSlate.sport, priorSeasonParam);
+          }
+        }
         const missingPlayers: string[] = [];
+        const priorSeasonPlayers: string[] = [];
         const refreshedPlayers = workingSlate.playerPool.map((player) => {
-          const row = findRow(player, seasonRows);
+          const currentRow = findRow(player, seasonRows);
+          const currentGames = currentRow ? gamesPlayedFromRow(currentRow) : 0;
+          const row = currentRow && currentGames > 0 ? currentRow : findRow(player, priorSeasonRows);
           const games = row ? gamesPlayedFromRow(row) : 0;
           if (!row || games <= 0) { missingPlayers.push(player.playerName); return player; }
+          if (row !== currentRow) priorSeasonPlayers.push(player.playerName);
           const dkPoints = Number(row.FantasyPointsDraftKings ?? NaN);
-          const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, seasonRows);
+          const inputs = deriveSeasonBasedInputs(workingSlate.sport, player, row === currentRow ? seasonRows : priorSeasonRows);
           return { ...player, ...(Number.isFinite(dkPoints) ? { providerFppg: dkPoints / games } : {}), ...(inputs ? { projectionInputs: inputs } : {}) };
         });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
         const dataSourceNote = `Projected from ${seasonParam} season-to-date stats (SportsDataIO)${seasonFallbackNote}, not a live day-of projection.`;
-        stages.projectionDataSourceWarnings = missingPlayers.length ? [dataSourceNote, `No ${seasonParam} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`] : [dataSourceNote];
+        const warnings = [dataSourceNote];
+        if (priorSeasonPlayers.length) warnings.push(`Used ${priorSeasonParam} season baseline for ${priorSeasonPlayers.length} ${workingSlate.sport} players without current-season stats: ${priorSeasonPlayers.join(', ')}.`);
+        if (missingPlayers.length) warnings.push(`No current or ${priorSeasonParam || 'prior'} season stats found for ${missingPlayers.length} ${workingSlate.sport} players: ${missingPlayers.join(', ')}.`);
+        stages.projectionDataSourceWarnings = warnings;
       } catch (error) { stages.projectionDataSourceWarnings = [error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.']; }
     }
     if (workingSlate.sport === 'WNBA') stages.projectionDataSourceWarnings = ['WNBA rate-stat inputs are not available on the current SportsDataIO plan (player-level stats endpoints are inaccessible for this sport); projections use the ESPN season-average baseline only.'];

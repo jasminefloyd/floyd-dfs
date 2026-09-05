@@ -35,11 +35,18 @@ export function gamesPlayedFromRow(row: Record<string, unknown>): number { retur
 export function findRow(player: SlatePlayer, rows: Record<string, unknown>[]): Record<string, unknown> | undefined {
   const targetName = normalizeProviderName(player.playerName);
   const targetTeam = normalizeTeamCode(player.team);
-  return rows.find((row) => {
-    const name = normalizeProviderName(readString(row, ['Name', 'PlayerName', 'name']) ?? '');
+  const matches = rows.filter((row) => {
+    const name = normalizeProviderName(readString(row, ['Name', 'PlayerName', 'name']) ?? providerFullName(row));
     const team = normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']));
     return name === targetName && (!targetTeam || !team || team === targetTeam);
   });
+  if (!matches.length) return undefined;
+  // Prefer an exact team match. A name-only match is safe only when the provider
+  // returned one unambiguous row; silently choosing between same-name players can
+  // attach another team's rates to this slate.
+  const exactTeam = targetTeam ? matches.filter((row) => normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation'])) === targetTeam) : [];
+  if (exactTeam.length === 1) return exactTeam[0];
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function deriveBasketballInputs(row: Record<string, unknown>, gamesPlayed = 1): Record<string, number> | undefined {
@@ -117,5 +124,6 @@ function deriveSkillPlayerInputs(row: Record<string, unknown>, gamesPlayed = 1):
   return { snaps: snaps / gamesPlayed, routes: routes / gamesPlayed, targets: targets / gamesPlayed, carries: carries / gamesPlayed, catchRate: targets > 0 ? receptions / targets : 0, yardsPerTarget: targets > 0 ? receivingYards / targets : 0, yardsPerCarry: carries > 0 ? rushingYards / carries : 0, touchdownProbability: (receivingTouchdowns + rushingTouchdowns) / gamesPlayed };
 }
 
-function readString(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]).trim(); return undefined; }
+function readString(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) if ((typeof record[key] === 'string' || typeof record[key] === 'number') && String(record[key]).trim()) return String(record[key]).trim(); return undefined; }
+function providerFullName(record: Record<string, unknown>): string { const first = readString(record, ['FirstName', 'firstName']); const last = readString(record, ['LastName', 'lastName']); return first && last ? `${first} ${last}` : first ?? last ?? ''; }
 function readNumber(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'number' && Number.isFinite(value)) return value; if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value); } return undefined; }

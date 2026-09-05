@@ -22,13 +22,22 @@ export function withDegradedAvailability(slate: ValidatedSlate, message: string)
 
 export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot): ValidatedSlate {
   const byKey = new Map<string, AvailabilityRecord[]>();
-  for (const record of snapshot.records) { const key = identityKey(record.playerName, record.team); byKey.set(key, [...(byKey.get(key) ?? []), record]); }
+  const byProviderId = new Map<string, AvailabilityRecord[]>();
+  for (const record of snapshot.records) {
+    const key = identityKey(record.playerName, record.team);
+    byKey.set(key, [...(byKey.get(key) ?? []), record]);
+    if (record.providerPlayerId) byProviderId.set(record.providerPlayerId, [...(byProviderId.get(record.providerPlayerId) ?? []), record]);
+  }
   const warnings = [...slate.validation.warnings];
   const playerPool = slate.playerPool.map((player) => {
-    const records = byKey.get(identityKey(player.playerName, player.team)) ?? [];
+    const providerIdRecords = byProviderId.get(player.playerId) ?? [];
+    const exactRecords = byKey.get(identityKey(player.playerName, player.team)) ?? [];
+    const nameOnlyRecords = snapshot.records.filter((record) => normalizeProviderName(record.playerName) === normalizeProviderName(player.playerName) && !record.team);
+    const records = providerIdRecords.length ? providerIdRecords : exactRecords.length ? exactRecords : nameOnlyRecords;
     if (records.length !== 1) return { ...player, availability: { status: 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: records.length > 1 ? 'Provider identity match was ambiguous.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
     const record = records[0];
-    return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy: 'NAME_AND_TEAM' as const, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
+    const mappedBy: NonNullable<SlatePlayer['availability']>['mappedBy'] = providerIdRecords.length ? 'PROVIDER_ID' : exactRecords.length ? 'NAME_AND_TEAM' : 'NAME_ONLY';
+    return { ...player, availability: { status: record.status, confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
   const isOutOrInactive = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE';
   const removed = playerPool.filter(isOutOrInactive).length;

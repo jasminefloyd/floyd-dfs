@@ -62,7 +62,7 @@ export interface SlatePlayer {
     source: string;
     retrievedAt: string;
     providerPlayerId?: string;
-    mappedBy?: 'NAME_AND_TEAM' | 'UNMAPPED';
+    mappedBy?: 'PROVIDER_ID' | 'NAME_AND_TEAM' | 'NAME_ONLY' | 'UNMAPPED';
     battingOrder?: number;
     note?: string;
   };

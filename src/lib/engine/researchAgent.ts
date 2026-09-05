@@ -65,12 +65,13 @@ export class ResearchAgent {
     unknowns.push(...availabilityGaps);
     const conflicts = findConflicts(findings);
     const linked = linkConflicts(findings, conflicts);
+    const uniqueUnknowns = [...new Map(unknowns.map((unknown) => [`${unknown.subjectId ?? ''}:${unknown.question}:${unknown.importance}`, unknown])).values()];
     // A provider outage is retained in providerResults for diagnostics, but it is
     // not itself a research contract failure when the agent has usable findings
     // and no unresolved research questions. Optional providers (for example odds
     // feeds) must not downgrade an otherwise complete research package.
-    const status = unknowns.length || conflicts.some((conflict) => !conflict.resolved) ? 'PARTIAL' : 'COMPLETE';
-    return buildResearchPackage(input.validatedSlate, linked, conflicts, unknowns, providerResults, status, now, this.version);
+    const status = uniqueUnknowns.length || conflicts.some((conflict) => !conflict.resolved) ? 'PARTIAL' : 'COMPLETE';
+    return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, now, this.version);
   }
 }
 

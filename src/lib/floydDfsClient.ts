@@ -158,8 +158,13 @@ export async function markFloydLineupEntered(lineupId: string): Promise<void> {
 function mapManifest(input: { sport: string; contestType: string; contest: DraftKingsSlate }, slateValue: unknown, payloadValue: unknown): MIOS_FantasyManifest {
   const slate = slateValue as JsonRecord | undefined;
   const payload = payloadValue as JsonRecord;
-  const research = asRecord(payload.research);
-  const pipeline = buildPipeline(payload.stages, research, payload.lineups);
+  const stages = Array.isArray(payload.stages) ? payload.stages : [];
+  // The run endpoint persists each package inside its stage record rather than
+  // duplicating RESEARCH at the response root. Read the authoritative stage
+  // output so the evidence presentation matches the data used downstream.
+  const researchStage = [...stages].reverse().find((stage) => isJsonRecord(stage) && String(stage.stage ?? '').toUpperCase() === 'RESEARCH');
+  const research = asRecord(researchStage && isJsonRecord(researchStage) ? researchStage.output_payload ?? researchStage.output : undefined) ?? asRecord(payload.research);
+  const pipeline = buildPipeline(stages, research, payload.lineups);
   const playerPool = Array.isArray(slate?.playerPool) ? slate.playerPool.map((player) => mapPlayer(player, input.sport)) : [];
   const blocked = pipeline.stages.some((stage) => ['BLOCKED', 'FAILED'].includes(stage.status.toUpperCase()));
   const cautions = pipeline.stages.filter((stage) => !['COMPLETE', 'READY', 'SUCCEEDED'].includes(stage.status.toUpperCase())).map((stage) => `${stage.stage} stage: ${stage.status}`);

@@ -36,7 +36,7 @@ export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, no
     .filter((player) => !research.findings.some((finding) => finding.subjectId === player.playerId))
     .map((player) => ({ question: `What role, availability, or matchup evidence exists for ${player.playerName}?`, importance: 'HIGH' as const, reason: `No research findings were retrieved for ${player.playerName}; Sport Adjustment cannot assert an opportunity change without evidence.`, affectedPlayerIds: [player.playerId] }));
   adjustments = redistributeForUnavailablePlayers(slate, adjustments);
-  const researchGaps = [...criticalGaps, ...evidenceGaps];
+  const researchGaps = [...new Map([...criticalGaps, ...evidenceGaps].map((gap) => [`${gap.affectedPlayerIds.join(',')}:${gap.question}`, gap])).values()];
   // research.status === 'PARTIAL' has multiple independent causes, all folded into
   // research.unknowns (checked below) except unresolved conflicts. A conflict this stage's own
   // netSignedMagnitude demonstrably resolved into a real signal shouldn't still read as PARTIAL
@@ -45,7 +45,12 @@ export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, no
     const playerAdjustment = adjustments.find((item) => item.playerId === conflict.subjectId);
     return !playerAdjustment || Math.abs(playerAdjustment.netSignedMagnitude) < MAGNITUDE_WEIGHTS.SMALL;
   });
-  const status = research.status === 'BLOCKED' ? 'BLOCKED' : researchGaps.length || unknowns.length || unresolvedUnnettedConflicts.length ? 'PARTIAL' : 'COMPLETE';
+  // A low/medium provider diagnostic (for example, an optional AI synthesis
+  // outage) does not by itself prevent deterministic adjustment. Only an
+  // unresolved high/critical question, a player evidence gap, or an unresolved
+  // conflict that nets to no signal keeps this stage PARTIAL.
+  const unresolvedRequiredUnknown = unknowns.some((unknown) => unknown.importance === 'CRITICAL' || unknown.importance === 'HIGH');
+  const status = research.status === 'BLOCKED' ? 'BLOCKED' : researchGaps.length || unresolvedRequiredUnknown || unresolvedUnnettedConflicts.length ? 'PARTIAL' : 'COMPLETE';
   return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), adjustments, researchGaps, status };
 }
 

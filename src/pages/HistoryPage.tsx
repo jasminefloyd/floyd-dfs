@@ -22,10 +22,12 @@ function HistoryCard({ row }: { row: HistoryRow }) {
   const payload = (row.lineup_payload ?? {}) as HistoryRow;
   const players = Array.isArray(payload.playerIds) ? payload.playerIds.length : 0;
   const isEntered = String(row.status ?? '').toLowerCase() === 'entered';
+  const generationRunId = historyGenerationRunId(row);
   return <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]">
     <div className="flex items-start justify-between gap-3">
       <div>
         <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">{String(row.sport ?? 'DFS')} · {String(row.contest_format ?? row.contest_type ?? 'contest')}</p>
+        <p className="mt-1 text-sm font-black text-[#0b1f3a]">{String(row.contest_name ?? 'Contest name unavailable')}</p>
         <h2 className="mt-1 text-lg font-black text-[#0b1f3a]">Lineup #{String(row.bullet_number ?? '—')}</h2>
       </div>
       <StatusBadge status={String(row.status ?? 'unknown')} />
@@ -37,10 +39,20 @@ function HistoryCard({ row }: { row: HistoryRow }) {
     </div>
     <div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-500">
       <span>{formatDate(String(row.created_at ?? ''))}</span>
-      {row.selection_run_id ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${String(row.generation_run_id)}`}>View run</Link> : null}
+      {generationRunId ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${encodeURIComponent(generationRunId)}`}>View run</Link> : <span className="text-[10px] text-slate-400">Run lineage unavailable</span>}
     </div>
     {isEntered ? <RecordResult lineupId={String(row.id ?? '')} existingResult={row.actual_dk_points as number | undefined} existingCashLine={row.cash_line as number | undefined} /> : null}
   </article>;
+}
+
+function historyGenerationRunId(row: HistoryRow): string | undefined {
+  const direct = typeof row.generation_run_id === 'string' ? row.generation_run_id : '';
+  if (direct) return direct;
+  const relation = row.floyd_dfs_selection_runs;
+  const selection = Array.isArray(relation) ? relation[0] : relation;
+  if (!selection || typeof selection !== 'object') return undefined;
+  const generationRunId = (selection as HistoryRow).generation_run_id;
+  return typeof generationRunId === 'string' && generationRunId ? generationRunId : undefined;
 }
 
 interface Diagnostic { error_stage?: string; diagnosis?: string; confidence?: string; error?: string; }

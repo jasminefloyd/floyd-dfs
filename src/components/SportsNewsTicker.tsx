@@ -17,7 +17,6 @@ const SPORT_LOGOS: Record<string, string> = {
   nfl: 'https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png',
   golf: 'https://a.espncdn.com/i/teamlogos/leagues/500/golf.png',
 };
-const ESPN_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/2/2f/ESPN_wordmark.svg';
 
 export function SportsNewsTicker() {
   const [items, setItems] = useState<SportsNewsItem[]>([]);
@@ -97,9 +96,7 @@ export function SportsNewsTicker() {
                         item.category === 'injury' ? 'text-amber-300' : 'text-blue-100'
                       }`}
                     >
-                      {item.source_kind === 'espn' ? (
-                        <img src={ESPN_LOGO_URL} alt="ESPN" title="ESPN" className="h-5 w-8 shrink-0 object-contain" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
-                      ) : sportLogo ? (
+                      {sportLogo ? (
                         <img
                           src={sportLogo}
                           alt={sportLabel}

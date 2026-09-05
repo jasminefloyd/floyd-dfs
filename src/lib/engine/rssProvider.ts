@@ -7,6 +7,7 @@ export const DEFAULT_RSS_FEEDS: readonly RssFeedConfig[] = [
   { url: 'https://www.espn.com/espn/rss/news', name: 'ESPN News', tier: 2 },
   { url: 'https://www.espn.com/espn/rss/nfl/news', name: 'ESPN NFL', tier: 2, tags: ['NFL'] },
   { url: 'https://www.espn.com/espn/rss/nba/news', name: 'ESPN NBA', tier: 2, tags: ['NBA'] },
+  { url: 'https://www.espn.com/espn/rss/wnba/news', name: 'ESPN WNBA', tier: 2, tags: ['WNBA'] },
   { url: 'https://www.espn.com/espn/rss/mlb/news', name: 'ESPN MLB', tier: 2, tags: ['MLB'] },
   { url: 'https://www.espn.com/espn/rss/golf/news', name: 'ESPN Golf', tier: 2, tags: ['GOLF'] },
   { url: 'https://www.rotowire.com/rss/news.php?sport=NFL', name: 'RotoWire NFL', tier: 3, tags: ['NFL'] },
@@ -14,6 +15,12 @@ export const DEFAULT_RSS_FEEDS: readonly RssFeedConfig[] = [
   { url: 'https://www.rotowire.com/rss/news.php?sport=NBA', name: 'RotoWire NBA', tier: 3, tags: ['NBA'] },
   { url: 'https://www.rotowire.com/rss/news.php?sport=GOLF', name: 'RotoWire Golf', tier: 3, tags: ['GOLF'] },
 ];
+
+// The site ticker is league news, not the broader research feed. Keep this
+// source allowlist separate from DEFAULT_RSS_FEEDS because the engine's
+// research stage may use fantasy-oriented context while the global ticker may
+// not.
+export const LEAGUE_NEWS_RSS_FEEDS: readonly RssFeedConfig[] = DEFAULT_RSS_FEEDS.filter((feed) => feed.name.startsWith('ESPN ') && feed.tags?.some((tag) => ['NFL', 'NBA', 'WNBA', 'MLB', 'GOLF'].includes(tag)));
 
 export class RssResearchProvider implements ResearchSourceProvider {
   readonly name: string;
@@ -30,6 +37,7 @@ export class RssResearchProvider implements ResearchSourceProvider {
 }
 
 export function createDefaultRssProviders(fetcher?: typeof fetch): RssResearchProvider[] { return DEFAULT_RSS_FEEDS.map((feed) => new RssResearchProvider(feed, fetcher)); }
+export function createLeagueNewsProviders(fetcher?: typeof fetch): RssResearchProvider[] { return LEAGUE_NEWS_RSS_FEEDS.map((feed) => new RssResearchProvider(feed, fetcher)); }
 export function parseRss(xml: string, feed: RssFeedConfig, retrievedAt = new Date()): ResearchArticle[] {
   return (xml.match(/<item\b[\s\S]*?<\/item>/gi) ?? []).flatMap((item) => {
     const title = cleanXml(readTag(item, 'title'));
