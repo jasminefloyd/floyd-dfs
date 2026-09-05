@@ -57,7 +57,18 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   if (excludedPlayers.length) { const names = excludedPlayers.map((player) => player.playerName); warnings.push(`${excludedPlayers.length} player(s) have no projection and were excluded from lineup generation: ${names.slice(0, 10).join(', ')}${names.length > 10 ? `, and ${names.length - 10} more` : ''}.`); }
   const ineligiblePlayers = input.validatedSlate.playerPool.filter((player) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE');
   if (ineligiblePlayers.length) warnings.push(`${ineligiblePlayers.length} player(s) excluded from lineup generation because availability is explicitly OUT/INACTIVE: ${ineligiblePlayers.map((player) => player.playerName).slice(0, 10).join(', ')}.`);
-  const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId) && player.availability?.status !== 'OUT' && player.availability?.status !== 'INACTIVE') } };
+  // An MLB starting pitcher is not interchangeable with an unconfirmed player. A DraftKings
+  // slate can contain eligible players before the official starters are posted, and UNKNOWN or
+  // PROJECTED does not verify that the pitcher will actually take the mound. Relievers remain
+  // eligible unless explicitly unavailable because they can enter the game without being the
+  // confirmed starter. This prevents stale/future starter projections from producing a captain
+  // who is not pitching while preserving valid bullpen options.
+  const unconfirmedMlbStarters = input.validatedSlate.sport === 'MLB'
+    ? input.validatedSlate.playerPool.filter((player) => /^(SP|P)$/i.test(String(player.position ?? '').trim()) && player.availability?.status !== 'CONFIRMED_STARTER')
+    : [];
+  if (unconfirmedMlbStarters.length) warnings.push(`${unconfirmedMlbStarters.length} MLB starting pitcher(s) excluded because they were not confirmed starters: ${unconfirmedMlbStarters.map((player) => player.playerName).slice(0, 10).join(', ')}${unconfirmedMlbStarters.length > 10 ? `, and ${unconfirmedMlbStarters.length - 10} more` : ''}.`);
+  const excludedIds = new Set(unconfirmedMlbStarters.map((player) => player.playerId));
+  const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId) && player.availability?.status !== 'OUT' && player.availability?.status !== 'INACTIVE' && !excludedIds.has(player.playerId)) } };
 
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
