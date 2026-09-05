@@ -341,11 +341,12 @@ function LineupAlerts({ lineup }: { lineup: Lineup }) {
     ...(lineup.late_swap_flags ?? []).map((text) => ({ text, tone: 'warning' as const })),
     ...(lineup.watch_items ?? []).map((text) => ({ text: `Watch before lock: ${text}`, tone: 'warning' as const })),
   ];
-  if (!alerts.length) return null;
+  const uniqueAlerts = alerts.filter((alert, index) => alerts.findIndex((candidate) => candidate.tone === alert.tone && candidate.text === alert.text) === index);
+  if (!uniqueAlerts.length) return null;
 
   return (
     <div className="space-y-2 border-b border-slate-200 px-3 py-3 sm:px-4">
-      {alerts.slice(0, 6).map((alert) => (
+      {uniqueAlerts.slice(0, 6).map((alert) => (
         <p
           key={`${alert.tone}-${alert.text}`}
           className={`rounded-md border px-3 py-2 text-[12px] font-bold ${
