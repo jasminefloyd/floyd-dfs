@@ -1,6 +1,19 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { cors, method, processRun, recordEvent, respondError, tenantContext } from '../../../server/runtime.js';
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object') {
+    const value = error as { message?: unknown; details?: unknown; hint?: unknown; code?: unknown };
+    const message = typeof value.message === 'string' ? value.message : 'Pipeline failed.';
+    const details = typeof value.details === 'string' ? ` ${value.details}` : '';
+    const hint = typeof value.hint === 'string' ? ` Hint: ${value.hint}` : '';
+    const code = typeof value.code === 'string' ? ` [${value.code}]` : '';
+    return `${message}${code}.${details}${hint}`.replace('..', '.');
+  }
+  return 'Pipeline failed.';
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   let jobId: string | undefined;
@@ -24,10 +37,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     await recordEvent(context.db, { tenant_id: context.tenantId, generation_run_id: id, event_type: 'JOB_CLAIMED', stage: 'SLATE', payload: { attempt: nextAttempt } });
     const minSalaryUsed = Number(payload.input.minSalaryUsed);
     const result = await processRun(context.db, found.data, payload.input.validatedSlate as Parameters<typeof processRun>[2], { lineupMode: typeof payload.input.lineupMode === 'string' ? payload.input.lineupMode : undefined, minSalaryUsed: Number.isFinite(minSalaryUsed) && minSalaryUsed > 0 ? minSalaryUsed : undefined });
-    await context.db.from('engine_jobs').update({ status: 'succeeded', completed_at: new Date().toISOString(), output_ref: { selection: true } }).eq('id', jobId);
+    await context.db.from('engine_jobs').update({ status: 'succeeded', completed_at: new Date().toISOString(), error: null, output_ref: { selection: true } }).eq('id', jobId);
     cors(req, res); res.status(200).json(result);
   } catch (error) {
-    if (jobId) { try { const context = await tenantContext(); await context.db.from('engine_jobs').update({ status: 'failed', completed_at: new Date().toISOString(), error: { message: error instanceof Error ? error.message : 'Pipeline failed.' } }).eq('id', jobId); } catch { /* preserve original pipeline error */ } }
+    const message = errorMessage(error);
+    if (jobId) {
+      try {
+        const context = await tenantContext();
+        const failedAt = new Date().toISOString();
+        await context.db.from('engine_jobs').update({ status: 'failed', completed_at: failedAt, error: { message } }).eq('id', jobId);
+        await context.db.from('generation_runs').update({ state: 'failed', error: { message }, updated_at: failedAt }).eq('id', String(req.query.runId ?? '')).eq('tenant_id', context.tenantId);
+      } catch { /* preserve original pipeline error */ }
+    }
     respondError(req, res, error);
   }
 }
