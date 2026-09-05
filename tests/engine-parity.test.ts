@@ -511,6 +511,23 @@ const testGolfClassicSlateBuildParity = (): void => {
   assert.equal(slate.rosterRules.slots.G?.count, 6);
 };
 
+const testClassicPositionEligibilityFallbackParity = (): void => {
+  const receivedAt = now.toISOString();
+  const bundle = {
+    contest: { data: { contestDetail: { name: 'Test MLB Classic', maximumEntries: 10, payoutSummary: [] } }, url: 'x', retrievedAt: receivedAt, status: 200 },
+    draftGroup: { data: { draftGroup: { eventId: 'evt-mlb', name: 'MLB slate', startTime: receivedAt } }, url: 'x', retrievedAt: receivedAt, status: 200 },
+    gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, slots: { P: { count: 1 }, C: { count: 1 }, OF: { count: 1 } } }, url: 'x', retrievedAt: receivedAt, status: 200 },
+    draftables: { data: { draftables: [
+      { draftableId: 1, displayName: 'Starting Pitcher', position: 'SP', salary: 8000 },
+      { draftableId: 2, displayName: 'Outfielder', position: 'OF', salary: 4000 },
+    ] }, url: 'x', retrievedAt: receivedAt, status: 200 },
+  };
+  const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'request-mlb', sport: 'MLB', league: 'MLB', contestId: 'mlb-classic', contestFormat: 'CLASSIC', userEntryCount: 1, contestName: 'Test MLB Classic', contestLockTime: receivedAt });
+  assert.equal(slate.playerPool.find((player) => player.position === 'SP')?.eligibility.P, true, 'MLB SP positions must map to the P roster slot when DK omits eligibility fields');
+  assert.equal(slate.playerPool.find((player) => player.position === 'OF')?.eligibility.OF, true, 'MLB hitter positions must map to their roster slot when DK omits eligibility fields');
+  assert.ok(slate.validation.warnings.some((warning) => warning.includes('mapped roster eligibility')));
+};
+
 const testSeasonBasedInputsParity = (): void => {
   const hitter = { ...baseSlate.playerPool[0], playerName: 'Yordan Alvarez', team: 'HOU', position: 'OF' };
   const hitterRow = { Name: 'Yordan Alvarez', Team: 'HOU', Games: 130, PlateAppearances: 569.3, AtBats: 466.6, Hits: 150.5, Singles: 85.7, Doubles: 27.9, Triples: 1, HomeRuns: 35.9, TotalBases: 288.1, RunsBattedIn: 90.7, Runs: 87.7, StolenBases: 1, Walks: 90.7 };
@@ -831,7 +848,7 @@ const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
   await testCollegeFootballRosterSemanticsParity();
   await testNflIdentityAndEventResolutionParity();
   await testCfbSportsDataIoRosterAndInjuryParity();
