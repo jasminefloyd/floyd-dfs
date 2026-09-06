@@ -109,7 +109,10 @@ export function findConflicts(findings: ResearchFinding[]): ResearchConflict[] {
   for (const group of groupBy(findings, (finding) => `${finding.subjectId}:${finding.bucket}`)) {
     if (group[0]?.bucket === 'FIELD_SENTIMENT') continue;
     const contradictory = group.some((left, index) => group.slice(index + 1).some((right) => claimsConflict(left, right)));
-    if (group.length > 1 && contradictory) conflicts.push({ findingIds: group.map((finding) => finding.id), subjectId: group[0].subjectId, summary: 'Sources reported contradictory evidence for the same subject and bucket; authority, recency, and specificity must remain visible.', resolved: false });
+    if (group.length > 1 && contradictory) {
+      const resolution = resolveDirectAvailabilityConflict(group);
+      conflicts.push({ findingIds: group.map((finding) => finding.id), subjectId: group[0].subjectId, summary: resolution?.summary ?? 'Sources reported contradictory evidence for the same subject and bucket; authority, recency, and specificity must remain visible.', resolved: Boolean(resolution) });
+    }
   }
   return conflicts;
 }
@@ -133,6 +136,38 @@ function claimsConflict(left: ResearchFinding, right: ResearchFinding): boolean 
   const positive = /increased|starting|starter|more minutes|more routes|top of the order|favorable|boost/.test(leftText) !== /increased|starting|starter|more minutes|more routes|top of the order|favorable|boost/.test(rightText);
   const negative = /out|inactive|reduced|limited|fewer|bottom of the order|unfavorable|downgrade/.test(leftText) !== /out|inactive|reduced|limited|fewer|bottom of the order|unfavorable|downgrade/.test(rightText);
   return positive && negative;
+}
+
+// A same-slate, tier-1 provider lineup is stronger than an older external news item
+// for MLB availability. Resolve only when the provider record is explicitly decisive
+// (confirmed starter or explicit unavailable state), has a comparable timestamp, and
+// outranks every contradictory finding. Otherwise preserve the conflict for review.
+function resolveDirectAvailabilityConflict(group: ResearchFinding[]): { summary: string } | undefined {
+  if (group[0]?.bucket !== 'AVAILABILITY') return undefined;
+  const direct = group.filter(isDecisiveDirectAvailabilityFinding);
+  for (const candidate of direct) {
+    const opposing = group.filter((finding) => finding.id !== candidate.id && claimsConflict(candidate, finding));
+    if (!opposing.length) continue;
+    const candidateTime = findingTime(candidate);
+    if (candidateTime === undefined) continue;
+    const candidateTier = candidate.sourceTier ?? 4;
+    const outranks = opposing.every((finding) => (finding.sourceTier ?? 4) > candidateTier && (findingTime(finding) ?? Number.NEGATIVE_INFINITY) <= candidateTime);
+    if (outranks) return { summary: `Conflict resolved in favor of the newer tier-${candidateTier} direct same-slate availability record from ${candidate.sourceName}; contradictory lower-authority evidence remains linked for audit.` };
+  }
+  return undefined;
+}
+
+function isDecisiveDirectAvailabilityFinding(finding: ResearchFinding): boolean {
+  if (finding.bucket !== 'AVAILABILITY' || finding.sourceTier !== 1 || !finding.sourcePurpose?.includes('exact slate')) return false;
+  const text = finding.finding.toLowerCase();
+  return /confirmed as a starter|confirmed starting lineup|ruled out|inactive|not in the confirmed starting lineup/.test(text) && !/starting role remains unconfirmed|starting role was not confirmed/.test(text);
+}
+
+function findingTime(finding: ResearchFinding): number | undefined {
+  const value = finding.retrievedAt ?? finding.publishedAt;
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : undefined;
 }
 
 function groupBy<T>(items: T[], key: (item: T) => string): T[][] { const groups = new Map<string, T[]>(); for (const item of items) { const groupKey = key(item); groups.set(groupKey, [...(groups.get(groupKey) ?? []), item]); } return [...groups.values()]; }

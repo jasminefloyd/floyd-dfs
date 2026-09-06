@@ -9,7 +9,7 @@ import { optimizeLineups } from '../src/lib/engine/optimizer';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
-import { normalizeArticles } from '../src/lib/engine/researchEvidence';
+import { findConflicts, normalizeArticles } from '../src/lib/engine/researchEvidence';
 import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
@@ -353,6 +353,16 @@ const testConflictingEvidenceNetsRealSignalParity = (): void => {
   const projected = projectSlate(providerFppgSlate, adjustment, now);
   const p1 = projected.players.find((player) => player.playerId === 'p1')!;
   assert.ok(p1.projectedOutcomes.medianP50 < 40, 'conflicting evidence that nets DOWN must reduce the projection, not leave it unchanged as if there were no evidence at all');
+};
+
+const testDirectAvailabilityConflictResolutionParity = (): void => {
+  const direct = { id: 'direct-lineup', subjectId: 'p1', bucket: 'AVAILABILITY' as const, finding: 'Player One is confirmed as a starter per SPORTSDATAIO.', sourceName: 'SPORTSDATAIO', sourceTier: 1 as const, sourcePurpose: 'Directly fetched confirmed-lineup/availability data for this exact slate.', confidence: 'HIGH' as const, retrievedAt: now.toISOString() };
+  const staleNews = { id: 'stale-news', subjectId: 'p1', bucket: 'AVAILABILITY' as const, finding: 'Player One was scratched.', sourceName: 'DraftKings Network', sourceTier: 3 as const, confidence: 'MEDIUM' as const, publishedAt: new Date(now.getTime() - 60 * 60_000).toISOString() };
+  const resolved = findConflicts([direct, staleNews]);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].resolved, true, 'newer direct same-slate availability evidence should resolve older lower-authority scratch reporting');
+  const newerNews = { ...staleNews, id: 'newer-news', publishedAt: new Date(now.getTime() + 60_000).toISOString() };
+  assert.equal(findConflicts([direct, newerNews])[0].resolved, false, 'newer external evidence must remain unresolved rather than being overridden automatically');
 };
 
 const testNoiseWidthReflectsRoleCertaintyParity = (): void => {
@@ -853,7 +863,7 @@ const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
 };
 
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
   await testCollegeFootballRosterSemanticsParity();
   await testNflIdentityAndEventResolutionParity();
   await testCfbSportsDataIoRosterAndInjuryParity();
