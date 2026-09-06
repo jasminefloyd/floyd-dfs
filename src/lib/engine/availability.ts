@@ -75,8 +75,9 @@ export function parseAvailabilityRecords(payload: unknown, sport: Sport, retriev
     const starting = readBoolean(row, ['Starting', 'starting']);
     const available = readOptionalBoolean(row, ['Available', 'available']);
     const state = readString(row, ['Status', 'InjuryStatus', 'LineupStatus', 'status']) ?? '';
-    const inactive = /inactive|out|scratched|doubtful/i.test(state); const battingOrder = readNumber(row, ['BattingOrder', 'battingOrder']);
-    const status: AvailabilityRecord['status'] = inactive ? (/(out|scratched|doubtful)/i.test(state) ? 'OUT' : 'INACTIVE') : sport === 'MLB' && confirmed && battingOrder !== undefined ? 'CONFIRMED_STARTER' : confirmed && starting ? 'ACTIVE' : available === false ? 'INACTIVE' : 'PROJECTED';
+    const inactive = /inactive|out|scratched|doubtful/i.test(state); const battingOrder = readNumber(row, ['BattingOrder', 'battingOrder']); const position = readString(row, ['Position', 'position']);
+    const confirmedMlbStarter = sport === 'MLB' && confirmed && (battingOrder !== undefined || (starting && /^(P|SP)$/i.test(position ?? '')));
+    const status: AvailabilityRecord['status'] = inactive ? (/(out|scratched|doubtful)/i.test(state) ? 'OUT' : 'INACTIVE') : confirmedMlbStarter ? 'CONFIRMED_STARTER' : confirmed && starting ? 'ACTIVE' : available === false ? 'INACTIVE' : 'PROJECTED';
     return [{ playerName, team, providerPlayerId: readString(row, ['PlayerID', 'PlayerId', 'playerId']), status, confirmed, battingOrder, updatedAt: readString(row, ['Updated', 'DateTime', 'updatedAt']) }];
   });
   return { source: 'SPORTSDATAIO', retrievedAt, records, confirmedLineupAvailable: sport === 'MLB' && records.some((record) => record.confirmed && record.battingOrder !== undefined) };
