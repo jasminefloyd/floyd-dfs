@@ -56,8 +56,11 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
     gaps.push({ reason: `Golf structured projections are missing required inputs for ${golfMissing.length}/${slate.playerPool.length} golfers (${fields}). Sample: ${sample}${golfMissing.length > 5 ? ', and others' : ''}. Check SportsDataIO Golf tournament lookup, feed access, and golfer-name matching; lineups remain blocked until inputs are available.` });
   }
   if (slate.sport === 'NBA' || slate.sport === 'WNBA') players = reconcileBasketballMinutes(players, slate, gaps);
-  if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); lineup generation is disabled until verified skill, course, weather, and finish/cut inputs are supplied.` });
-  const status = players.length === 0 || golfFallbackCount > 0 ? 'BLOCKED' : gaps.length || adjustmentPackage.status !== 'COMPLETE' ? 'PARTIAL' : 'COMPLETE';
+  if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); any candidate uses DraftKings provider FPPG only and is provisional. Verified skill, course, weather, and finish/cut inputs are still required before entry.` });
+  // DK's own FPPG is enough to produce a clearly provisional research candidate, but not an
+  // entry-ready Golf projection. Keep the candidate path available for QA and comparison while
+  // the run trust gate continues to require model validation and complete sport context.
+  const status = players.length === 0 ? 'BLOCKED' : gaps.length || adjustmentPackage.status !== 'COMPLETE' || golfFallbackCount > 0 ? 'PARTIAL' : 'COMPLETE';
   return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, gaps, status };
 }
 

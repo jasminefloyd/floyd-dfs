@@ -22,8 +22,9 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const contestKind = classifyContestKind(contest);
   const receivedAt = bundle.contest.retrievedAt;
   const fallbackUsed = rules.sourceFallback === true;
+  const profileVerified = rules.profileVerified === true && bundle.contestIdentityVerified === true;
   const sourceManifest: ValidatedSlate['sourceManifest'] = [
-    { source: fallbackUsed ? 'DRAFTKINGS_PUBLIC_CSV_FALLBACK' : 'DRAFTKINGS_API', receivedAt, fields: fallbackUsed ? ['contest', 'draftGroup', 'verifiedRosterRules', 'playerSalaryCsv'] : ['contest', 'draftGroup', 'gameTypeRules', 'draftables'] },
+    { source: fallbackUsed ? 'DRAFTKINGS_PUBLIC_LOBBY_AND_PLAYER_CSV' : 'DRAFTKINGS_API', receivedAt, fields: fallbackUsed ? ['liveContestIdentity', 'sportFormatDraftGroupBinding', 'playerId', 'salary', 'position', 'eligibility', 'status', 'averagePointsPerGame'] : ['contest', 'draftGroup', 'gameTypeRules', 'draftables'] },
   ];
   const providerScoringRules = mapScoringRules(rules);
   const officialProfile = officialScoringProfile(context.sport, context.contestFormat, rules, `${readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? '')} ${readString(draftGroup, ['name', 'eventName', 'description'], '')}`);
@@ -33,8 +34,9 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const missingScoringRules = Object.keys(requiredScoringRules).filter((key) => scoringRules[key] === undefined);
   const scoringVerified = Object.keys(scoringRules).length > 0 && missingScoringRules.length === 0 && scoringConflicts.length === 0 && (!officialProfile || officialProfile.verified);
   const usedOfficialProfile = Boolean(officialProfile && Object.keys(requiredScoringRules).some((key) => providerScoringRules[key] === undefined) && scoringConflicts.length === 0);
-  if (usedOfficialProfile && officialProfile) sourceManifest.push({ source: officialProfile.source, receivedAt: officialProfile.reviewedAt, fields: Object.keys(officialProfile.rules), sourceUrl: officialProfile.sourceUrl, ruleVersion: officialProfile.version });
-  const scoringWarnings = scoringVerified ? (usedOfficialProfile ? [`DraftKings game-type response omitted some scoring values; completed from ${officialProfile?.source} (${officialProfile?.version}).`] : []) : ['Authoritative DraftKings scoring values are incomplete or conflicting; provisional scoring cannot verify this contest.'];
+  if (officialProfile) sourceManifest.push({ source: officialProfile.source, receivedAt: officialProfile.reviewedAt, fields: Object.keys(officialProfile.rules), sourceUrl: officialProfile.sourceUrl, ruleVersion: officialProfile.version });
+  if (profileVerified) sourceManifest.push({ source: 'DRAFTKINGS_PUBLISHED_CONTEST_RULE_PROFILE', receivedAt, fields: ['salaryCap', 'rosterSize', 'rosterSlots', 'teamConstraints', 'captainMultipliers'], sourceUrl: ruleProfileUrl(context.sport, context.contestFormat), ruleVersion: String(rules.ruleProfileVersion ?? 'DK_PUBLISHED_RULES') });
+  const scoringWarnings = scoringVerified ? (usedOfficialProfile || fallbackUsed ? [`Scoring values were resolved from the reviewed DraftKings ${context.sport} profile (${officialProfile?.version ?? 'published scoring profile'}).`] : []) : ['Authoritative DraftKings scoring values are incomplete or conflicting; provisional scoring cannot verify this contest.'];
   const resolvedScoringRules = Object.keys(scoringRules).length ? scoringRules : standardScoringRules(context.sport, context.contestFormat);
   const slate: ValidatedSlate = {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
@@ -45,11 +47,11 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const validationErrors = validateSlate(slate);
   if (bundle.contestIdentityVerified !== true) validationErrors.push('Contest ID, sport, format, draft group, lock time, and lobby metadata were not authoritatively bound; this slate is discovery-only and cannot generate lineups.');
   validationErrors.push(...validateAuthoritativeRosterRules(rules, context.contestFormat, rosterRules, context.sport));
-  if (fallbackUsed) validationErrors.push('Authoritative DraftKings contest rules were unavailable; fallback templates are unverified and cannot be used to generate an entry-ready lineup.');
+  if (fallbackUsed && !profileVerified) validationErrors.push('Authoritative DraftKings contest rules were unavailable and no reviewed rule profile matches this sport and format.');
   if (!scoringVerified) validationErrors.push('Authoritative DraftKings scoring values are unavailable; provisional scoring templates cannot be used to generate an entry-ready lineup.');
   if (missingScoringRules.length) validationErrors.push(`DraftKings scoring rules are incomplete for this model: ${missingScoringRules.join(', ')}.`);
   if (scoringConflicts.length) validationErrors.push(`DraftKings scoring values conflict with the reviewed official scoring profile: ${scoringConflicts.join(', ')}.`);
-  const sourceWarnings = fallbackUsed ? ['DraftKings API endpoints were blocked. Player CSV may provide salaries, but does not verify this contest\'s roster or scoring rules.'] : [];
+  const sourceWarnings = fallbackUsed ? [profileVerified ? 'DraftKings detailed endpoints returned HTTP 403. The live public lobby and salary CSV were identity-bound to this contest; roster rules and scoring use the published, reviewed profile. Model validation is still required before real-money use.' : 'DraftKings detailed endpoints were blocked and this contest does not have a reviewed rule profile; lineup generation remains blocked.'] : [];
   return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...sourceWarnings, ...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors } };
 }
 
@@ -234,6 +236,9 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
   // used by this Classic/Showdown scorer. Captain scoring remains a separately verified
   // roster-rule multiplier. This profile is intentionally sport-scoped; it is not a fallback
   // for NBA or another league, and any overlapping API value must match exactly.
+  if (sport === 'GOLF') return { rules: standardScoringRules(sport, format), source: 'DRAFTKINGS_PUBLISHED_GOLF_CLASSIC_SCORING', sourceUrl: 'https://dknetwork.draftkings.com/2024/03/07/how-to-play-golf-dfs-tips-beginners-guide-to-daily-fantasy-golf-on-draftkings/', version: 'DK_GOLF_CLASSIC_SCORING_2026-10-01.1', reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
+  if (sport === 'MLB') return { rules: standardScoringRules(sport, format), source: 'DRAFTKINGS_PUBLISHED_MLB_SCORING', sourceUrl: 'https://dknetwork.draftkings.com/2020/05/29/beginner-mlb-dfs-scoring/', version: 'DK_MLB_SCORING_2026-10-01.1', reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
+  if (sport === 'NFL' || sport === 'CFB') return { rules: standardScoringRules(sport, format), source: sport === 'NFL' ? 'DRAFTKINGS_PUBLISHED_NFL_SCORING' : 'DRAFTKINGS_PUBLISHED_CFB_SCORING', sourceUrl: sport === 'NFL' ? 'https://dknetwork.draftkings.com/2025/08/27/nfl-dfs-beginners-guide-draftkings/' : 'https://pick6.draftkings.com/pick6-rules-and-scoring-cfb', version: `DK_${sport}_SCORING_2026-10-01.1`, reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
   if (sport !== 'WNBA') return undefined;
   const score = DK_SCORING.wnba;
   return {
@@ -248,6 +253,12 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
     reviewedAt: '2026-09-30T00:00:00.000Z',
     verified: true,
   };
+}
+
+function ruleProfileUrl(sport: Sport, format: ContestFormat): string {
+  if (format === 'SHOWDOWN') return 'https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694';
+  const page: Record<Sport, string> = { MLB: 'fantasy-baseball', NFL: 'fantasy-football', CFB: 'fantasy-college-football', WNBA: 'fantasy-basketball', NBA: 'fantasy-basketball', GOLF: 'fantasy-golf' };
+  return `https://www.draftkings.com/${page[sport]}`;
 }
 
 function officialGolfShowdownScoringProfile(rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
@@ -278,8 +289,8 @@ function officialGolfShowdownScoringProfile(rules: Record<string, unknown>, even
 
 function standardScoringRules(sport: Sport, format: ContestFormat): Record<string, { value: number }> {
   if (sport === 'NBA' || sport === 'WNBA') return { points: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].points }, threePointersMade: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].threePointersMade }, rebounds: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].rebounds }, assists: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].assists }, steals: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].steals }, blocks: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].blocks }, turnovers: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].turnovers }, doubleDouble: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].doubleDouble }, tripleDouble: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].tripleDouble } };
-  if (sport === 'MLB') return { single: { value: 3 }, double: { value: 5 }, triple: { value: 8 }, homeRun: { value: 10 }, rbi: { value: 2 }, run: { value: 2 }, walk: { value: 2 }, hitByPitch: { value: 2 }, sacrificeFly: { value: 1.25 }, sacrificeHit: { value: 1.25 }, stolenBase: { value: 5 }, inningPitched: { value: 2.25 }, strikeout: { value: 2 }, win: { value: 4 }, earnedRun: { value: -2 }, hitAgainst: { value: -0.6 }, walkAgainst: { value: -0.6 }, hitBatsman: { value: -0.6 }, completeGame: { value: 2.5 }, completeGameShutout: { value: 2.5 }, noHitter: { value: 5 } };
-  if (sport === 'NFL' || sport === 'CFB') return { passingYards: { value: DK_SCORING.nfl.passingYards }, passingTouchdown: { value: DK_SCORING.nfl.passingTouchdown }, passingYardBonus: { value: DK_SCORING.nfl.passingYardBonus }, interception: { value: DK_SCORING.nfl.interception }, rushingYards: { value: DK_SCORING.nfl.rushingYards }, rushingTouchdown: { value: DK_SCORING.nfl.rushingTouchdown }, rushingYardBonus: { value: DK_SCORING.nfl.rushingYardBonus }, reception: { value: DK_SCORING.nfl.reception }, receivingYards: { value: DK_SCORING.nfl.receivingYards }, receivingTouchdown: { value: DK_SCORING.nfl.receivingTouchdown }, receivingYardBonus: { value: DK_SCORING.nfl.receivingYardBonus }, fumbleLost: { value: DK_SCORING.nfl.fumbleLost }, twoPointConversion: { value: DK_SCORING.nfl.twoPointConversion } };
+  if (sport === 'MLB') return Object.fromEntries(Object.entries(DK_SCORING.mlb).map(([key, value]) => [key, { value }]));
+  if (sport === 'NFL' || sport === 'CFB') return Object.fromEntries(Object.entries(DK_SCORING.nfl).map(([key, value]) => [key, { value }]));
   if (sport === 'GOLF') {
     // DraftKings' own gameTypeRules response has no scoring-rules field at all for Golf (verified
     // live -- confirmed absent from a real contest's /lineups/v1/gametypes/{id}/rules payload), so

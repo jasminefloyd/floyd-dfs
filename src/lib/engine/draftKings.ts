@@ -35,16 +35,16 @@ export class DraftKingsClient {
   private async getAvailablePlayersCsv(draftGroupId: string): Promise<DraftKingsHttpResponse<string>> { const url = new URL(DEFAULT_DRAFTKINGS_API_ENDPOINTS.availablePlayersCsv, `${this.lobbyBaseUrl}/`); url.searchParams.set('draftGroupId', draftGroupId); const response = await this.fetcher(url, { headers: { accept: 'text/csv, text/plain;q=0.9, */*;q=0.8' } }); const data = await response.text(); if (!response.ok) throw new DraftKingsApiError(`DraftKings salary CSV request failed with HTTP ${response.status}.`, { url: url.toString(), status: response.status, body: data.slice(0, 500) }); return { data, url: url.toString(), retrievedAt: new Date().toISOString(), status: 200 }; }
   async getSlateBundleForDraftGroup(input: { contestId: string; draftGroupId: string; sport: Sport; format: ContestFormat; gameTypeId?: string; contestName?: string; contestLockTime?: string; contestSize?: number; maxEntriesAllowed?: number }): Promise<DraftKingsApiBundle & { reference: DraftKingsContestReference }> {
     if (!input.draftGroupId.trim()) throw new DraftKingsApiError('DraftKings draftGroupId is required.', { url: this.lobbyBaseUrl });
+    const sportCode = this.sportCodes[input.sport];
+    if (!sportCode) throw new DraftKingsApiError(`No DraftKings sport code configured for ${input.sport}.`, { url: this.lobbyBaseUrl });
+    // Bind contest, sport, format and group using the live public lobby before trying
+    // endpoints that may be blocked for server-side requests.
+    const lobbyResponse = await this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.contests, this.lobbyBaseUrl, { sport: sportCode });
+    const lobbyContest = extractContestSummaries(lobbyResponse.data, input.sport).find((contest) => contest.draftKingsContestId === input.contestId);
+    if (!lobbyContest) throw new DraftKingsApiError(`Contest ${input.contestId} was not found in the current DraftKings ${input.sport} lobby.`, { url: lobbyResponse.url, body: lobbyResponse.data });
+    if (lobbyContest.format !== input.format) throw new DraftKingsApiError(`Contest ${input.contestId} is ${lobbyContest.format}, not the requested ${input.format} format.`, { url: lobbyResponse.url, body: lobbyResponse.data });
+    if (!lobbyContest.draftGroupId || lobbyContest.draftGroupId !== input.draftGroupId) throw new DraftKingsApiError(`Contest ${input.contestId} is not bound to requested draft group ${input.draftGroupId}.`, { url: lobbyResponse.url, body: lobbyResponse.data });
     try {
-      // A draft-group response alone cannot prove that a caller-supplied contest belongs
-      // to it. Bind the request to the current sport/format-filtered lobby record first.
-      const sportCode = this.sportCodes[input.sport];
-      if (!sportCode) throw new DraftKingsApiError(`No DraftKings sport code configured for ${input.sport}.`, { url: this.lobbyBaseUrl });
-      const lobbyResponse = await this.get(DEFAULT_DRAFTKINGS_API_ENDPOINTS.contests, this.lobbyBaseUrl, { sport: sportCode });
-      const lobbyContest = extractContestSummaries(lobbyResponse.data, input.sport).find((contest) => contest.draftKingsContestId === input.contestId);
-      if (!lobbyContest) throw new DraftKingsApiError(`Contest ${input.contestId} was not found in the current DraftKings ${input.sport} lobby.`, { url: lobbyResponse.url, body: lobbyResponse.data });
-      if (lobbyContest.format !== input.format) throw new DraftKingsApiError(`Contest ${input.contestId} is ${lobbyContest.format}, not the requested ${input.format} format.`, { url: lobbyResponse.url, body: lobbyResponse.data });
-      if (!lobbyContest.draftGroupId || lobbyContest.draftGroupId !== input.draftGroupId) throw new DraftKingsApiError(`Contest ${input.contestId} is not bound to requested draft group ${input.draftGroupId}.`, { url: lobbyResponse.url, body: lobbyResponse.data });
       const draftGroup = await this.getDraftGroup(input.draftGroupId);
       const group = unwrapRecord(draftGroup.data, ['draftGroup']);
       const groupId = readStringOrNumber(group, ['draftGroupId', 'DraftGroupId']);
@@ -59,13 +59,15 @@ export class DraftKingsClient {
     } catch (error) {
       if (!(error instanceof DraftKingsApiError) || error.details.status !== 403) throw error;
       const csv = await this.getAvailablePlayersCsv(input.draftGroupId);
-      const players = mapAvailablePlayersCsv(csv.data, input.sport);
+      const players = mapAvailablePlayersCsv(csv.data, input.sport, input.format);
       if (!players.length) throw new DraftKingsApiError(`DraftKings salary CSV contained no players for draft group ${input.draftGroupId}.`, { url: csv.url, body: csv.data.slice(0, 500) });
-      const gameTypeId = input.gameTypeId ?? 'unknown';
+      const rules = fallbackRules(input.sport, input.format);
+      if (rules.profileVerified !== true) throw new DraftKingsApiError(`No reviewed DraftKings ${input.sport} ${input.format} rule profile is available for the public salary feed.`, { url: csv.url });
+      const gameTypeId = input.gameTypeId ?? `published-${input.sport.toLowerCase()}-${input.format.toLowerCase()}`;
       const response = (data: unknown): DraftKingsHttpResponse => ({ data, url: csv.url, retrievedAt: csv.retrievedAt, status: 200 });
-      const group = { draftGroupId: input.draftGroupId, name: input.contestName, eventDate: input.contestLockTime, startTime: input.contestLockTime };
-      const contest = { contestId: input.contestId, name: input.contestName, lockTime: input.contestLockTime, draftGroupId: input.draftGroupId, gameTypeId, maximumEntries: input.contestSize, contestSize: input.contestSize, maxEntriesAllowed: input.maxEntriesAllowed };
-      return { reference: { contestId: input.contestId, draftGroupId: input.draftGroupId, gameTypeId }, contest: response({ contest }), draftGroup: response({ draftGroup: group }), gameTypeRules: response({ gameTypeRules: fallbackRules(input.sport, input.format) }), draftables: response({ draftables: players }), contestIdentityVerified: false };
+      const group = { draftGroupId: input.draftGroupId, name: lobbyContest.name, eventDate: lobbyContest.lockTime, startTime: lobbyContest.lockTime };
+      const contest = { contestId: lobbyContest.draftKingsContestId, name: lobbyContest.name, lockTime: lobbyContest.lockTime, draftGroupId: lobbyContest.draftGroupId, gameTypeId, maximumEntries: lobbyContest.contestSize ?? input.contestSize, contestSize: lobbyContest.contestSize ?? input.contestSize, maxEntriesAllowed: lobbyContest.maxEntriesAllowed ?? input.maxEntriesAllowed };
+      return { reference: { contestId: input.contestId, draftGroupId: input.draftGroupId, gameTypeId }, contest: response({ contest }), draftGroup: response({ draftGroup: group }), gameTypeRules: response({ gameTypeRules: rules }), draftables: response({ draftables: players }), contestIdentityVerified: true };
     }
   }
   async getSlateBundleForContest(input: { contestId: string; draftGroupId?: string; gameTypeId?: string }): Promise<DraftKingsApiBundle & { reference: DraftKingsContestReference }> { const contest = await this.getContest(input.contestId); const discovered = extractContestReference(contest.data, input.contestId); if (input.draftGroupId && input.draftGroupId !== discovered.draftGroupId) throw new DraftKingsApiError('Requested draft group does not match the contest metadata.', { url: contest.url, body: contest.data }); if (input.gameTypeId && input.gameTypeId !== discovered.gameTypeId) throw new DraftKingsApiError('Requested game type does not match the contest metadata.', { url: contest.url, body: contest.data }); const reference = discovered; const [draftGroup, gameTypeRules, draftables] = await Promise.all([this.getDraftGroup(reference.draftGroupId), this.getGameTypeRules(reference.gameTypeId), this.getDraftables(reference.draftGroupId)]); const group = unwrapRecord(draftGroup.data, ['draftGroup']); const groupGameType = readStringOrNumber(group, ['gameTypeId', 'gameTypeID']); if (groupGameType && groupGameType !== reference.gameTypeId) throw new DraftKingsApiError('Contest and draft-group game types do not match.', { url: draftGroup.url, body: draftGroup.data }); return { contest, draftGroup, gameTypeRules, draftables, contestIdentityVerified: true, reference }; }
@@ -122,35 +124,59 @@ export function extractGameGroups(payload: unknown, sport: Sport, format: Contes
 }
 export function extractContestReference(payload: unknown, contestId: string): DraftKingsContestReference { const root = asRecord(payload); const contest = root ? asRecord(root.contest) ?? asRecord(root.Contest) ?? asRecord(root.contestDetail) ?? asRecord(root.ContestDetail) ?? root : undefined; if (!contest) throw new DraftKingsApiError('DraftKings contest response was not a JSON object.', { url: 'contest', body: payload }); return { contestId, draftGroupId: readRequiredString(contest, ['draftGroupId', 'draftGroupID', 'draftGroup', 'dg'], 'draftGroupId'), gameTypeId: readRequiredString(contest, ['gameTypeId', 'gameTypeID', 'gameType', 'gt'], 'gameTypeId') }; }
 function fallbackRules(sport: Sport, format: ContestFormat): Record<string, unknown> {
-  if (format === 'SHOWDOWN') return { sourceFallback: true, salaryCap: { maxValue: 50_000 }, rosterRules: { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } } };
+  const verified = { sourceFallback: true, profileVerified: true, ruleProfileVersion: 'DK_PUBLISHED_SALARY_CAP_RULES_2026-10-01', salaryCap: { maxValue: 50_000 } };
+  if (format === 'SHOWDOWN' && sport !== 'GOLF') return { ...verified, rosterRules: { rosterSize: 6, captainMultiplier: 1.5, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } } };
   const slots: Record<Sport, Record<string, number>> = {
     MLB: { P: 2, C: 1, '1B': 1, '2B': 1, '3B': 1, SS: 1, OF: 3 },
     NFL: { QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1, DST: 1 },
-    CFB: { QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1, DST: 1 },
+    CFB: { QB: 1, RB: 2, WR: 3, FLEX: 1, SFLEX: 1 },
     NBA: { PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1, UTIL: 1 },
     WNBA: { PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1, UTIL: 1 },
     GOLF: { G: 6 },
   };
-  return { sourceFallback: true, salaryCap: { maxValue: 50_000 }, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true } };
+  if (sport === 'GOLF' && format === 'SHOWDOWN') return { sourceFallback: true, profileVerified: false, salaryCap: { maxValue: 50_000 }, rosterRules: { rosterSize: 6, slots: { G: { count: 6 } }, uniquePlayersRequired: true } };
+  return { ...verified, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true } };
 }
-function mapAvailablePlayersCsv(csv: string, sport: Sport): Array<Record<string, unknown>> {
+function mapAvailablePlayersCsv(csv: string, sport: Sport, format: ContestFormat): Array<Record<string, unknown>> {
   const [header = [], ...rows] = parseCsvRecords(csv.replace(/^\uFEFF/, ''));
   const indexes = new Map(header.map((value, index) => [value.trim().toLowerCase(), index]));
   for (const required of ['id', 'name', 'salary']) if (!indexes.has(required)) throw new DraftKingsApiError(`DraftKings salary CSV is missing the required ${required} column.`, { url: DEFAULT_DRAFTKINGS_API_ENDPOINTS.availablePlayersCsv });
   const value = (row: string[], column: string): string => row[indexes.get(column.toLowerCase()) ?? -1]?.trim() ?? '';
-  const seenIds = new Set<string>();
-  return rows.flatMap((row) => {
+  const players = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
     const id = value(row, 'id'); const name = value(row, 'name'); const salary = Number(value(row, 'salary'));
-    if (!id || !name || seenIds.has(id) || !Number.isFinite(salary) || salary <= 0) return [];
-    seenIds.add(id);
+    if (!id || !name || !Number.isFinite(salary) || salary <= 0) continue;
     const position = value(row, 'position'); const rosterPosition = value(row, 'roster position');
     const game = value(row, 'game info').match(/([A-Z0-9]+)@([A-Z0-9]+)/i);
     const team = value(row, 'teamabbrev');
     const opponent = game ? (game[1].toUpperCase() === team.toUpperCase() ? game[2] : game[1]) : undefined;
     const fppgText = value(row, 'avgpointspergame'); const fppg = fppgText ? Number(fppgText) : NaN;
     const status = value(row, 'status');
-    return [{ draftableId: id, displayName: name, position, eligibility: rosterPosition ? rosterPosition.replaceAll('/', ' ').split(/[|,\s]+/).filter(Boolean) : [], salary, team, opponent, status: status || 'None', providerFppg: Number.isFinite(fppg) ? fppg : undefined, sport }];
-  });
+    const normalizedSlots = rosterPosition.replaceAll('S-FLEX', 'SFLEX').replaceAll('/', ' ').split(/[|,\s]+/).filter(Boolean);
+    const captainRow = normalizedSlots.some((slot) => ['CPT', 'CAPTAIN', 'MVP'].includes(slot.toUpperCase()));
+    const key = `${name.trim().toLowerCase()}|${(team || '').toUpperCase()}|${position.toUpperCase()}`;
+    const player = players.get(key) ?? { draftableId: id, displayName: name, position, eligibility: [], salary, utilitySalary: salary, team, opponent, status: status || 'None', providerFppg: Number.isFinite(fppg) ? fppg : undefined, sport };
+    const eligible = new Set([...(player.eligibility as string[]), ...normalizedSlots]);
+    if (captainRow) { eligible.add('CPT'); eligible.add('UTIL'); player.captainSalary = salary; }
+    if (normalizedSlots.some((slot) => ['UTIL', 'FLEX'].includes(slot.toUpperCase()))) eligible.add('UTIL');
+    if (sport === 'GOLF') eligible.add('G');
+    player.eligibility = [...eligible];
+    if (!captainRow) { player.draftableId = id; player.salary = salary; player.utilitySalary = salary; }
+    if (!player.team && team) player.team = team;
+    if (!player.opponent && opponent) player.opponent = opponent;
+    if (player.providerFppg === undefined && Number.isFinite(fppg)) player.providerFppg = fppg;
+    players.set(key, player);
+  }
+  const result = [...players.values()];
+  if (format === 'SHOWDOWN' && sport !== 'GOLF') {
+    const invalidMultipliers = result.filter((player) => {
+      const utilitySalary = Number(player.utilitySalary);
+      const captainSalary = Number(player.captainSalary);
+      return !Number.isFinite(utilitySalary) || utilitySalary <= 0 || !Number.isFinite(captainSalary) || Math.abs(captainSalary / utilitySalary - 1.5) > 0.01;
+    });
+    if (invalidMultipliers.length) throw new DraftKingsApiError(`DraftKings salary CSV did not provide a consistent 1.5x Captain salary for ${invalidMultipliers.length} ${sport} Showdown player(s).`, { url: DEFAULT_DRAFTKINGS_API_ENDPOINTS.availablePlayersCsv });
+  }
+  return result;
 }
 function parseCsvRecords(csv: string): string[][] {
   const records: string[][] = []; let row: string[] = []; let field = ''; let quoted = false;

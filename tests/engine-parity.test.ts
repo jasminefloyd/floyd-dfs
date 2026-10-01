@@ -224,6 +224,10 @@ const testOutPlayersRemovedForNonMlbSportsParity = (): void => {
   assert.equal(result.playerPool.length, 1, 'a player ESPN explicitly reports OUT must actually be removed from the pool, not just counted in the warning text');
   assert.equal(result.playerPool[0].playerName, 'Player One');
   assert.ok(result.validation.warnings.some((warning) => warning.includes('removed')));
+  const nfl: ValidatedSlate = { ...baseSlate, sport: 'NFL', league: 'NFL', playerPool: [{ ...baseSlate.playerPool[0], playerId: 'team-dst', playerName: 'Vikings', team: 'MIN', position: 'DST', eligibility: { DST: true } }] };
+  const nflResult = applyAvailabilitySnapshot(nfl, { source: 'ESPN', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, rosterComplete: true, records: [] });
+  assert.equal(nflResult.playerPool.length, 1, 'team defense is a DraftKings roster asset, not an athlete that must match the player roster');
+  assert.notEqual(nflResult.playerPool[0].availability?.status, 'NOT_IN_PROVIDER_ROSTER');
 };
 
 const testCollegeFootballRosterSemanticsParity = async (): Promise<void> => {
@@ -635,9 +639,9 @@ const testGolfClassicSlateBuildParity = (): void => {
     ] }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
   };
   const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'request-1', sport: 'GOLF', league: 'GOLF', contestId: '194164749', contestFormat: 'CLASSIC', userEntryCount: 1, contestName: 'Test Golf Classic', contestLockTime: '2026-08-27T15:00:00.000Z' });
-  assert.equal(slate.validation.status, 'BLOCKED', 'Golf Classic slate with no contest scoring values must remain blocked');
-  assert.ok(slate.validation.errors.some((error) => /Authoritative DraftKings scoring values are unavailable/.test(error)));
-  assert.ok(Object.keys(slate.scoringRules).length > 0, 'GOLF may retain the standard scoring profile for diagnostics while blocking entry generation');
+  assert.equal(slate.validation.status, 'VALID', 'the reviewed DraftKings Golf Classic profile supplies its documented scoring rules');
+  assert.ok(!slate.validation.errors.some((error) => /Authoritative DraftKings scoring values are unavailable/.test(error)));
+  assert.ok(Object.keys(slate.scoringRules).length > 0, 'GOLF uses the reviewed published scoring profile');
   assert.ok(['birdies', 'eagles', 'bogeys', 'pars'].every((key) => key in slate.scoringRules), 'GOLF scoring rules must use the component keys the projection model reads (birdies/eagles/bogeys/pars)');
   assert.equal(slate.playerPool.length, 2);
   assert.equal(slate.playerPool[0].eligibility.G, true, 'every Golf Classic player must be eligible for the G slot, not left with an empty eligibility object');
@@ -1131,6 +1135,11 @@ const testGolfFinishModelReadinessParity = (): void => {
   const result = projectSlate(golf, adjustSlate(golf, research, now), now);
   assert.equal(result.status, 'BLOCKED', 'Golf must not present a confident Classic projection while finish-position inputs are absent');
   assert.ok(result.gaps.some((gap) => gap.reason.includes('projectedFinishPosition')));
+  const fallbackGolf: ValidatedSlate = { ...golf, playerPool: [{ ...golf.playerPool[0], projectionInputs: undefined, providerFppg: 42 }] };
+  const fallbackResult = projectSlate(fallbackGolf, adjustSlate(fallbackGolf, research, now), now);
+  assert.equal(fallbackResult.status, 'PARTIAL', 'DK FPPG may produce a provisional Golf candidate without presenting it as a complete sport projection');
+  assert.equal(fallbackResult.players[0].modelPath, 'PROVIDER_FPPG_FALLBACK');
+  assert.ok(fallbackResult.gaps.some((gap) => gap.reason.includes('provisional') && gap.reason.includes('before entry')));
   const showdown: ValidatedSlate = { ...golf, contest: { ...golf.contest, format: 'SHOWDOWN' }, playerPool: [{ ...golf.playerPool[0], projectionInputs: { birdiesPerRound: 4, eaglesPerRound: 0.2, bogeysPerRound: 2, parsPerRound: 12, roundsRemaining: 1 } }] };
   const showdownResult = projectSlate(showdown, adjustSlate(showdown, research, now), now);
   assert.notEqual(showdownResult.status, 'BLOCKED', 'Golf Showdown must not require Classic finish-position data');
@@ -1232,10 +1241,11 @@ const testDraftKingsCsvFallbackOnApi403 = async (): Promise<void> => {
   const csv = 'Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame,Status,Starting\nSP,Chris Sale (44333220),Chris Sale,44333220,P,10000,PHI@ATL 09/30/2026 02:00PM ET,ATL,,,\n';
   const client = new DraftKingsClient({ sportCodes: { MLB: 'MLB' }, fetcher: async (input) => {
     const url = String(input); requested.push(url);
-    if (url.startsWith('https://api.draftkings.com/') || url.includes('/lobby/getcontests')) return new Response('denied', { status: 403 });
+    if (url.includes('/lobby/getcontests')) return new Response(JSON.stringify({ Contests: [{ n: 'MLB contest', id: 'contest-1', dg: 154194, gameType: 'Classic', sd: '2026-09-30T18:00:00Z', s: 8 }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (url.startsWith('https://api.draftkings.com/')) return new Response('denied', { status: 403 });
     return new Response(csv, { status: 200, headers: { 'content-type': 'text/csv' } });
   } });
-  const bundle = await client.getSlateBundleForDraftGroup({ contestId: 'contest-1', draftGroupId: 'group-1', sport: 'MLB', format: 'CLASSIC', contestName: 'MLB CSV fallback' });
+  const bundle = await client.getSlateBundleForDraftGroup({ contestId: 'contest-1', draftGroupId: '154194', sport: 'MLB', format: 'CLASSIC', contestName: 'MLB CSV fallback' });
   const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'csv-fallback', sport: 'MLB', league: 'MLB', contestId: 'contest-1', contestFormat: 'CLASSIC', userEntryCount: 1, contestLockTime: '2026-09-30T18:00:00Z' });
   assert.equal(slate.playerPool.length, 1, 'CSV fallback may still provide discovery and salary data');
   assert.equal(slate.playerPool[0].playerName, 'Chris Sale');
@@ -1244,15 +1254,35 @@ const testDraftKingsCsvFallbackOnApi403 = async (): Promise<void> => {
   assert.equal(slate.playerPool[0].opponent, 'PHI');
   assert.equal(slate.playerPool[0].providerFppg, undefined, 'a blank CSV FPPG is missing data, not a zero-point projection');
   assert.equal(slate.salaryCap, 50_000);
-  assert.equal(slate.validation.status, 'BLOCKED', 'CSV discovery cannot verify contest rules and must not be entry-ready');
-  assert.ok(slate.validation.errors.some((error) => /Authoritative DraftKings contest rules were unavailable/.test(error)));
-  assert.ok(requested.some((url) => url.includes('/lineup/getavailableplayerscsv?draftGroupId=group-1')));
+  assert.equal(bundle.contestIdentityVerified, true, 'a live lobby exact-match binds the CSV to the requested contest');
+  assert.equal(slate.validation.status, 'VALID', 'the reviewed MLB Classic profile plus identity-bound DK salary CSV can build a lineup');
+  assert.ok(slate.validation.warnings.some((warning) => /detailed endpoints returned HTTP 403/.test(warning)));
+  assert.ok(requested.some((url) => url.includes('/lineup/getavailableplayerscsv?draftGroupId=154194')));
   assert.ok(requested.every((url) => !url.includes('/contests/v1/contests/')));
+};
+
+const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<void> => {
+  const csv = 'Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame,Status,Starting\nPG/SG,Test Player (1001),Test Player,1001,CPT,10500,IND@LVA 10/01/2026 09:00PM ET,IND,30,,\nPG/SG,Test Player (1002),Test Player,1002,UTIL,7000,IND@LVA 10/01/2026 09:00PM ET,IND,30,,\n';
+  const client = new DraftKingsClient({ sportCodes: { WNBA: 'WNBA' }, fetcher: async (input) => {
+    const url = String(input);
+    if (url.includes('/lobby/getcontests')) return new Response(JSON.stringify({ Contests: [{ n: 'WNBA Showdown', id: 'wnba-1', dg: 154437, gameType: 'Showdown', sd: '2026-10-02T01:00:00Z', s: 7 }] }), { status: 200 });
+    if (url.startsWith('https://api.draftkings.com/')) return new Response('denied', { status: 403 });
+    return new Response(csv, { status: 200, headers: { 'content-type': 'text/csv' } });
+  } });
+  const bundle = await client.getSlateBundleForDraftGroup({ contestId: 'wnba-1', draftGroupId: '154437', sport: 'WNBA', format: 'SHOWDOWN' });
+  const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'wnba-csv', sport: 'WNBA', league: 'WNBA', contestId: 'wnba-1', contestFormat: 'SHOWDOWN', userEntryCount: 1 });
+  assert.equal(slate.playerPool.length, 1, 'Captain and Utility salary rows represent one unique athlete');
+  assert.equal(slate.playerPool[0].salary, 7000);
+  assert.equal(slate.playerPool[0].utilitySalary, 7000);
+  assert.equal(slate.playerPool[0].captainSalary, 10500);
+  assert.equal(slate.playerPool[0].eligibility.CPT, true);
+  assert.equal(slate.playerPool[0].eligibility.UTIL, true);
+  assert.equal(slate.validation.status, 'VALID');
 };
 
 (async () => {
   testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
-  await testCollegeFootballRosterSemanticsParity();
+  await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
   await testWnbaAvailabilityUsesNumericEventTeamIds();
   await testCfbSportsDataIoRosterAndInjuryParity();

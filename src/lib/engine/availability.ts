@@ -42,6 +42,10 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
   const warnings = [...slate.validation.warnings];
   let rejectedIdentityCount = 0;
   const playerPool = slate.playerPool.map((player) => {
+    // DraftKings team defenses are fantasy assets, not individual athletes. Roster/injury
+    // feeds contain defensive players and team records with unrelated names, so exact player
+    // reconciliation incorrectly labeled every DST NOT_IN_PROVIDER_ROSTER and removed them.
+    if (slate.sport === 'NFL' && /^DST$/i.test(String(player.position ?? ''))) return player;
     const sourceName = snapshot.source.toUpperCase();
     const identityProviderIds = sourceName.includes('ESPN')
       ? [player.identity?.espnId]

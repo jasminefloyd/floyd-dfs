@@ -82,7 +82,11 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
   const estimatedSearchSpace = estimateLegalSearchSpace(workingInput.validatedSlate.playerPool.length, slots.length);
   const useUnboundedTraversal = estimatedSearchSpace <= 100_000;
-  const limit = useUnboundedTraversal ? Number.MAX_SAFE_INTEGER : maxCandidates * 4;
+  // Large professional slates can contain 600+ rows; candidate-count limits alone do not
+  // bound the DFS work needed to find each legal salary combination. Bound both accepted
+  // candidates and visited search nodes so a valid slate cannot pin a serverless worker.
+  const limit = useUnboundedTraversal ? Number.MAX_SAFE_INTEGER : maxCandidates;
+  const searchControl = { visited: 0, budget: useUnboundedTraversal ? Number.MAX_SAFE_INTEGER : 150_000 };
   // Sorts by RAW projected value aligned with the actual objective being scored (median/ceiling,
   // weighted the same way scoreCandidate() weights them below) -- not by salary efficiency
   // (points per $1k). Efficiency systematically ranks cheap, decent-production bench players
@@ -99,13 +103,14 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
   const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
   const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit, minSalaryUsed);
+  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit, minSalaryUsed, searchControl);
   // The combinatorial estimate is an upper bound, not proof that the actual legal
   // enumeration was cut off. If the DFS exhausted all branches before reaching its
   // accepted-candidate budget, it did complete an exhaustive search.
-  const exhaustive = useUnboundedTraversal || generated.length < limit;
+  const exhaustive = useUnboundedTraversal || (generated.length < limit && searchControl.visited < searchControl.budget);
   if (!generated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
   if (!exhaustive && generated.length >= limit) warnings.push(`Lineup enumeration stopped at ${limit} candidates (a search budget, not exhaustive enumeration); results reflect the highest-value combinations found within that budget.`);
+  if (!exhaustive && searchControl.visited >= searchControl.budget) warnings.push(`Lineup enumeration reached the ${searchControl.budget}-node search budget; legal combinations outside the explored search were not evaluated.`);
   if (exhaustive) warnings.push(`Exhaustive legal lineup enumeration completed for the reference-sized slate (${generated.length} candidates).`);
 
   const marketAverages = slateMarketAverages(workingInput.validatedSlate.playerPool);
@@ -207,8 +212,9 @@ function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<str
   return result;
 }
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number): void {
-  if (output.length >= limit) return;
+function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number }): void {
+  if (output.length >= limit || control.visited >= control.budget) return;
+  control.visited += 1;
   if (index === slots.length) {
     const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
     const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
@@ -223,7 +229,7 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
   const selectedTeams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
   const remainingMinCost = slots.slice(index + 1).reduce((sum, remainingSlot) => sum + (minSalaryBySlot[baseSlot(remainingSlot)] ?? 0), 0);
   for (const player of playersByValue) {
-    if (output.length >= limit) return;
+    if (output.length >= limit || control.visited >= control.budget) return;
     if (used.has(player.playerId) && input.validatedSlate.rosterRules.uniquePlayersRequired) continue;
     if (!player.eligibility[ruleSlot]) continue;
     const salary = salaryForSlot(player, ruleSlot, input.validatedSlate.rosterRules.slots[ruleSlot]);
@@ -233,7 +239,7 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed);
+    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control);
     delete rosterSlots[slot];
     used.delete(player.playerId);
   }
