@@ -25,8 +25,10 @@ export class EspnStructuredResearchProvider implements ResearchSourceProvider {
     }
     const results = await Promise.all(endpoints.map(async (endpoint) => {
       try { const { payload } = await fetchEspnJson(`${root}${endpoint.path}`, { signal: input.signal, fetcher: this.fetcher }); return { endpoint: endpoint.label, payload }; }
-      catch { return undefined; }
+      catch (error) { return { endpoint: endpoint.label, error: error instanceof Error ? error.message : `ESPN ${endpoint.label} request failed.` }; }
     }));
-    return results.flatMap((result) => result ? [{ title: `ESPN ${input.slate.sport} ${result.endpoint} context`, sourceName: this.name, sourceTier: this.tier, summary: summarize(result.payload), tags: [input.slate.sport, 'ESPN_STRUCTURED', result.endpoint.toUpperCase()] }] : []);
+    return results.map((result) => 'payload' in result
+      ? { title: `ESPN ${input.slate.sport} ${result.endpoint} context`, sourceName: this.name, sourceTier: this.tier, summary: summarize(result.payload), tags: [input.slate.sport, 'ESPN_STRUCTURED', result.endpoint.toUpperCase()] }
+      : { title: `ESPN ${input.slate.sport} ${result.endpoint} unavailable`, sourceName: this.name, sourceTier: this.tier, summary: result.error, tags: [input.slate.sport, 'ESPN_STRUCTURED'], diagnostic: { status: 'FAILED' as const, error: result.error } });
   }
 }

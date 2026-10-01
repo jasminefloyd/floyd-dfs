@@ -4,6 +4,7 @@ import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
 
 export interface LineupPlayer {
   id?: string;
+  status?: string;
   name?: string;
   full_name?: string;
   image_url?: string;
@@ -62,11 +63,13 @@ export interface LineupPlayer {
 
 export interface Lineup {
   id?: string;
+  status?: string;
   rank: number;
   players: LineupPlayer[];
   projected_points: number;
+  expected_points?: number;
   salary_used: number;
-  confidence_score: number;
+  confidence_score: number | null;
   cash_line_confidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
   contest_kind?: 'CASH' | 'GPP' | 'UNKNOWN';
   ceiling_score?: number;
@@ -98,18 +101,20 @@ export interface Lineup {
   captain_rationale?: string;
   narrative: string;
   watch_items?: string[];
-  readiness_status?: 'READY' | 'READY_WITH_WATCH';
+  readiness_status?: 'READY' | 'READY_WITH_WATCH' | 'PROVISIONAL';
 }
 
 interface LineupDisplayProps {
   lineups: Lineup[];
   manifest?: MIOS_FantasyManifest | null;
-  onSaveLineup?: (lineup: Lineup) => void;
+  onSaveLineup?: (lineup: Lineup) => void | Promise<void>;
 }
 
 export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
   const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
-  const [enteredRanks, setEnteredRanks] = useState<Set<number>>(new Set());
+  const [enteredIds, setEnteredIds] = useState<Set<string>>(() => new Set(lineups.filter((lineup) => lineup.status?.toUpperCase() === 'ENTERED').map((lineup) => lineup.id).filter((id): id is string => Boolean(id))));
+  const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const toggleLineup = (rank: number) => {
     setExpandedRanks((current) => {
       const next = new Set(current);
@@ -122,8 +127,19 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
     });
   };
   const markEntered = async (lineup: Lineup) => {
-    await onSaveLineup?.(lineup);
-    setEnteredRanks((current) => new Set(current).add(lineup.rank));
+    const id = lineup.id;
+    if (!id || enteredIds.has(id) || savingIds.has(id)) return;
+    setSavingIds((current) => new Set(current).add(id));
+    setSaveErrors((current) => { const next = { ...current }; delete next[id]; return next; });
+    try {
+      if (!onSaveLineup) throw new Error('Mark as entered is unavailable for this lineup.');
+      await onSaveLineup(lineup);
+      setEnteredIds((current) => new Set(current).add(id));
+    } catch (error) {
+      setSaveErrors((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Unable to mark this lineup as entered. Try again.' }));
+    } finally {
+      setSavingIds((current) => { const next = new Set(current); next.delete(id); return next; });
+    }
   };
 
   return (
@@ -133,7 +149,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
           <span className="font-black">Engine state: {manifest.readiness.engine_state}.</span> This lineup set is not validated for real-money selection. {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
         </div>
       ) : null}
-      {manifest?.sport?.toLowerCase() === 'mlb' ? (
+      {manifest?.sport?.toLowerCase() === 'mlb' && lineups.some((lineup) => lineup.players.some((player) => player.lineup_status !== 'confirmed')) ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
           <span className="font-black">MLB lineup status:</span> Player recommendations continue, but confirmed batting orders were not available when this lineup was generated. Players marked <span className="font-black">UNCONFIRMED</span> must be verified before entry.
         </div>
@@ -163,7 +179,10 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                       {lineup.readiness_status === 'READY_WITH_WATCH' ? (
                         <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Watch items</span>
                       ) : null}
-                      {lineup.contest_kind === 'CASH' && lineup.cash_line_confidence !== 'UNAVAILABLE' && lineup.confidence_score < 0.85 ? (
+                      {lineup.readiness_status === 'PROVISIONAL' ? (
+                        <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Model not validated</span>
+                      ) : null}
+                      {lineup.contest_kind === 'CASH' && lineup.cash_line_confidence !== 'UNAVAILABLE' && lineup.confidence_score !== null && lineup.confidence_score < 0.85 ? (
                         <span className="rounded-full border border-amber-300/40 bg-amber-400/20 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-amber-100">Below cash target</span>
                       ) : null}
                     </div>
@@ -172,7 +191,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                   <div className="flex shrink-0 items-start gap-2 text-right">
                     <div>
                       <div className="text-3xl font-black tracking-tight text-white sm:text-4xl">
-                        {lineup.projected_points.toFixed(1)} median pts
+                        {(lineup.expected_points ?? lineup.projected_points).toFixed(1)} {lineup.expected_points !== undefined ? 'mean' : 'median'} pts
                       </div>
                       <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-cyan-200">
                         ${(lineup.salary_used / 1000).toFixed(1)}k / $50k
@@ -316,13 +335,13 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 <div className="border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
                   <button
                     type="button"
-                    disabled={enteredRanks.has(lineup.rank)}
+                    disabled={!lineup.id || enteredIds.has(lineup.id) || savingIds.has(lineup.id)}
                     onClick={() => void markEntered(lineup)}
                     className="w-full rounded-xl bg-[#0b1f3a] py-3 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:cursor-default disabled:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
-                    {enteredRanks.has(lineup.rank) ? <Check className="mx-auto h-6 w-6" aria-hidden="true" /> : 'Lineup Entered'}
-                    {enteredRanks.has(lineup.rank) ? <span className="sr-only">Lineup Entered</span> : null}
+                    {lineup.id && enteredIds.has(lineup.id) ? <><Check className="inline h-4 w-4" aria-hidden="true" /> Marked as entered</> : savingIds.has(lineup.id ?? '') ? 'Saving…' : 'Mark as entered'}
                   </button>
+                  {lineup.id && saveErrors[lineup.id] ? <p role="alert" className="mt-2 text-sm font-semibold text-red-700">{saveErrors[lineup.id]}</p> : null}
                 </div>
               </div>
             ) : null}
@@ -365,8 +384,8 @@ function LineupAlerts({ lineup }: { lineup: Lineup }) {
 // Never present a simulated estimate the same way as a real, historically-calibrated number --
 // the tier is always labeled so the user can weigh how much to trust it.
 function cashLineLabel(lineup: Lineup): string {
-  if (lineup.cash_line_confidence === 'CALIBRATED' && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (calibrated)`;
-  if (lineup.cash_line_confidence === 'SIMULATED_ESTIMATE' && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (simulated estimate)`;
+  if (lineup.cash_line_confidence === 'CALIBRATED' && lineup.confidence_score !== null && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (calibrated)`;
+  if (lineup.cash_line_confidence === 'SIMULATED_ESTIMATE' && lineup.confidence_score !== null && lineup.confidence_score > 0) return `${(lineup.confidence_score * 100).toFixed(0)}% cash-line probability (simulated estimate)`;
   return 'Cash-line probability unavailable';
 }
 

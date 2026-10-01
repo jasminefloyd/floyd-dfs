@@ -72,7 +72,11 @@ export class EspnProjectionClient {
     const sportPath = ESPN_AVAILABILITY_SPORT_PATH[slate.sport];
     if (!sportPath) return { source: 'ESPN', retrievedAt: new Date().toISOString(), records: [], confirmedLineupAvailable: false, note: `${slate.sport} has no configured ESPN availability mapping.` };
     const teams = [...new Set(slate.playerPool.map((player) => normalizeTeamCode(player.team)).filter(Boolean))];
-    const teamIds = ['NFL', 'CFB'].includes(slate.sport) ? await this.resolveEventTeamIds(slate, teams, sportPath, signal) : new Map<string, string>();
+    // ESPN roster endpoints are keyed by numeric team IDs. Resolve event IDs for
+    // basketball too; team abbreviations such as DK's LVA do not reliably work as
+    // ESPN roster path segments (which can return an empty roster or 404).
+    const teamIds = await this.resolveEventTeamIds(slate, teams, sportPath, signal);
+    const diagnostics: NonNullable<AvailabilitySnapshot['diagnostics']> = [];
     const rosterRows = await Promise.all(teams.map(async (team) => {
       try {
         const teamResource = teamIds.get(team) ?? team.toLowerCase();
@@ -83,14 +87,14 @@ export class EspnProjectionClient {
           const name = text(athlete.fullName ?? athlete.displayName);
           if (!name) return [];
           const status = espnAvailabilityStatus(athlete);
-          return [{ playerName: name, team, providerPlayerId: text(athlete.id) || undefined, status, confirmed: false, updatedAt: new Date().toISOString(), note: ['NFL', 'CFB'].includes(slate.sport) ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
+          return [{ playerName: name, team, providerPlayerId: text(athlete.id) || undefined, status, roleStatus: ['NFL', 'CFB'].includes(slate.sport) ? 'ROLE_UNCONFIRMED' : undefined, confirmed: false, updatedAt: new Date().toISOString(), note: ['NFL', 'CFB'].includes(slate.sport) ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
         });
-      } catch { return []; }
+      } catch (error) { diagnostics.push({ provider: `ESPN ${slate.sport} roster ${team}`, status: 'FAILED', error: error instanceof Error ? error.message : `ESPN roster request failed for ${team}.`, retrievedAt: new Date().toISOString() }); return []; }
     }));
     const records = rosterRows.flat();
-    const teamsWithRecords = new Set(records.map((record) => record.team));
-    const rosterComplete = teams.length > 0 && teams.every((team) => teamsWithRecords.has(team));
-    return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: false, rosterComplete, note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
+    const minimumRosterSize = slate.sport === 'WNBA' ? 8 : slate.sport === 'NBA' ? 10 : 1;
+    const rosterComplete = teams.length > 0 && teams.every((team) => records.filter((record) => normalizeTeamCode(record.team) === team).length >= minimumRosterSize);
+    return { source: 'ESPN', retrievedAt: new Date().toISOString(), records, confirmedLineupAvailable: false, rosterComplete, diagnostics, note: records.length ? undefined : 'ESPN roster data was unavailable for this slate.' };
   }
 
   private async resolveEventTeamIds(slate: ValidatedSlate, teams: string[], sportPath: { sportGroup: string; league: string }, signal?: AbortSignal): Promise<Map<string, string>> {

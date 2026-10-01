@@ -4,7 +4,7 @@ import { parseDraftKingsDateValue } from './draftKings.js';
 import { validateSlate } from './validation.js';
 import { DK_SCORING } from '../dkScoring.js';
 
-export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; cashLine?: number; }
+export interface DraftKingsSlateContext { tenantId: string; userId: string; requestId: string; sport: Sport; league: Sport; contestId: string; contestFormat: ContestFormat; userEntryCount: number; contestName?: string; contestLockTime?: string; contestSizeOverride?: number; cashLine?: number; objective?: import('./contracts.js').ContestObjective; }
 export class DraftKingsSlateMappingError extends Error { constructor(message: string) { super(message); this.name = 'DraftKingsSlateMappingError'; } }
 
 export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, context: DraftKingsSlateContext): ValidatedSlate {
@@ -12,29 +12,45 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const draftGroup = unwrapRecord(bundle.draftGroup.data, 'draftGroup');
   const rules = resolveRules(unwrapRecord(bundle.gameTypeRules.data, 'gameTypeRules'));
   const draftables = unwrapRecord(bundle.draftables.data, 'draftables');
-  const rosterRules = mapRosterRules(rules, context.contestFormat);
+  const rosterRules = mapRosterRules(rules, context.contestFormat, context.sport);
   const mappedDraftables = mapDraftables(draftables, context.contestFormat, rosterRules, context.sport);
   const playerPool = mappedDraftables.players;
   // Prefer the contest's actual field-size cap (maximumEntries) over its live sign-up count
   // (entries) -- the latter fluctuates continuously as people join before lock and would make
   // any paid-fraction/cash-line math built on it unstable between fetches of the same contest.
-  const contestSize = context.contestSizeOverride ?? readNumber(contest, ['maximumEntries', 'contestSize', 'entries', 'totalEntries', 'maxEntries']);
+  const contestSize = context.contestSizeOverride ?? readNumber(contest, ['maximumEntries', 'maximum_entries', 'contestSize', 'totalEntries']);
   const contestKind = classifyContestKind(contest);
   const receivedAt = bundle.contest.retrievedAt;
-  const sourceManifest = [
-    { source: 'DRAFTKINGS_API', receivedAt, fields: ['contest', 'draftGroup', 'gameTypeRules', 'draftables'] },
+  const fallbackUsed = rules.sourceFallback === true;
+  const sourceManifest: ValidatedSlate['sourceManifest'] = [
+    { source: fallbackUsed ? 'DRAFTKINGS_PUBLIC_CSV_FALLBACK' : 'DRAFTKINGS_API', receivedAt, fields: fallbackUsed ? ['contest', 'draftGroup', 'verifiedRosterRules', 'playerSalaryCsv'] : ['contest', 'draftGroup', 'gameTypeRules', 'draftables'] },
   ];
-  const scoringRules = mapScoringRules(rules);
-  const scoringWarnings = Object.keys(scoringRules).length ? [] : [`DraftKings game-type rules did not return scoring values; applied the verified standard ${context.sport} scoring profile.`];
+  const providerScoringRules = mapScoringRules(rules);
+  const officialProfile = officialScoringProfile(context.sport, context.contestFormat, rules, `${readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? '')} ${readString(draftGroup, ['name', 'eventName', 'description'], '')}`);
+  const scoringConflicts = officialProfile ? Object.keys(providerScoringRules).filter((key) => officialProfile.rules[key] !== undefined && Math.abs(providerScoringRules[key].value - officialProfile.rules[key].value) > 1e-9) : [];
+  const scoringRules = officialProfile ? { ...officialProfile.rules, ...providerScoringRules } : providerScoringRules;
+  const requiredScoringRules = standardScoringRules(context.sport, context.contestFormat);
+  const missingScoringRules = Object.keys(requiredScoringRules).filter((key) => scoringRules[key] === undefined);
+  const scoringVerified = Object.keys(scoringRules).length > 0 && missingScoringRules.length === 0 && scoringConflicts.length === 0 && (!officialProfile || officialProfile.verified);
+  const usedOfficialProfile = Boolean(officialProfile && Object.keys(requiredScoringRules).some((key) => providerScoringRules[key] === undefined) && scoringConflicts.length === 0);
+  if (usedOfficialProfile && officialProfile) sourceManifest.push({ source: officialProfile.source, receivedAt: officialProfile.reviewedAt, fields: Object.keys(officialProfile.rules), sourceUrl: officialProfile.sourceUrl, ruleVersion: officialProfile.version });
+  const scoringWarnings = scoringVerified ? (usedOfficialProfile ? [`DraftKings game-type response omitted some scoring values; completed from ${officialProfile?.source} (${officialProfile?.version}).`] : []) : ['Authoritative DraftKings scoring values are incomplete or conflicting; provisional scoring cannot verify this contest.'];
   const resolvedScoringRules = Object.keys(scoringRules).length ? scoringRules : standardScoringRules(context.sport, context.contestFormat);
   const slate: ValidatedSlate = {
     slateId: stableId(`${context.tenantId}:${context.requestId}:${context.contestId}`), version: 1, tenantId: context.tenantId, userId: context.userId, requestId: context.requestId, receivedAt, createdAt: receivedAt, sport: context.sport, league: context.league,
     event: { eventId: readString(draftGroup, ['eventId', 'id', 'draftGroupId'], context.contestId), name: readString(draftGroup, ['name', 'eventName', 'description'], context.contestName ?? 'DraftKings event'), eventDate: readDate([draftGroup], ['eventDate', 'startTime', 'startDate'], context.contestLockTime), participants: readStringArray(draftGroup, ['participants', 'teams', 'competitors']) },
-    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate([contest, draftGroup], ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maxEntriesPerUser', 'maximumEntriesPerUser', 'mec']), contestKind: contestKind.kind, ...(contestKind.paidPositions !== undefined ? { paidPositions: contestKind.paidPositions } : {}), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
+    contest: { draftKingsContestId: context.contestId, name: readString(contest, ['name', 'contestName', 'contest_name'], context.contestName ?? 'DraftKings contest'), format: context.contestFormat, lockTime: readDate([contest, draftGroup], ['lockTime', 'startTime', 'startDate'], context.contestLockTime), contestSize, userEntryCount: context.userEntryCount, requestedEntryCount: context.userEntryCount, maxEntriesAllowed: readNumber(contest, ['maxEntriesAllowed', 'maximumEntriesPerUser', 'maximum_entries_per_user', 'mec']), contestKind: contestKind.kind, ...(context.objective ? { objective: context.objective } : {}), ...(contestKind.paidPositions !== undefined ? { paidPositions: contestKind.paidPositions } : {}), ...(Number.isFinite(context.cashLine) && Number(context.cashLine) > 0 ? { cashLine: Number(context.cashLine) } : {}) },
     salaryCap: readNestedNumber(rules, ['salaryCap', 'salary_cap', 'maxValue']) ?? 0, rosterRules, scoringRules: resolvedScoringRules, playerPool, sourceManifest, validation: { status: 'VALID', warnings: [], errors: [] },
   };
   const validationErrors = validateSlate(slate);
-  return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors } };
+  if (bundle.contestIdentityVerified !== true) validationErrors.push('Contest ID, sport, format, draft group, lock time, and lobby metadata were not authoritatively bound; this slate is discovery-only and cannot generate lineups.');
+  validationErrors.push(...validateAuthoritativeRosterRules(rules, context.contestFormat, rosterRules, context.sport));
+  if (fallbackUsed) validationErrors.push('Authoritative DraftKings contest rules were unavailable; fallback templates are unverified and cannot be used to generate an entry-ready lineup.');
+  if (!scoringVerified) validationErrors.push('Authoritative DraftKings scoring values are unavailable; provisional scoring templates cannot be used to generate an entry-ready lineup.');
+  if (missingScoringRules.length) validationErrors.push(`DraftKings scoring rules are incomplete for this model: ${missingScoringRules.join(', ')}.`);
+  if (scoringConflicts.length) validationErrors.push(`DraftKings scoring values conflict with the reviewed official scoring profile: ${scoringConflicts.join(', ')}.`);
+  const sourceWarnings = fallbackUsed ? ['DraftKings API endpoints were blocked. Player CSV may provide salaries, but does not verify this contest\'s roster or scoring rules.'] : [];
+  return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...sourceWarnings, ...mappedDraftables.warnings, ...scoringWarnings], errors: validationErrors } };
 }
 
 export interface DraftKingsScreenshotExtraction {
@@ -52,6 +68,9 @@ export interface DraftKingsScreenshotContext { tenantId: string; userId: string;
 export function buildValidatedSlateFromScreenshot(extracted: DraftKingsScreenshotExtraction, context: DraftKingsScreenshotContext): ValidatedSlate {
   const warnings: string[] = [];
   const errors: string[] = [];
+  // An image extraction is useful for discovery, but it cannot establish contest
+  // identity or authoritative roster/scoring rules. Never mark it entry-ready.
+  errors.push('Screenshot-derived contest data is unverified. Fetch the exact DraftKings contest, roster rules, scoring rules, and player pool from an authoritative source before generating lineups.');
   if (context.contestFormat !== 'SHOWDOWN') errors.push('Screenshot ingestion only supports DraftKings Showdown contests; Classic roster rules cannot be reliably read from an image, and DraftKings-provided data is required instead.');
   const rosterRules: RosterRules = { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } };
   const scoringRulesFromImage = Object.fromEntries(Object.entries(extracted.scoringRules ?? {}).flatMap(([key, value]) => Number.isFinite(value) ? [[key, { value }]] : []));
@@ -82,8 +101,8 @@ export function buildValidatedSlateFromScreenshot(extracted: DraftKingsScreensho
   return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings, errors: validationErrors } };
 }
 
-function mapRosterRules(record: Record<string, unknown>, format: ContestFormat): RosterRules {
-  if (format === 'SHOWDOWN') { const multiplier = resolveShowdownCaptainMultiplier(record) ?? 1.5; return { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: multiplier, fantasyMultiplier: multiplier }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } }; }
+function mapRosterRules(record: Record<string, unknown>, format: ContestFormat, sport: Sport): RosterRules {
+  if (format === 'SHOWDOWN' && sport !== 'GOLF') { const multiplier = resolveShowdownCaptainMultiplier(record) ?? 1.5; return { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: multiplier, fantasyMultiplier: multiplier }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } }; }
   const source = asRecord(record.rosterRules) ?? record;
   const slotsSource = asRecord(source.slots);
   const template = Array.isArray(source.lineupTemplate) ? source.lineupTemplate.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
@@ -92,6 +111,30 @@ function mapRosterRules(record: Record<string, unknown>, format: ContestFormat):
   const sourceSlots = slotsSource ?? templateSlots;
   const slots: Record<string, { count: number; salaryMultiplier?: number; fantasyMultiplier?: number }> = Object.fromEntries(Object.entries(sourceSlots).map(([name, value]) => { const slot = asRecord(value); return [name, { count: readNumber(slot ?? {}, ['count']) ?? 1, salaryMultiplier: readNumber(slot ?? {}, ['salaryMultiplier', 'salary_multiplier']), fantasyMultiplier: readNumber(slot ?? {}, ['fantasyMultiplier', 'fantasy_multiplier']) }]; }));
   return { rosterSize: readNumber(source, ['rosterSize', 'roster_size']) ?? Object.values(slots).reduce((sum, slot) => sum + slot.count, 0), slots, uniquePlayersRequired: readBoolean(source, ['uniquePlayersRequired', 'unique_players_required'], true), teamConstraints: asRecord(source.teamConstraints) as RosterRules['teamConstraints'] };
+}
+
+function validateAuthoritativeRosterRules(record: Record<string, unknown>, format: ContestFormat, mapped: RosterRules, sport: Sport): string[] {
+  const source = asRecord(record.rosterRules) ?? record;
+  const slots = asRecord(source.slots);
+  const template = Array.isArray(source.lineupTemplate) ? source.lineupTemplate.map(asRecord).filter((value): value is Record<string, unknown> => Boolean(value)) : [];
+  if (!slots && !template.length) return ['DraftKings game-type data did not include an authoritative roster slot template; guessed/default roster rules cannot be used for lineup generation.'];
+  if (format === 'SHOWDOWN') {
+    const captainNames = new Set(['CPT', 'CAPTAIN', 'MVP']);
+    const normalized = Object.entries(mapped.slots).map(([name, rule]) => [name.toUpperCase(), rule] as const);
+    const captain = normalized.find(([name]) => captainNames.has(name));
+    const utility = normalized.find(([name]) => ['UTIL', 'FLEX'].includes(name));
+    if (sport === 'GOLF' && !captain) {
+      if (mapped.rosterSize !== 6 || Object.values(mapped.slots).reduce((sum, slot) => sum + slot.count, 0) !== 6) return ['DraftKings Golf Showdown rules must explicitly verify six golfer slots.'];
+    } else {
+      if (!captain || captain[1].count !== 1 || !utility || utility[1].count !== 5 || mapped.rosterSize !== 6) return ['DraftKings Showdown roster rules do not explicitly verify one Captain/MVP and five Utility/Flex slots.'];
+      const hasCaptainMultiplier = resolveShowdownCaptainMultiplier(record) !== undefined && captain[1].salaryMultiplier !== undefined && captain[1].fantasyMultiplier !== undefined && captain[1].salaryMultiplier > 0 && captain[1].fantasyMultiplier > 0;
+      if (!hasCaptainMultiplier) return ['DraftKings Showdown rules do not explicitly provide both Captain salary and fantasy-point multipliers.'];
+    }
+  }
+  if (!Number.isFinite(mapped.rosterSize) || mapped.rosterSize <= 0 || Object.values(mapped.slots).some((slot) => !Number.isInteger(slot.count) || slot.count <= 0)) return ['DraftKings roster slot counts are invalid or incomplete.'];
+  if (Object.values(mapped.slots).reduce((sum, slot) => sum + slot.count, 0) !== mapped.rosterSize) return ['DraftKings rosterSize does not equal the sum of authoritative slot counts.'];
+  if (readNestedNumber(record, ['salaryCap', 'salary_cap', 'maxValue']) === undefined) return ['DraftKings game-type data did not include an authoritative salary cap.'];
+  return [];
 }
 
 function resolveShowdownCaptainMultiplier(record: Record<string, unknown>): number | undefined {
@@ -116,7 +159,7 @@ function mapDraftables(record: Record<string, unknown>, format: ContestFormat, r
 // 118, name "G"). Every golfer is eligible for every slot, so this is a direct, verified mapping,
 // not a guess -- the array-based parser below was returning an empty object for every golfer,
 // which silently made the entire Golf Classic player pool ineligible for any roster slot.
-const position = readOptionalString(source, ['position']); const sourceEligibility = readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']); const eligibility = format === 'SHOWDOWN' ? { CPT: true, UTIL: true } : sport === 'GOLF' ? { G: true } : Object.fromEntries((sourceEligibility.length ? sourceEligibility : inferEligibilityFromPosition(position, rules.slots, sport)).map((slot) => [slot, true])); if (!sourceEligibility.length && Object.keys(eligibility).length) usedPositionFallback = true; const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const captainMultiplier = rules.slots.CPT?.salaryMultiplier ?? 1.5; const captainSalary = format === 'SHOWDOWN' ? Math.round(utilitySalary * captainMultiplier) : (readNumber(source, ['captainSalary', 'captain_salary']) ?? Math.round(salary * captainMultiplier)); return [{ playerId, playerName, identity: { draftKingsId: playerId, confidence: 'EXACT' as const, matchedBy: 'DRAFTKINGS' as const }, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position, salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source, sport), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
+const position = readOptionalString(source, ['position']); const sourceEligibility = readStringArray(source, ['eligibility', 'eligiblePositions', 'positions']); const golfShowdownEligibility = sport === 'GOLF' && format === 'SHOWDOWN' ? Object.fromEntries(Object.keys(rules.slots).map((slot) => [slot, true])) : undefined; const eligibility = sourceEligibility.length ? Object.fromEntries(sourceEligibility.map((slot) => [slot, true])) : format === 'SHOWDOWN' && sport !== 'GOLF' ? { CPT: true, UTIL: true } : sport === 'GOLF' ? (golfShowdownEligibility ?? { G: true }) : Object.fromEntries(inferEligibilityFromPosition(position, rules.slots, sport).map((slot) => [slot, true])); if (!sourceEligibility.length && Object.keys(eligibility).length) usedPositionFallback = true; const utilitySalary = readNumber(source, ['utilitySalary', 'utility_salary']) ?? salary; const hasCaptainSlot = Boolean(rules.slots.CPT); const captainMultiplier = rules.slots.CPT?.salaryMultiplier ?? 1.5; const captainSalary = format === 'SHOWDOWN' && (sport !== 'GOLF' || hasCaptainSlot) ? Math.round(utilitySalary * captainMultiplier) : readNumber(source, ['captainSalary', 'captain_salary']); return [{ playerId, playerName, identity: { draftKingsId: playerId, confidence: 'EXACT' as const, matchedBy: 'DRAFTKINGS' as const }, team: readOptionalString(source, ['team', 'teamAbbreviation', 'teamCode', 'TeamAbbrev']), opponent: readOptionalString(source, ['opponent', 'opponentAbbreviation', 'opponentCode']), position, salary: utilitySalary, captainSalary, utilitySalary, eligibility, providerStatus: readOptionalString(source, ['status', 'providerStatus']), providerFppg: readNumber(source, ['fppg', 'providerFppg']) ?? readDraftStatFppg(source, sport), imageUrl: readOptionalString(source, ['playerImage160', 'playerImage50', 'imageUrl', 'playerImageUrl']), teamLogoUrl: readOptionalString(source, ['teamImageUrl', 'teamLogoUrl']) }]; });
   const merged = new Map<string, SlatePlayer>();
   for (const player of mapped) { const existing = merged.get(player.playerId); if (!existing) merged.set(player.playerId, player); else { const utilitySalary = Math.min(existing.utilitySalary ?? existing.salary, player.utilitySalary ?? player.salary); const eligibility = { ...existing.eligibility, ...player.eligibility }; merged.set(player.playerId, { ...existing, salary: utilitySalary, utilitySalary, eligibility, captainSalary: format === 'SHOWDOWN' ? Math.round(utilitySalary * (rules.slots.CPT?.salaryMultiplier ?? 1.5)) : Math.max(existing.captainSalary ?? 0, player.captainSalary ?? 0), providerFppg: existing.providerFppg ?? player.providerFppg }); } }
   if (usedPositionFallback) warnings.push(`DraftKings eligibility fields were absent for some ${sport} draftables; mapped roster eligibility from the provider position field.`);
@@ -182,8 +225,59 @@ function readDraftStatFppg(record: Record<string, unknown>, sport: Sport): numbe
   const fppg = attributes.find((value) => { const attribute = asRecord(value); return candidateIds.has(String(attribute?.id ?? '')); });
   return readNumber(asRecord(fppg) ?? {}, ['value', 'sortValue']);
 }
+interface OfficialScoringProfile { rules: Record<string, { value: number }>; source: string; sourceUrl: string; version: string; reviewedAt: string; verified: boolean; }
+
+function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
+  if (sport === 'GOLF' && format === 'SHOWDOWN') return officialGolfShowdownScoringProfile(rules, eventContext);
+  // DraftKings' WNBA rules endpoint omits scoring values on some game types. The official
+  // DraftKings WNBA Fantasy Points table publishes the same base fantasy-point categories
+  // used by this Classic/Showdown scorer. Captain scoring remains a separately verified
+  // roster-rule multiplier. This profile is intentionally sport-scoped; it is not a fallback
+  // for NBA or another league, and any overlapping API value must match exactly.
+  if (sport !== 'WNBA') return undefined;
+  const score = DK_SCORING.wnba;
+  return {
+    rules: {
+      points: { value: score.points }, threePointersMade: { value: score.threePointersMade }, rebounds: { value: score.rebounds },
+      assists: { value: score.assists }, steals: { value: score.steals }, blocks: { value: score.blocks },
+      turnovers: { value: score.turnovers }, doubleDouble: { value: score.doubleDouble }, tripleDouble: { value: score.tripleDouble },
+    },
+    source: 'DRAFTKINGS_OFFICIAL_WNBA_FANTASY_SCORING',
+    sourceUrl: 'https://pick6.draftkings.com/pick6-rules-and-scoring-wnba',
+    version: 'DK_WNBA_FANTASY_SCORING_2026-09-30.1',
+    reviewedAt: '2026-09-30T00:00:00.000Z',
+    verified: true,
+  };
+}
+
+function officialGolfShowdownScoringProfile(rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
+  const ruleSource = asRecord(rules.rosterRules) ?? rules;
+  const captainSlot = Object.keys(asRecord(ruleSource.slots) ?? {}).some((slot) => ['CPT', 'CAPTAIN', 'MVP'].includes(slot.toUpperCase()))
+    || (Array.isArray(ruleSource.lineupTemplate) && ruleSource.lineupTemplate.some((value) => /^(CPT|CAPTAIN|MVP)$/i.test(readOptionalString(asRecord(asRecord(value)?.rosterSlot) ?? asRecord(value) ?? {}, ['name']) ?? '')));
+  const explicitSlotCount = asRecord(ruleSource.slots)
+    ? Object.values(asRecord(ruleSource.slots)!).reduce<number>((sum, value) => sum + (readNumber(asRecord(value) ?? {}, ['count']) ?? 1), 0)
+    : Array.isArray(ruleSource.lineupTemplate) ? ruleSource.lineupTemplate.length : 0;
+  // Golf has both stroke-play round Showdowns and match-play variants. Only apply the
+  // reviewed PGA single-round profile when DK's own template confirms six golfer slots
+  // and the contest/event metadata does not identify a match-play scoring variant.
+  if (captainSlot || explicitSlotCount !== 6 || /match\s*play|presidents\s*cup|ryder\s*cup/i.test(eventContext)) return undefined;
+  const score = DK_SCORING.golf.showdown;
+  return {
+    rules: {
+      doubleEagleOrBetter: { value: score.doubleEagleOrBetter }, eagle: { value: score.eagle }, eagles: { value: score.eagle }, birdie: { value: score.birdie }, birdies: { value: score.birdie },
+      par: { value: score.par }, pars: { value: score.par }, bogey: { value: score.bogey }, bogeys: { value: score.bogey }, doubleBogeyOrWorse: { value: score.doubleBogeyOrWorse },
+      doubleBogey: { value: score.doubleBogeyOrWorse }, birdieStreak: { value: score.birdieStreak }, bogeyFreeRound: { value: score.bogeyFreeRound }, holeInOne: { value: score.holeInOne },
+    },
+    source: 'DRAFTKINGS_OFFICIAL_GOLF_SHOWDOWN_SCORING',
+    sourceUrl: 'https://pick6.draftkings.com/pick6-rules-and-scoring-pga-single-round',
+    version: 'DK_GOLF_SHOWDOWN_SCORING_2026-09-30.1',
+    reviewedAt: '2026-09-30T00:00:00.000Z',
+    verified: true,
+  };
+}
+
 function standardScoringRules(sport: Sport, format: ContestFormat): Record<string, { value: number }> {
-  if (sport === 'NBA' || sport === 'WNBA') return { points: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].points }, threePointersMade: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].threePointersMade }, rebounds: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].rebounds }, assists: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].assists }, steals: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].steals }, blocks: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].blocks }, turnovers: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].turnovers } };
+  if (sport === 'NBA' || sport === 'WNBA') return { points: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].points }, threePointersMade: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].threePointersMade }, rebounds: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].rebounds }, assists: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].assists }, steals: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].steals }, blocks: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].blocks }, turnovers: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].turnovers }, doubleDouble: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].doubleDouble }, tripleDouble: { value: DK_SCORING[sport.toLowerCase() as 'nba' | 'wnba'].tripleDouble } };
   if (sport === 'MLB') return { single: { value: 3 }, double: { value: 5 }, triple: { value: 8 }, homeRun: { value: 10 }, rbi: { value: 2 }, run: { value: 2 }, walk: { value: 2 }, hitByPitch: { value: 2 }, sacrificeFly: { value: 1.25 }, sacrificeHit: { value: 1.25 }, stolenBase: { value: 5 }, inningPitched: { value: 2.25 }, strikeout: { value: 2 }, win: { value: 4 }, earnedRun: { value: -2 }, hitAgainst: { value: -0.6 }, walkAgainst: { value: -0.6 }, hitBatsman: { value: -0.6 }, completeGame: { value: 2.5 }, completeGameShutout: { value: 2.5 }, noHitter: { value: 5 } };
   if (sport === 'NFL' || sport === 'CFB') return { passingYards: { value: DK_SCORING.nfl.passingYards }, passingTouchdown: { value: DK_SCORING.nfl.passingTouchdown }, passingYardBonus: { value: DK_SCORING.nfl.passingYardBonus }, interception: { value: DK_SCORING.nfl.interception }, rushingYards: { value: DK_SCORING.nfl.rushingYards }, rushingTouchdown: { value: DK_SCORING.nfl.rushingTouchdown }, rushingYardBonus: { value: DK_SCORING.nfl.rushingYardBonus }, reception: { value: DK_SCORING.nfl.reception }, receivingYards: { value: DK_SCORING.nfl.receivingYards }, receivingTouchdown: { value: DK_SCORING.nfl.receivingTouchdown }, receivingYardBonus: { value: DK_SCORING.nfl.receivingYardBonus }, fumbleLost: { value: DK_SCORING.nfl.fumbleLost }, twoPointConversion: { value: DK_SCORING.nfl.twoPointConversion } };
   if (sport === 'GOLF') {

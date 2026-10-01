@@ -1,5 +1,6 @@
 export type Sport = 'WNBA' | 'NBA' | 'MLB' | 'GOLF' | 'NFL' | 'CFB';
 export type ContestFormat = 'SHOWDOWN' | 'CLASSIC';
+export type ContestObjective = 'MAX_FPTS' | 'TOP_10' | 'TOP_4' | 'FIRST_PLACE' | 'CASH' | 'SMALL_FIELD' | 'LARGE_FIELD';
 
 export type EngineStage =
   | 'SLATE'
@@ -23,6 +24,91 @@ export type GenerationRunState =
   | 'failed'
   | 'complete';
 
+/** Versioned boundary for artifacts exchanged between stages. Bump only when an artifact's
+ * meaning or required fields change; the numeric `version` remains the run-local revision. */
+export const ENGINE_CONTRACT_VERSION = '2026-09-10.1';
+export type EngineRunMode = 'PRE_LOCK' | 'LIVE';
+
+export interface LiveGameState {
+  observedAt: string;
+  source: string;
+  eventId: string;
+  status: 'PREGAME' | 'LIVE' | 'HALFTIME' | 'FINAL' | 'POSTPONED';
+  period?: number;
+  clockSeconds?: number;
+  homeScore?: number;
+  awayScore?: number;
+  possessionTeam?: string;
+  pace?: number;
+  teamStats?: Record<string, Record<string, number>>;
+  playerStats?: Record<string, Record<string, number>>;
+  injuries?: Array<{ playerId: string; status: string; observedAt: string; source: string }>;
+}
+
+/** Immutable provider assertion captured for one slate/event. It is not yet a resolved fact. */
+export interface SourceObservation {
+  id: string;
+  tenantId: string;
+  slateId: string;
+  sport: Sport;
+  eventId: string;
+  source: string;
+  sourceRecordId?: string;
+  sourceUrl?: string;
+  subject: { kind: 'PLAYER' | 'TEAM' | 'EVENT' | 'VENUE'; id: string };
+  factType: string;
+  value: unknown;
+  effectiveAt?: string;
+  observedAt: string;
+  retrievedAt: string;
+  expiresAt?: string;
+  status: 'CONFIRMED' | 'PROJECTED' | 'REPORTED' | 'UNVERIFIED';
+  identityConfidence: 'EXACT' | 'HIGH' | 'LOW' | 'CONFLICT';
+  rawPayloadRef: string;
+}
+
+export interface ResolvedFact {
+  id: string;
+  observationIds: string[];
+  tenantId: string;
+  slateId: string;
+  eventId: string;
+  subjectId: string;
+  factType: string;
+  value?: unknown;
+  state: 'ACCEPTED' | 'CONFLICT' | 'UNKNOWN' | 'EXPIRED';
+  resolvedAt: string;
+  ruleVersion: string;
+  rationale: string;
+}
+
+export interface QuantitativeAdjustment {
+  id: string;
+  playerId: string;
+  dimension: string;
+  before: number;
+  delta: number;
+  after: number;
+  unit: string;
+  evidenceIds: string[];
+  scenarioId?: string;
+  modelVersion: string;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+export interface RunTrust {
+  dataTier: 'COMPLETE' | 'DEGRADED' | 'BLOCKED';
+  modelTier: 'UNVALIDATED' | 'PROJECTION_VALIDATED' | 'CONTEST_VALIDATED';
+  recommendationStatus: 'ENTRY_READY' | 'PROVISIONAL' | 'BLOCKED';
+  entryEligible: boolean;
+  releaseReasons: string[];
+  missingRequiredFacts: string[];
+  staleFacts: string[];
+  fallbackPlayers: string[];
+  searchCompleteness: 'EXHAUSTIVE' | 'GAP_BOUNDED' | 'HEURISTIC';
+  contestMetricState: 'CALIBRATED' | 'SIMULATED_UNVALIDATED' | 'UNAVAILABLE';
+}
+
 export type StageExecutionStatus = 'COMPLETE' | 'PARTIAL' | 'VALID' | 'WARNING' | 'BLOCKED';
 
 export interface RosterSlotRule {
@@ -39,6 +125,12 @@ export interface RosterRules {
     minimumTeams?: number;
     maximumPlayersPerTeam?: number;
   };
+}
+
+export interface PortfolioConstraints {
+  maxPlayerExposure?: number;
+  maxCaptainExposure?: number;
+  maxLineupOverlap?: number;
 }
 
 export interface SlatePlayer {
@@ -65,6 +157,7 @@ export interface SlatePlayer {
   projectionInputs?: Record<string, number>;
   availability?: {
     status: 'CONFIRMED_STARTER' | 'PROJECTED' | 'ACTIVE' | 'NOT_IN_CONFIRMED_LINEUP' | 'NOT_IN_PROVIDER_ROSTER' | 'INACTIVE' | 'OUT' | 'UNKNOWN';
+    roleStatus?: 'CONFIRMED_STARTER' | 'EXPECTED_STARTER' | 'ROLE_UNCONFIRMED' | 'NOT_STARTER' | 'UNKNOWN';
     confirmed: boolean;
     source: string;
     retrievedAt: string;
@@ -95,9 +188,14 @@ export interface ValidatedSlate {
   userId: string;
   requestId: string;
   receivedAt: string;
+  contractVersion?: string;
+  runMode?: EngineRunMode;
+  liveGameState?: LiveGameState;
   createdAt: string;
   sport: Sport;
   league: Sport;
+  /** Structured provider diagnostics carried into Research for auditability. */
+  providerDiagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number; retrievedAt: string }>;
   event: {
     eventId: string;
     name: string;
@@ -115,6 +213,7 @@ export interface ValidatedSlate {
     maxEntriesAllowed?: number;
     cashLine?: number;
     contestKind?: 'CASH' | 'GPP' | 'UNKNOWN';
+    objective?: ContestObjective;
     paidPositions?: number;
     entryFee?: number;
     payoutStructure?: Array<{ rank: number; payout: number }>;
@@ -123,7 +222,7 @@ export interface ValidatedSlate {
   rosterRules: RosterRules;
   scoringRules: Record<string, { value: number }>;
   playerPool: SlatePlayer[];
-  sourceManifest: Array<{ source: string; receivedAt: string; fields: string[] }>;
+  sourceManifest: Array<{ source: string; receivedAt: string; fields: string[]; sourceUrl?: string; ruleVersion?: string }>;
   validation: {
     status: 'VALID' | 'WARNING' | 'BLOCKED';
     warnings: string[];
@@ -193,7 +292,7 @@ export interface PlayerProjection {
   /** Present on new projections; optional only for persisted pre-Gate-2 records. */
   modelPath?: 'SPORT_STRUCTURED' | 'PROVIDER_FPPG_FALLBACK';
   distribution?: {
-    family: 'SPORT_CORRELATED' | 'AGGREGATE_FPPG';
+    family: 'SPORT_CORRELATED' | 'SPORT_EVENT' | 'GOLF_ROUND' | 'AGGREGATE_FPPG';
     correlationGroup?: string;
     drivers: string[];
   };
@@ -205,6 +304,7 @@ export interface ProjectionPackage {
   sport: Sport;
   version: number;
   generatedAt: string;
+  contractVersion?: string;
   modelVersion: string;
   simulationRuns: number;
   players: PlayerProjection[];
@@ -217,6 +317,7 @@ export type DuplicationRisk = 'LOW' | 'MEDIUM' | 'HIGH';
 
 export interface ObjectiveProfile {
   name: string;
+  meanWeight?: number;
   medianWeight: number;
   ceilingWeight: number;
   leverageWeight: number;
@@ -231,6 +332,8 @@ export interface LineupCandidate {
   salaryUsed: number;
   salaryRemaining: number;
   floor?: number;
+  /** Arithmetic mean of the modeled joint lineup outcome samples. */
+  expectedPoints?: number;
   median: number;
   ceiling: number;
   correlationScore: number;
@@ -281,18 +384,22 @@ export interface OptimizerPackage {
   sport: Sport;
   version: number;
   generatedAt: string;
+  contractVersion?: string;
   objectiveProfile: ObjectiveProfile;
   candidates: LineupCandidate[];
   warnings: string[];
   gaps: string[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
   engineState: 'MODEL_VALIDATION_REQUIRED';
+  searchCompleteness?: 'EXHAUSTIVE' | 'BOUNDED';
+  optimalityGap?: number;
+  portfolioConstraints?: PortfolioConstraints;
   cashLineEstimate?: { value: number; source: 'MANUAL' | 'SIMULATED' };
   contestSimulation?: {
     status: 'COMPLETE' | 'UNAVAILABLE';
     simulations: number;
     fieldEntries?: number;
-    fieldModel: 'HEURISTIC_CONSTRUCTION_PROXY' | 'PROJECTED_OWNERSHIP';
+    fieldModel: 'PROJECTED_OWNERSHIP' | 'UNAVAILABLE';
     payoutModel: 'CONTEST_PAYOUT_STRUCTURE' | 'UNAVAILABLE';
     reason?: string;
   };
@@ -310,6 +417,7 @@ export interface ResearchFinding {
   sourceUrl?: string;
   publishedAt?: string;
   retrievedAt?: string;
+  expiresAt?: string;
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
   conflictingFindingIds?: string[];
   metadata?: Record<string, unknown>;
@@ -344,6 +452,7 @@ export interface ResearchArticle {
   summary?: string;
   content?: string;
   tags?: string[];
+  diagnostic?: { status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number };
 }
 
 export interface ResearchSourceProvider {
@@ -357,6 +466,7 @@ export interface ResearchPackage {
   tenantId: string;
   version: number;
   generatedAt: string;
+  contractVersion?: string;
   freshThrough: string;
   findings: ResearchFinding[];
   unknowns?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>;
@@ -390,6 +500,7 @@ export interface AdjustmentPackage {
   sport: Sport;
   version: number;
   generatedAt: string;
+  contractVersion?: string;
   adjustments: PlayerAdjustment[];
   researchGaps: unknown[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
@@ -407,11 +518,12 @@ export interface SelectedLineup {
   rosterSlots: Record<string, string>;
   salaryUsed: number;
   salaryRemaining: number;
+  expectedPoints?: number;
   median: number;
   floor?: number;
   ceiling: number;
   watchItems: string[];
-  readinessStatus: 'READY' | 'READY_WITH_WATCH';
+  readinessStatus: 'READY' | 'READY_WITH_WATCH' | 'PROVISIONAL';
   cashLineProbability?: number;
   cashLineConfidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
 }
@@ -422,6 +534,7 @@ export interface SelectionPackage {
   sport: Sport;
   version: number;
   generatedAt: string;
+  contractVersion?: string;
   selectedLineups: SelectedLineup[];
   optimizerGap?: string;
   warnings: string[];

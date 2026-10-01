@@ -95,7 +95,11 @@ export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding
       finding,
       sourceName: availability.source,
       sourceTier: 1 as const,
-        sourcePurpose: availability.status === 'UNKNOWN' ? 'Directly fetched roster/availability data for this exact slate; starting role remains unconfirmed.' : 'Directly fetched confirmed-lineup/availability data for this exact slate.',
+        sourcePurpose: availability.status === 'UNKNOWN'
+          ? 'Directly fetched roster/availability data for this exact slate; starting role remains unconfirmed.'
+          : /depth chart/i.test(availability.note ?? '')
+            ? 'Directly fetched NFL depth-chart data; this establishes roster/role intent, not game-day inactive confirmation.'
+            : 'Directly fetched confirmed-lineup/availability data for this exact slate.',
       publishedAt: availability.retrievedAt,
       retrievedAt: availability.retrievedAt,
       confidence: availability.confirmed ? 'HIGH' as const : 'MEDIUM' as const,
@@ -153,6 +157,16 @@ function resolveDirectAvailabilityConflict(group: ResearchFinding[]): { summary:
     const candidateTier = candidate.sourceTier ?? 4;
     const outranks = opposing.every((finding) => (finding.sourceTier ?? 4) > candidateTier && (findingTime(finding) ?? Number.NEGATIVE_INFINITY) <= candidateTime);
     if (outranks) return { summary: `Conflict resolved in favor of the newer tier-${candidateTier} direct same-slate availability record from ${candidate.sourceName}; contradictory lower-authority evidence remains linked for audit.` };
+  }
+  // NFL depth charts are season-long role intent, not game-day confirmation. When a
+  // timestamped tier-1/2 report explicitly says a player is out and is newer than the
+  // contradictory active/depth-chart evidence, resolve the conflict in favor of the
+  // newer availability claim while retaining every finding link for auditability.
+  const explicitOut = group.filter((finding) => (finding.sourceTier ?? 4) <= 2 && /\bout\b|inactive|ruled out|injured reserve/.test(finding.finding.toLowerCase()) && findingTime(finding) !== undefined);
+  for (const candidate of explicitOut) {
+    const candidateTime = findingTime(candidate)!;
+    const opposing = group.filter((finding) => finding.id !== candidate.id && claimsConflict(candidate, finding));
+    if (opposing.length && opposing.every((finding) => (findingTime(finding) ?? Number.NEGATIVE_INFINITY) <= candidateTime)) return { summary: `Conflict resolved in favor of the newer explicit availability report from ${candidate.sourceName}; older depth-chart or active-status evidence remains linked for audit.` };
   }
   return undefined;
 }

@@ -20,6 +20,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (pollOnly) { res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: [] }); return; }
     const selection = await context.db.from('floyd_dfs_selection_runs').select('id,version,status,created_at,floyd_dfs_generated_lineups(*)').eq('generation_run_id', id).order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (selection.error) throw selection.error;
-    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [] });
+    const trust = await context.db.from('floyd_dfs_run_trust').select('revision,trust_payload,created_at').eq('tenant_id', context.tenantId).eq('generation_run_id', id).order('revision', { ascending: false }).limit(1).maybeSingle();
+    if (trust.error) throw trust.error;
+    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [], trust: trust.data ?? null });
   } catch (error) { respondError(req, res, error); }
 }

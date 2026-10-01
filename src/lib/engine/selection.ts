@@ -1,10 +1,10 @@
-import type { LineupCandidate, ResearchPackage, SelectedLineup, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
+import type { LineupCandidate, PortfolioConstraints, ResearchPackage, SelectedLineup, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
 import { calibratedCashLineProbability, CASH_LINE_TARGET_PROBABILITY, type CashLineCalibration } from './cashLineCalibration.js';
 
 export interface SelectionInput {
   validatedSlate: ValidatedSlate;
   researchPackage: ResearchPackage;
-  optimizerPackage: { candidates: LineupCandidate[] };
+  optimizerPackage: { candidates: LineupCandidate[]; portfolioConstraints?: PortfolioConstraints };
   cashLineCalibration?: CashLineCalibration;
 }
 
@@ -16,7 +16,7 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const count = Math.min(requested, maximum, candidates.length);
   const isCashGame = input.validatedSlate.contest.contestKind === 'CASH';
   const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
-  const { selected, underfilled } = choosePortfolio(ranked, count, isCashGame);
+  const { selected, underfilled } = choosePortfolio(ranked, count, isCashGame, input.optimizerPackage.portfolioConstraints);
   const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
   const nearDuplicateCount = selected.filter((candidate) => candidate.strategicSimilarity >= 0.8).length;
   if (nearDuplicateCount) warnings.push(`${nearDuplicateCount} of ${selected.length} selected lineups closely overlap (>=80% shared players) with another selected lineup because the candidate pool didn't contain enough sufficiently distinct high-quality builds.`);
@@ -32,6 +32,7 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
 // shrinks the portfolio: choosePortfolio always fills from this ranking regardless of whether
 // any candidate actually clears the 85% target -- see explain() for how a shortfall is disclosed.
 function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined): LineupCandidate[] {
+  if (slate.contest.objective === 'MAX_FPTS') return [...candidates].sort((a, b) => (b.expectedPoints ?? b.median) - (a.expectedPoints ?? a.median));
   if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (cashRankScore(b, slate, calibration) - cashRankScore(a, slate, calibration)));
   const hasContestMetrics = candidates.some((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION');
   if (hasContestMetrics) return [...candidates].sort((a, b) => contestRankScore(b) - contestRankScore(a));
@@ -56,10 +57,23 @@ export function resolveCashLineProbability(candidate: LineupCandidate, calibrati
 // cash-line candidate across every entry is the correct play there (see rankForContext), so
 // this just takes the top N by rank as-is. `strategicSimilarity` is still computed (against
 // already-picked entries) purely for the near-duplicate disclosure in selectLineups/explain.
-function choosePortfolioForCashGame(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
+function canAddToPortfolio(chosen: LineupCandidate[], candidate: LineupCandidate, constraints: PortfolioConstraints | undefined, targetCount: number): boolean {
+  if (!constraints?.maxPlayerExposure && !constraints?.maxCaptainExposure && constraints?.maxLineupOverlap === undefined) return true;
+  if (constraints?.maxLineupOverlap !== undefined && chosen.some((lineup) => overlap(lineup.playerIds, candidate.playerIds) > constraints.maxLineupOverlap!)) return false;
+  const maxPlayer = constraints.maxPlayerExposure !== undefined ? Math.floor(constraints.maxPlayerExposure * targetCount + 1e-9) : Infinity;
+  const maxCaptain = constraints.maxCaptainExposure !== undefined ? Math.floor(constraints.maxCaptainExposure * targetCount + 1e-9) : Infinity;
+  const playerCounts = new Map<string, number>(); const captainCounts = new Map<string, number>();
+  for (const lineup of [...chosen, candidate]) {
+    for (const playerId of lineup.playerIds) playerCounts.set(playerId, (playerCounts.get(playerId) ?? 0) + 1);
+    const captain = lineup.rosterSlots.CPT; if (captain) captainCounts.set(captain, (captainCounts.get(captain) ?? 0) + 1);
+  }
+  return [...playerCounts.values()].every((value) => value <= maxPlayer) && [...captainCounts.values()].every((value) => value <= maxCaptain);
+}
+function choosePortfolioForCashGame(candidates: LineupCandidate[], count: number, constraints?: PortfolioConstraints): { selected: LineupCandidate[]; underfilled: boolean } {
   const chosen: LineupCandidate[] = [];
   for (const candidate of candidates) {
     if (chosen.length >= count) break;
+    if (!canAddToPortfolio(chosen, candidate, constraints, count)) continue;
     const similarity = chosen.length ? Math.max(...chosen.map((existing) => overlap(existing.playerIds, candidate.playerIds))) : 0;
     chosen.push({ ...candidate, strategicSimilarity: similarity });
   }
@@ -75,7 +89,7 @@ function choosePortfolioForCashGame(candidates: LineupCandidate[], count: number
 // candidate that's still a near-duplicate of everything chosen so far is only picked once it's
 // genuinely the best-scoring option left, which is the correct "pool too thin" signal downstream).
 const DIVERSITY_WEIGHT = 0.35;
-function choosePortfolioDiverse(candidates: LineupCandidate[], count: number): { selected: LineupCandidate[]; underfilled: boolean } {
+function choosePortfolioDiverse(candidates: LineupCandidate[], count: number, constraints?: PortfolioConstraints): { selected: LineupCandidate[]; underfilled: boolean } {
   const rankScore = new Map(candidates.map((candidate, index) => [candidate.id, 1 - index / Math.max(1, candidates.length - 1)]));
   const remaining = [...candidates];
   const chosen: LineupCandidate[] = [];
@@ -85,19 +99,21 @@ function choosePortfolioDiverse(candidates: LineupCandidate[], count: number): {
     let bestSimilarity = 0;
     for (let i = 0; i < remaining.length; i += 1) {
       const candidate = remaining[i];
+      if (!canAddToPortfolio(chosen, candidate, constraints, count)) continue;
       const similarity = chosen.length ? Math.max(...chosen.map((existing) => overlap(existing.playerIds, candidate.playerIds))) : 0;
       const score = (rankScore.get(candidate.id) ?? 0) - DIVERSITY_WEIGHT * similarity;
       if (score > bestScore) { bestScore = score; bestIndex = i; bestSimilarity = similarity; }
     }
+    if (bestScore === -Infinity) break;
     const [picked] = remaining.splice(bestIndex, 1);
     chosen.push({ ...picked, strategicSimilarity: bestSimilarity });
   }
   return { selected: chosen, underfilled: chosen.length < count };
 }
 
-function choosePortfolio(candidates: LineupCandidate[], count: number, isCashGame: boolean): { selected: LineupCandidate[]; underfilled: boolean } {
-  if (isCashGame || count <= 1) return choosePortfolioForCashGame(candidates, count);
-  return choosePortfolioDiverse(candidates, count);
+function choosePortfolio(candidates: LineupCandidate[], count: number, isCashGame: boolean, constraints?: PortfolioConstraints): { selected: LineupCandidate[]; underfilled: boolean } {
+  if (isCashGame || count <= 1) return choosePortfolioForCashGame(candidates, count, constraints);
+  return choosePortfolioDiverse(candidates, count, constraints);
 }
 
 function watchItemsFor(research: ResearchPackage, playerIds: string[]): string[] {
@@ -121,7 +137,7 @@ function explain(candidate: LineupCandidate, bulletNumber: number, input: Select
   if (candidate.candidateTypes.includes('LEVERAGE') || candidate.candidateTypes.includes('LOW_DUPLICATION')) rationale.push('Leverage and duplication figures are construction heuristics, not real field-ownership data.');
   if (candidate.strategicSimilarity >= 0.8) rationale.push('This lineup closely overlaps with another selected lineup due to a limited pool of distinct high-quality builds.');
   const watchItems = watchItemsFor(input.researchPackage, candidate.playerIds);
-  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: watchItems.length ? 'READY_WITH_WATCH' : 'READY', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
+  return { candidateId: candidate.id, bulletNumber, selectionType: candidate.candidateTypes[0] ?? 'OPTIMIZER_RANKED', explanation: buildExplanation(candidate, input.validatedSlate), newsContext: news, rationale, playerIds: candidate.playerIds, rosterSlots: candidate.rosterSlots, salaryUsed: candidate.salaryUsed, salaryRemaining: candidate.salaryRemaining, floor: candidate.floor, expectedPoints: candidate.expectedPoints, median: candidate.median, ceiling: candidate.ceiling, watchItems, readinessStatus: 'PROVISIONAL', cashLineProbability: cashLine.probability, cashLineConfidence: cashLine.confidence };
 }
 
 function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): string {
@@ -134,7 +150,8 @@ function buildExplanation(candidate: LineupCandidate, slate: ValidatedSlate): st
   const typeLabel = candidate.candidateTypes.length ? candidate.candidateTypes.join(', ').replaceAll('_', ' ').toLowerCase() : "the optimizer's top-ranked build";
   const correlationNote = candidate.correlationScore > 0.05 ? ' with meaningful same-team correlation' : '';
   const anchor = topPlayers.length ? ` anchored by ${topPlayers.join(' and ')}` : '';
-  return `Selected as ${typeLabel}${anchor}${correlationNote}, projecting ${format(candidate.median)} points on $${(candidate.salaryUsed / 1000).toFixed(1)}k of the $${(slate.salaryCap / 1000).toFixed(1)}k cap.`;
+  const forecast = candidate.expectedPoints === undefined ? `median ${format(candidate.median)}` : `mean ${format(candidate.expectedPoints)} / median ${format(candidate.median)}`;
+  return `Selected as ${typeLabel}${anchor}${correlationNote}, with modeled ${forecast} points on $${(candidate.salaryUsed / 1000).toFixed(1)}k of the $${(slate.salaryCap / 1000).toFixed(1)}k cap.`;
 }
 
 export function overlap(a: string[], b: string[]): number { const set = new Set(a); return b.filter((id) => set.has(id)).length / Math.max(a.length, b.length, 1); }

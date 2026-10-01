@@ -25,6 +25,30 @@ export function deriveSeasonBasedInputs(sport: Sport, player: SlatePlayer, seaso
   return undefined;
 }
 
+/**
+ * Blends current- and prior-season rates when both are actually available. The weights are
+ * explicit model inputs, not claims of statistical calibration; callers record the resulting
+ * provenance in the stage warnings. Missing sides are never replaced with fabricated zeros.
+ */
+export function deriveWeightedSeasonInputs(sport: Sport, player: SlatePlayer, currentRows: Record<string, unknown>[], priorRows: Record<string, unknown>[], currentWeight: number, options: { allowTeamMismatch?: boolean } = {}): { inputs?: Record<string, number>; usedPrior: boolean } {
+  const current = deriveSeasonBasedInputs(sport, player, currentRows, options);
+  const prior = deriveSeasonBasedInputs(sport, player, priorRows, options);
+  if (!current && !prior) return { usedPrior: false };
+  if (!current) return { inputs: prior, usedPrior: true };
+  if (!prior) return { inputs: current, usedPrior: false };
+  const weight = Math.max(0, Math.min(1, currentWeight));
+  const keys = new Set([...Object.keys(current), ...Object.keys(prior)]);
+  const inputs = Object.fromEntries([...keys].flatMap((key) => {
+    const currentValue = current[key];
+    const priorValue = prior[key];
+    if (Number.isFinite(currentValue) && Number.isFinite(priorValue)) return [[key, currentValue * weight + priorValue * (1 - weight)]];
+    if (Number.isFinite(currentValue)) return [[key, currentValue]];
+    if (Number.isFinite(priorValue)) return [[key, priorValue]];
+    return [];
+  }));
+  return { inputs, usedPrior: true };
+}
+
 export function isPitcher(player: { position?: string }): boolean { return /^(SP|RP|P)$/i.test(player.position ?? ''); }
 export function isQuarterback(player: { position?: string }): boolean { return /^QB$/i.test(player.position ?? ''); }
 
@@ -75,10 +99,12 @@ function deriveHitterInputs(row: Record<string, unknown>, gamesPlayed = 1): Reco
   const plateAppearances = readNumber(row, ['PlateAppearances', 'plateAppearances']) ?? (atBats + walks + hitByPitch + sacFly);
   if (!plateAppearances || plateAppearances <= 0 || gamesPlayed <= 0) return undefined;
   const hits = readNumber(row, ['Hits', 'hits']) ?? 0;
-  const singles = readNumber(row, ['Singles', 'singles']) ?? 0;
   const doubles = readNumber(row, ['Doubles', 'doubles']) ?? 0;
   const triples = readNumber(row, ['Triples', 'triples']) ?? 0;
   const homeRuns = readNumber(row, ['HomeRuns', 'homeRuns']) ?? 0;
+  // Some season-stat endpoints omit singles while returning hits and extra-base hits.
+  // Derive the residual instead of silently projecting every hit as a non-single.
+  const singles = readNumber(row, ['Singles', 'singles']) ?? Math.max(0, hits - doubles - triples - homeRuns);
   const totalBases = readNumber(row, ['TotalBases', 'totalBases']) ?? (singles || (hits - doubles - triples - homeRuns)) + doubles * 2 + triples * 3 + homeRuns * 4;
   const rbi = readNumber(row, ['RunsBattedIn', 'RBI', 'rbi']) ?? 0;
   const runs = readNumber(row, ['Runs', 'runs']) ?? 0;
@@ -99,7 +125,10 @@ function derivePitcherInputs(row: Record<string, unknown>, gamesPlayed = 1): Rec
   const walks = readNumber(row, ['PitchingWalks', 'Walks', 'BaseOnBallsAllowed', 'walks']) ?? 0;
   const hitsAllowed = readNumber(row, ['PitchingHits', 'HitsAllowed', 'hitsAllowed']) ?? 0;
   const earnedRuns = readNumber(row, ['PitchingEarnedRuns', 'EarnedRuns', 'earnedRuns']) ?? 0;
-  return { expectedInnings: innings / gamesPlayed, strikeoutsPerInning: strikeouts / innings, walksPerInning: walks / innings, hitsAllowedPerInning: hitsAllowed / innings, earnedRunsPerInning: earnedRuns / innings };
+  const result = { expectedInnings: innings / gamesPlayed, strikeoutsPerInning: strikeouts / innings, walksPerInning: walks / innings, hitsAllowedPerInning: hitsAllowed / innings, earnedRunsPerInning: earnedRuns / innings };
+  const wins = readNumber(row, ['PitchingWins', 'Wins', 'wins']);
+  const starts = readNumber(row, ['PitchingGamesStarted', 'GamesStarted', 'gamesStarted']);
+  return wins !== undefined && starts !== undefined && starts > 0 ? { ...result, winProbability: Math.max(0, Math.min(1, wins / starts)) } : result;
 }
 
 function deriveQuarterbackInputs(row: Record<string, unknown>, gamesPlayed = 1): Record<string, number> | undefined {

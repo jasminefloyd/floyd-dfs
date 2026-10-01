@@ -47,7 +47,7 @@ interface MIOS_FantasyScannerProps {
 
 const DEFAULT_SCAN_OPTIONS = {
   riskTolerance: 'balanced',
-  lineupMode: defaultLineupMode('top_heavy'),
+  lineupMode: 'max_fpts',
   maxPlayerExposure: 0.8,
   maxTeamExposure: 1,
   minPrimaryStack: 0,
@@ -62,7 +62,7 @@ const DEFAULT_SCAN_OPTIONS = {
   maxCaptainExposure: 0.4,
   minPerTeam: 1,
   forceUniqueCaptains: true,
-  minSalaryUsed: 49_000,
+  minSalaryUsed: 0,
   maxDuplication: 25,
   maxSharedPlayers: undefined,
   simulationIterations: 1_000,
@@ -746,10 +746,6 @@ function classicRosterSize(sport: string): number {
   if (sport === 'mlb') return 10;
   if (sport === 'golf') return 6;
   return 8;
-}
-
-function defaultLineupMode(shape: string): string {
-  return shape === 'double_up' ? 'safe' : 'tournament';
 }
 
 interface DerivedScanInput {

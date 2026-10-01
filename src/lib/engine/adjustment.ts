@@ -32,9 +32,10 @@ export function netSignedMagnitude(items: AdjustmentItem[]): number {
 export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, now = new Date()): AdjustmentPackage {
   const unknowns = research.unknowns ?? [];
   const criticalGaps = unknowns.filter((unknown) => unknown.importance === 'CRITICAL').map((unknown) => ({ question: unknown.question, importance: unknown.importance, reason: unknown.reason, affectedPlayerIds: unknown.subjectId ? [unknown.subjectId] : slate.playerPool.map((player) => player.playerId) }));
-  let adjustments = slate.playerPool.map((player) => adjustPlayer(player.playerId, slate.sport, research.findings.filter((finding) => finding.subjectId === player.playerId)));
+  const freshFindings = research.findings.filter((finding) => !finding.expiresAt || Date.parse(finding.expiresAt) > now.getTime());
+  let adjustments = slate.playerPool.map((player) => adjustPlayer(player.playerId, slate.sport, freshFindings.filter((finding) => finding.subjectId === player.playerId)));
   const evidenceGaps = slate.playerPool
-    .filter((player) => !research.findings.some((finding) => finding.subjectId === player.playerId))
+    .filter((player) => !freshFindings.some((finding) => finding.subjectId === player.playerId))
     .map((player) => ({ question: `What role, availability, or matchup evidence exists for ${player.playerName}?`, importance: 'HIGH' as const, reason: `No research findings were retrieved for ${player.playerName}; Sport Adjustment cannot assert an opportunity change without evidence.`, affectedPlayerIds: [player.playerId] }));
   adjustments = redistributeForUnavailablePlayers(slate, adjustments);
   const researchGaps = [...new Map([...criticalGaps, ...evidenceGaps].map((gap) => [`${gap.affectedPlayerIds.join(',')}:${gap.question}`, gap])).values()];
@@ -150,7 +151,9 @@ function neutralContext(finding: ResearchFinding): AdjustmentItem[] { return [{ 
 // restricted player is downgraded before any sport-specific role signal is considered.
 function baseAvailability(text: string, finding: ResearchFinding): AdjustmentItem[] | undefined {
   const base = baseFields(finding);
-  if (/\bout\b|inactive|ruled out|scratched/.test(text)) return [{ ...base, adjustmentType: 'AVAILABILITY', direction: 'DOWN', magnitude: 'MAJOR', rationale: `${finding.finding} Explicit unavailability evidence materially reduces player opportunity.` }];
+  const negatedUnavailable = /\bnot\s+(?:(?:been|officially)\s+)?(?:ruled\s+out|out|inactive|scratched)\b/.test(text);
+  const explicitUnavailable = !negatedUnavailable && (/\bout\b(?!\s+of\b)|\binactive\b|\bscratched\b|\bplaced on (?:the )?(?:il|ir|injured reserve)\b/.test(text));
+  if (explicitUnavailable) return [{ ...base, adjustmentType: 'AVAILABILITY', direction: 'DOWN', magnitude: 'MAJOR', rationale: `${finding.finding} Explicit unavailability evidence materially reduces player opportunity.` }];
   if (/questionable|limited|restriction|workload/.test(text)) return [{ ...base, adjustmentType: 'ROLE_RESTRICTION', direction: 'DOWN', magnitude: 'MODERATE', rationale: `${finding.finding} Evidence indicates uncertainty or workload limitation; active does not imply unrestricted workload.` }];
   return undefined;
 }

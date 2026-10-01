@@ -24,6 +24,8 @@ export interface LineupBacktestObservation {
   cashLine?: number;
   actualRank?: number;
   fieldSize?: number;
+  actualPayout?: number;
+  entryFee?: number;
 }
 
 export interface LineupBacktestMetrics {
@@ -34,6 +36,18 @@ export interface LineupBacktestMetrics {
   topOnePercentRate?: number;
   meanRegret?: number;
   meanRankPercentile?: number;
+  realizedRoi?: number;
+}
+
+export interface ProbabilityCalibrationMetrics {
+  sampleSize: number;
+  brierScore: number;
+  logLoss: number;
+}
+
+export interface ModelPromotionDecision {
+  status: 'PROMOTE' | 'HOLD';
+  reason: string;
 }
 
 export interface CalibrationMetrics {
@@ -67,7 +81,24 @@ export function evaluateLineupBacktest(rows: LineupBacktestObservation[]): Lineu
   const valid = rows.filter((row) => Number.isFinite(row.generatedScore) && Number.isFinite(row.actualScore));
   const withCash = valid.filter((row) => Number.isFinite(row.cashLine));
   const withRank = valid.filter((row) => Number.isFinite(row.actualRank) && Number.isFinite(row.fieldSize) && row.fieldSize! > 0);
-  return { sampleSize: valid.length, meanActualScore: mean(valid.map((row) => row.actualScore)), cashRate: withCash.length ? withCash.filter((row) => row.actualScore >= row.cashLine!).length / withCash.length : undefined, topTenPercentRate: withRank.length ? withRank.filter((row) => row.actualRank! / row.fieldSize! <= 0.1).length / withRank.length : undefined, topOnePercentRate: withRank.length ? withRank.filter((row) => row.actualRank! / row.fieldSize! <= 0.01).length / withRank.length : undefined, meanRegret: valid.some((row) => Number.isFinite(row.legalUniverseOptimalActualScore)) ? mean(valid.flatMap((row) => Number.isFinite(row.legalUniverseOptimalActualScore) ? [row.legalUniverseOptimalActualScore! - row.actualScore] : [])) : undefined, meanRankPercentile: withRank.length ? mean(withRank.map((row) => 1 - (row.actualRank! - 1) / Math.max(1, row.fieldSize! - 1))) : undefined };
+  const withPayout = valid.filter((row) => Number.isFinite(row.actualPayout) && Number.isFinite(row.entryFee) && row.entryFee! > 0);
+  return { sampleSize: valid.length, meanActualScore: mean(valid.map((row) => row.actualScore)), cashRate: withCash.length ? withCash.filter((row) => row.actualScore >= row.cashLine!).length / withCash.length : undefined, topTenPercentRate: withRank.length ? withRank.filter((row) => row.actualRank! / row.fieldSize! <= 0.1).length / withRank.length : undefined, topOnePercentRate: withRank.length ? withRank.filter((row) => row.actualRank! / row.fieldSize! <= 0.01).length / withRank.length : undefined, meanRegret: valid.some((row) => Number.isFinite(row.legalUniverseOptimalActualScore)) ? mean(valid.flatMap((row) => Number.isFinite(row.legalUniverseOptimalActualScore) ? [row.legalUniverseOptimalActualScore! - row.actualScore] : [])) : undefined, meanRankPercentile: withRank.length ? mean(withRank.map((row) => 1 - (row.actualRank! - 1) / Math.max(1, row.fieldSize! - 1))) : undefined, realizedRoi: withPayout.length ? mean(withPayout.map((row) => (row.actualPayout! - row.entryFee!) / row.entryFee!)) : undefined };
+}
+
+export function evaluateProbabilityCalibration(rows: Array<{ probability: number; outcome: boolean }>): ProbabilityCalibrationMetrics {
+  const valid = rows.filter((row) => Number.isFinite(row.probability) && row.probability >= 0 && row.probability <= 1);
+  if (!valid.length) return { sampleSize: 0, brierScore: 0, logLoss: 0 };
+  const epsilon = 1e-15;
+  return { sampleSize: valid.length, brierScore: mean(valid.map((row) => (row.probability - (row.outcome ? 1 : 0)) ** 2)), logLoss: mean(valid.map((row) => -(row.outcome ? Math.log(Math.max(epsilon, row.probability)) : Math.log(Math.max(epsilon, 1 - row.probability))))) };
+}
+
+/** Model promotion requires a pre-registered holdout comparison, never a single good slate. */
+export function decideModelPromotion(input: { candidateSampleSize: number; baselineSampleSize: number; candidateMae: number; baselineMae: number; candidateBrier?: number; baselineBrier?: number; minimumSampleSize?: number }): ModelPromotionDecision {
+  const minimum = input.minimumSampleSize ?? 100;
+  if (input.candidateSampleSize < minimum || input.baselineSampleSize < minimum) return { status: 'HOLD', reason: `Hold: both candidate and baseline require at least ${minimum} holdout observations.` };
+  if (!(input.candidateMae < input.baselineMae)) return { status: 'HOLD', reason: 'Hold: candidate MAE did not improve on the pre-registered holdout baseline.' };
+  if (input.candidateBrier !== undefined && input.baselineBrier !== undefined && !(input.candidateBrier < input.baselineBrier)) return { status: 'HOLD', reason: 'Hold: candidate Brier score did not improve on the pre-registered holdout baseline.' };
+  return { status: 'PROMOTE', reason: 'Promote: candidate improved the pre-registered holdout metrics with sufficient sample size.' };
 }
 
 export interface BaselineResult { name: 'PROVIDER_FPPG' | 'SEASON_AVERAGE' | 'RANDOM_LEGAL' | 'VALUE_OPTIMIZER' | 'FULL_ENGINE'; actualScores: number[]; }

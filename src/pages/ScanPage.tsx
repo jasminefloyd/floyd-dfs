@@ -52,7 +52,7 @@ export default function ScanPage() {
   const handleScan = async (params: ScanParams) => {
     setPhase('fetching'); setError(null); setManifest(null); setLineups([]); setDataWarnings([]); setProgressStages([]); setElapsedSeconds(0);
     try {
-      const result = await generateFloydLineups({ sport: params.sport, contestType: params.contestType, contest: params.slate, entries: params.entryCount, fieldSize: params.fieldSize, lineupMode: params.lineupMode, minSalaryUsed: params.minSalaryUsed }, setProgressStages);
+      const result = await generateFloydLineups({ sport: params.sport, contestType: params.contestType, contest: params.slate, entries: params.entryCount, fieldSize: params.fieldSize, lineupMode: params.lineupMode, minSalaryUsed: params.minSalaryUsed, maxSharedPlayers: params.maxSharedPlayers }, setProgressStages);
       setPhase('generating'); setManifest(result.manifest); setLineups(result.lineups); setDataWarnings(result.data_warnings);
       if (result.data_warnings.length) showToast('Scan completed with data warnings', 'warning');
     } catch (err) {
@@ -63,9 +63,9 @@ export default function ScanPage() {
   const scanStatusLabel = phase === 'idle' ? undefined : `${currentStageLabel(progressStages)}... (${formatElapsed(elapsedSeconds)})`;
 
   const onSave = async (lineup: Lineup) => {
-    if (!lineup.id) { showToast(`Lineup #${lineup.rank} is already persisted with this run.`, 'success'); return; }
+    if (!lineup.id) throw new Error('This lineup cannot be marked entered because its saved record ID is unavailable.');
     try { await markFloydLineupEntered(lineup.id); showToast(`Lineup #${lineup.rank} marked entered.`, 'success'); }
-    catch (err) { showToast(err instanceof Error ? err.message : 'Unable to mark lineup entered.', 'error'); }
+    catch (err) { showToast(err instanceof Error ? err.message : 'Unable to mark lineup entered.', 'error'); throw err; }
   };
   return <div className="min-h-screen bg-[#f4f7fb] text-slate-900"><div className="mx-auto flex max-w-7xl flex-col gap-3 px-3 py-3 sm:px-5 lg:grid lg:grid-cols-[380px_minmax(0,1fr)] lg:gap-5 lg:py-5"><aside className="w-full lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:overflow-y-auto"><div className="rounded-lg border border-slate-200 bg-white p-3 shadow-[var(--shadow-medium)] sm:p-4"><MIOS_FantasyScanner onScan={handleScan} loading={phase !== 'idle'} loadingLabel={scanStatusLabel} onValidationError={(errors) => errors.forEach((item) => showToast(item, 'error'))} /></div></aside><main className="min-w-0 flex-1">{error && <div className="mb-3 rounded-lg border border-error/25 bg-red-50 p-3"><p className="text-error">{error}</p></div>}{phase === 'fetching' ? <PlayerListSkeleton /> : phase === 'generating' ? <LineupSkeleton /> : lineups.length ? <Results manifest={manifest} lineups={lineups} warnings={dataWarnings} onSave={onSave} /> : <div className="rounded-lg border border-slate-200 bg-white p-6 text-center text-slate-500 shadow-[var(--shadow-subtle)]"><p>{manifest ? 'No lineups were returned for this verified slate.' : 'Select a sport, contest type, and DraftKings slate to build lineups.'}</p>{dataWarnings.length ? <ul className="mx-auto mt-4 max-w-2xl space-y-2 text-left text-sm">{dataWarnings.map((warning) => <li key={warning} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">{warning}</li>)}</ul> : null}</div>}</main></div></div>;
 }

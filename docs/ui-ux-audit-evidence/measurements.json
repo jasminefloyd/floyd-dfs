@@ -1,0 +1,60 @@
+{
+  "fixtureOnly": true,
+  "liveApiCalls": false,
+  "capturedAt": "2026-10-01T00:23:41.279Z",
+  "metrics": [
+    {
+      "name": "01-mobile-builder",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "height": 1175,
+      "firstRosterNameTop": null,
+      "smallTextElements": 10
+    },
+    {
+      "name": "02-mobile-results",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "height": 3313,
+      "firstRosterNameTop": 2140.0625,
+      "smallTextElements": 80
+    },
+    {
+      "name": "failed-save",
+      "buttonDisabled": true,
+      "errorVisible": 1
+    },
+    {
+      "name": "03-small-mobile-results",
+      "viewport": 320,
+      "scrollWidth": 320,
+      "height": 3448,
+      "firstRosterNameTop": 2270.765625,
+      "smallTextElements": 80
+    },
+    {
+      "name": "04-desktop-results",
+      "viewport": 1440,
+      "scrollWidth": 1440,
+      "height": 1876,
+      "firstRosterNameTop": 899.234375,
+      "smallTextElements": 80
+    },
+    {
+      "name": "05-mobile-saved-run",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "height": 1965,
+      "firstRosterNameTop": null,
+      "smallTextElements": 34
+    },
+    {
+      "name": "06-mobile-learning",
+      "viewport": 390,
+      "scrollWidth": 390,
+      "height": 1091,
+      "firstRosterNameTop": null,
+      "smallTextElements": 5
+    }
+  ]
+}

@@ -1,25 +1,32 @@
 import assert from 'node:assert/strict';
-import { applyAvailabilitySnapshot, parseAvailabilityRecords, withDegradedAvailability } from '../src/lib/engine/availability';
+import { applyAvailabilitySnapshot, normalizeTeamCode, parseAvailabilityRecords, withDegradedAvailability } from '../src/lib/engine/availability';
 import { adjustSlate } from '../src/lib/engine/adjustment';
+import { buildRunTrust } from '../src/lib/engine/runTrust';
 import { projectSlate } from '../src/lib/engine/projection';
 import { projectionReadiness } from '../src/lib/engine/projection';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
-import { classifyContestKind, buildValidatedSlateFromBundle } from '../src/lib/engine/draftKingsSlate';
+import { classifyContestKind, buildValidatedSlateFromBundle, buildValidatedSlateFromScreenshot } from '../src/lib/engine/draftKingsSlate';
+import { DraftKingsClient, extractContestSummaries, extractGameGroups } from '../src/lib/engine/draftKings';
 import { optimizeLineups } from '../src/lib/engine/optimizer';
+import { simulateContestField } from '../src/lib/engine/contestSimulation';
 import { selectWithOpenAi } from '../src/lib/engine/openAiSelection';
 import { ResearchAgent } from '../src/lib/engine/researchAgent';
 import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
 import { findConflicts, normalizeArticles } from '../src/lib/engine/researchEvidence';
 import { overlap, selectLineups } from '../src/lib/engine/selection';
-import { deriveSeasonBasedInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
+import { deriveSeasonBasedInputs, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
 import { seasonParamFor, SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
-import { assertProjection, assertSlate } from '../src/lib/engine/validation';
+import { assertProjection, assertSlate, validateLineupCandidate } from '../src/lib/engine/validation';
 import { dkCfbFantasyPoints, dkMlbHitterFantasyPoints, dkMlbPitcherFantasyPoints, dkNflFantasyPoints } from '../src/lib/dkScoring';
 import type { LineupCandidate, ProjectionPackage, ResearchFinding, ResearchPackage, ValidatedSlate } from '../src/lib/engine/contracts';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider';
+import { buildLiveStatePackage } from '../src/lib/engine/liveState';
+import { brierScore, logLoss, quantileCoverage, rankCorrelation, regret, roi } from '../src/lib/engine/learningMetrics';
+import { evaluateLessonPromotion } from '../src/lib/engine/lessonPromotion';
+import { resolveObservations } from '../src/lib/engine/factResolution';
 
 const now = new Date('2026-08-23T12:00:00.000Z');
 const baseSlate: ValidatedSlate = {
@@ -128,7 +135,11 @@ const testSalarySlotParity = (): void => {
   const playerPool = slate.playerPool.map((player) => ({ ...player, playerId: idMap[player.playerId] ?? player.playerId }));
   const result = optimizeLineups({ validatedSlate: { ...slate, playerPool, salaryCap: 15000 }, projectionPackage: { ...projection, players: projection.players } });
   assert.equal(result.status, 'COMPLETE');
-  assert.ok(result.candidates.some((item) => item.rosterSlots.CPT === 'p1' && item.salaryUsed === 10500));
+  const legal = result.candidates.find((item) => item.rosterSlots.CPT === 'p1' && item.salaryUsed === 10500);
+  assert.ok(legal);
+  assert.deepEqual(validateLineupCandidate(legal!, { ...slate, playerPool, salaryCap: 15000 }), []);
+  assert.ok(validateLineupCandidate({ ...legal!, salaryUsed: 1 }, { ...slate, playerPool, salaryCap: 15000 }).some((error) => /recomputed salary/.test(error)), 'final validation must recalculate, not trust, reported salary');
+  assert.ok(validateLineupCandidate({ ...legal!, rosterSlots: { ...legal!.rosterSlots, CPT: 'p3' } }, { ...slate, playerPool, salaryCap: 15000 }).some((error) => /do not match/.test(error)), 'candidate identity list must match roster assignments');
 };
 
 const testCashGameSelectionParity = (): void => {
@@ -159,6 +170,10 @@ const testGppSelectionUnaffectedByCashLineParity = (): void => {
   const result = selectLineups({ validatedSlate: gppSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
   const chosen = optimizer.candidates.find((candidate) => candidate.id === result.selectedLineups[0].candidateId);
   assert.equal(chosen?.heuristicTournamentRank ?? chosen?.tournamentRank, 1, 'GPP selection must rank by the heuristic tournament composite, ignoring cash-line probability entirely');
+  const expectedPointSlate: ValidatedSlate = { ...gppSlate, contest: { ...gppSlate.contest, objective: 'MAX_FPTS' } };
+  const expectedPointCandidates = optimizer.candidates.slice(0, 2).map((candidate, index) => ({ ...candidate, expectedPoints: index === 0 ? 10 : 50 }));
+  const expectedPointResult = selectLineups({ validatedSlate: expectedPointSlate, researchPackage: research, optimizerPackage: { candidates: expectedPointCandidates } }, now);
+  assert.equal(expectedPointResult.selectedLineups[0].candidateId, expectedPointCandidates[1].id, 'MAX_FPTS selection must follow expected points even when the heuristic rank is lower');
 };
 
 const testSelectionParity = (): void => {
@@ -174,14 +189,28 @@ const testSelectionWatchItemsParity = (): void => {
   assert.equal(result.status, 'COMPLETE');
   const lineup = result.selectedLineups[0];
   assert.ok(lineup.playerIds.includes('p1'));
-  assert.equal(lineup.readinessStatus, 'READY_WITH_WATCH');
+  assert.equal(lineup.readinessStatus, 'PROVISIONAL', 'unvalidated sport models must not claim an entry-ready status');
   assert.ok(lineup.watchItems.some((item) => item.includes('starting lineup')));
+};
+
+const testRunTrustGateParity = (): void => {
+  const optimizer = optimizeLineups({ validatedSlate: baseSlate, projectionPackage: projection });
+  const selection = selectLineups({ validatedSlate: baseSlate, researchPackage: research, optimizerPackage: optimizer }, now);
+  const trust = buildRunTrust({ slate: baseSlate, research, projection, optimizer, selection });
+  assert.equal(trust.recommendationStatus, 'PROVISIONAL');
+  assert.equal(trust.entryEligible, false, 'a locally generated model without sport/format certification cannot be entry-ready');
+  assert.ok(trust.releaseReasons.some((reason) => reason.includes('certification')));
+  assert.equal(trust.searchCompleteness, optimizer.searchCompleteness === 'EXHAUSTIVE' ? 'EXHAUSTIVE' : 'HEURISTIC');
 };
 
 const testAvailabilityParity = (): void => {
   const mlb = { ...baseSlate, sport: 'MLB' as const, league: 'MLB' as const, playerPool: [{ ...baseSlate.playerPool[0], playerName: 'Player One', team: 'CWS' }, { ...baseSlate.playerPool[1], playerName: 'Player Two', team: 'NYY' }] };
   const result = applyAvailabilitySnapshot(mlb, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: true, records: [{ playerName: 'Player One', team: 'CWS', status: 'CONFIRMED_STARTER', confirmed: true, battingOrder: 1 }] });
   assert.equal(result.playerPool.length, 1, 'a confirmed MLB lineup must exclude DraftKings players without a matching starter record from the primary slate'); assert.equal(result.playerPool[0].availability?.status, 'CONFIRMED_STARTER');
+  const negatedStatus = parseAvailabilityRecords([{ HomeBattingLineup: [{ Name: 'Player One', Team: 'CWS', Status: 'not out' }] }], 'MLB', now.toISOString());
+  assert.notEqual(negatedStatus.records[0]?.status, 'OUT', 'negated provider language must not mark an athlete unavailable');
+  const questionableStatus = parseAvailabilityRecords([{ HomeBattingLineup: [{ Name: 'Player One', Team: 'CWS', Status: 'questionable' }] }], 'MLB', now.toISOString());
+  assert.notEqual(questionableStatus.records[0]?.status, 'OUT', 'questionable availability must remain uncertain rather than being excluded like confirmed OUT');
 };
 
 const testMlbConfirmedStartingPitcherParity = (): void => {
@@ -236,6 +265,27 @@ const testNflIdentityAndEventResolutionParity = async (): Promise<void> => {
   assert.ok(enriched.validation.warnings.some((warning) => warning.includes('did not verify starters')));
 };
 
+const testWnbaAvailabilityUsesNumericEventTeamIds = async (): Promise<void> => {
+  const wnba: ValidatedSlate = { ...baseSlate, sport: 'WNBA', league: 'WNBA', event: { ...baseSlate.event, eventDate: '2026-10-02T01:00:00.000Z', participants: ['IND', 'LVA'] }, playerPool: [{ ...baseSlate.playerPool[0], playerId: 'wnba-1', playerName: 'A Player', team: 'LVA', position: 'F' }, { ...baseSlate.playerPool[1], playerId: 'wnba-unlisted', playerName: 'Unlisted Player', team: 'LVA', position: 'G' }] };
+  const requested: string[] = [];
+  const client = new EspnProjectionClient('https://espn.test', async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.includes('/scoreboard?dates=')) return new Response(JSON.stringify({ events: [{ competitions: [{ competitors: [{ team: { abbreviation: 'IND', id: '11' } }, { team: { abbreviation: 'LV', id: '12' } }] }] }] }), { status: 200 });
+    if (url.endsWith('/teams/11/roster')) return new Response(JSON.stringify({ athletes: [{ id: 'espn-ind-1', fullName: 'Indiana Player', status: { type: 'active' }, injuries: [] }] }), { status: 200 });
+    if (url.endsWith('/teams/12/roster')) return new Response(JSON.stringify({ athletes: Array.from({ length: 8 }, (_, index) => ({ id: `espn-lva-${index + 1}`, fullName: index === 0 ? 'A Player' : `Roster Player ${index + 1}`, status: { type: 'active' }, injuries: [] })) }), { status: 200 });
+    return new Response('{}', { status: 404 });
+  });
+  const snapshot = await client.getAvailabilitySnapshot(wnba);
+  assert.equal(normalizeTeamCode('LV'), 'LVA', 'ESPN and DraftKings Las Vegas abbreviations must reconcile');
+  assert.ok(requested.some((url) => url.endsWith('/teams/12/roster')), 'WNBA roster lookup must use the numeric ESPN team ID resolved from the event');
+  assert.equal(snapshot.rosterComplete, true);
+  const enriched = applyAvailabilitySnapshot(wnba, snapshot, new Date());
+  assert.equal(enriched.playerPool[0].availability?.mappedBy, 'NAME_AND_TEAM');
+  assert.equal(enriched.playerPool[0].identity?.espnId, 'espn-lva-1');
+  assert.equal(enriched.playerPool.some((player) => player.playerId === 'wnba-unlisted'), false, 'a complete WNBA ESPN roster can exclude DraftKings players that are not on either team roster');
+  assert.ok(enriched.validation.warnings.some((warning) => warning.includes('removed from the primary slate')));
+};
+
 const testCfbSportsDataIoRosterAndInjuryParity = async (): Promise<void> => {
   const cfb: ValidatedSlate = { ...baseSlate, sport: 'CFB', league: 'CFB', playerPool: [
     { ...baseSlate.playerPool[0], playerId: 'cfb-1', playerName: 'Quarterback One', team: 'CLEM' },
@@ -271,6 +321,62 @@ const testNflProjectionReadinessParity = (): void => {
   assert.equal(projectionReadiness('NFL', qb).ready, false);
   assert.equal(projectionReadiness('NFL', { ...qb, providerFppg: 18 }).ready, true);
   assert.equal(projectionReadiness('NFL', { ...qb, projectionInputs: { passAttempts: 30, completionRate: 0.65, yardsPerCompletion: 11, passingTouchdownRate: 0.05, interceptionRate: 0.02, carries: 4, yardsPerCarry: 4, touchdownProbability: 0.2 } }).ready, true);
+};
+
+const testNflSportsDataIoUsesVerifiedScheduleAndInjuryRoutes = async (): Promise<void> => {
+  const nfl: ValidatedSlate = { ...baseSlate, sport: 'NFL', league: 'NFL', event: { ...baseSlate.event, eventDate: '2026-09-10T20:35:00.000Z' }, playerPool: [
+    { ...baseSlate.playerPool[0], playerId: 'nfl-1', playerName: 'Quarterback One', team: 'NE' },
+    { ...baseSlate.playerPool[1], playerId: 'nfl-2', playerName: 'Receiver Two', team: 'SEA' },
+  ] };
+  const requested: string[] = [];
+  const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.endsWith('/nfl/scores/json/Teams')) return new Response(JSON.stringify([{ TeamID: 21, Key: 'NE' }, { TeamID: 30, Key: 'SEA' }]), { status: 200 });
+    if (url.endsWith('/nfl/scores/json/DepthCharts')) return new Response(JSON.stringify([{ TeamID: 21, Offense: [{ PlayerID: 601, Name: 'Quarterback One', Position: 'QB', DepthOrder: 1 }] }, { TeamID: 30, Offense: [{ PlayerID: 602, Name: 'Receiver Two', Position: 'WR', DepthOrder: 1 }] }]), { status: 200 });
+    if (url.endsWith('/nfl/scores/json/ScoresByDate/2026-09-10')) return new Response(JSON.stringify([{ Season: 2026, Week: 1, AwayTeam: 'NE', HomeTeam: 'SEA' }]), { status: 200 });
+    if (url.endsWith('/nfl/stats/json/Injuries/2026/1')) return new Response(JSON.stringify([{ PlayerID: 601, Name: 'Quarterback One', Team: 'NE', InjuryStatus: 'Active' }]), { status: 200 });
+    return new Response('{}', { status: 404 });
+  } });
+  const snapshot = await client.getAvailabilitySnapshot(nfl);
+  assert.ok(requested.some((url) => url.endsWith('/nfl/scores/json/ScoresByDate/2026-09-10')));
+  assert.ok(requested.some((url) => url.endsWith('/nfl/stats/json/Injuries/2026/1')));
+  assert.ok(!requested.some((url) => url.endsWith('/nfl/scores/json/Injuries')));
+  assert.equal(snapshot.records.find((record) => record.playerName === 'Quarterback One')?.status, 'ACTIVE');
+};
+
+const testWnbaSeasonStatsUsesScoresFeedParity = async (): Promise<void> => {
+  const requested: string[] = [];
+  const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.endsWith('/wnba/scores/json/PlayerSeasonStats/2026')) return new Response(JSON.stringify([{ PlayerID: 701, Name: 'WNBA Player', Team: 'ATL', Games: 1 }]), { status: 200 });
+    return new Response('{}', { status: 404 });
+  } });
+  const rows = await client.getSeasonStats('WNBA', '2026');
+  assert.equal(rows.length, 1);
+  assert.ok(requested.some((url) => url.endsWith('/wnba/scores/json/PlayerSeasonStats/2026')));
+  assert.ok(!requested.some((url) => url.endsWith('/wnba/stats/json/PlayerSeasonStats/2026')));
+  const lasVegasPlayer = { ...baseSlate.playerPool[0], playerName: 'A Player', team: 'LVA' };
+  const lasVegasStats = { Name: 'A Player', Team: 'LV', Games: 20, Minutes: 600, Points: 400, Rebounds: 100, Assists: 80, Steals: 20, Blocks: 10, Turnovers: 30, ThreePointersMade: 40 };
+  assert.ok(deriveSeasonBasedInputs('WNBA', lasVegasPlayer, [lasVegasStats]), 'LVA DraftKings players must match SportsDataIO/ESPN LV team codes for component projections');
+};
+
+const testGolfSportsDataIoV2ProjectionParity = async (): Promise<void> => {
+  const requested: string[] = [];
+  const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.endsWith('/golf/v2/json/Tournaments/2026')) return new Response(JSON.stringify([{ TournamentID: 900, Name: 'Covered Open', StartDate: '2026-09-10', EndDate: '2026-09-13', Covered: true, Rounds: [{ Number: 1, Day: '2026-09-10' }, { Number: 2, Day: '2026-09-11' }, { Number: 3, Day: '2026-09-12' }, { Number: 4, Day: '2026-09-13' }] }]), { status: 200 });
+    if (url.endsWith('/golf/v2/json/PlayerTournamentProjectionStats/900')) return new Response(JSON.stringify([{ PlayerID: 801, Name: 'Golfer One', Birdies: 20, Eagles: 1, Bogeys: 8, Pars: 43 }]), { status: 200 });
+    if (url.endsWith('/golf/v2/json/Players')) return new Response(JSON.stringify([{ PlayerID: 801, Name: 'Golfer One', DraftKingsPlayerID: 9901, DraftKingsName: 'Golfer One' }]), { status: 200 });
+    return new Response('{}', { status: 404 });
+  } });
+  const refresh = await client.getGolfTournamentProjectionInputs({ ...baseSlate, sport: 'GOLF', league: 'GOLF', event: { ...baseSlate.event, name: 'PGA TOUR Showdown Round 1', eventDate: '2026-09-10T06:15:00.000Z' }, contest: { ...baseSlate.contest, name: 'PGA TOUR Showdown $750 Short Game (Round 1)' } });
+  assert.ok(requested.some((url) => url.endsWith('/golf/v2/json/Tournaments/2026')));
+  assert.ok(requested.some((url) => url.endsWith('/golf/v2/json/PlayerTournamentProjectionStats/900')));
+  assert.equal(refresh.rows[0].birdiesPerRound, 5);
+  assert.equal(refresh.rows[0].roundsRemaining, 4);
+  assert.equal(refresh.rows[0].DraftKingsPlayerID, 9901, 'SportsDataIO player metadata must carry the DraftKings ID crosswalk');
+  const showdownRefresh = await client.getGolfTournamentProjectionInputs({ ...baseSlate, sport: 'GOLF', league: 'GOLF', event: { ...baseSlate.event, name: 'PGA TOUR Showdown Round 1', eventDate: '2026-09-10T06:15:00.000Z' }, contest: { ...baseSlate.contest, format: 'SHOWDOWN', name: 'PGA TOUR Showdown $750 Short Game (Round 1)' } });
+  assert.equal(showdownRefresh.rows[0].roundsRemaining, 1, 'Golf Showdown projects one round, not the full event');
 };
 
 const testNflFullStageReadinessParity = (): void => {
@@ -353,6 +459,16 @@ const testConflictingEvidenceNetsRealSignalParity = (): void => {
   const projected = projectSlate(providerFppgSlate, adjustment, now);
   const p1 = projected.players.find((player) => player.playerId === 'p1')!;
   assert.ok(p1.projectedOutcomes.medianP50 < 40, 'conflicting evidence that nets DOWN must reduce the projection, not leave it unchanged as if there were no evidence at all');
+};
+
+const testAvailabilityNarrativeNegationParity = (): void => {
+  const phrases = ['Player is not out.', 'Player is not ruled out.', 'Player is out of a slump.'];
+  for (const [index, finding] of phrases.entries()) {
+    const result = adjustSlate(baseSlate, { ...research, findings: [{ id: `neg-${index}`, subjectId: 'p1', bucket: 'AVAILABILITY', finding, sourceName: 'Test', sourceTier: 1, confidence: 'HIGH' }] }, now);
+    assert.notEqual(result.adjustments.find((item) => item.playerId === 'p1')?.netOpportunityDirection, 'MATERIALLY_DOWN', `${finding} must not be interpreted as an explicit unavailability report`);
+  }
+  const confirmed = adjustSlate(baseSlate, { ...research, findings: [{ id: 'explicit-out', subjectId: 'p1', bucket: 'AVAILABILITY', finding: 'Player was ruled out for tonight.', sourceName: 'Test', sourceTier: 1, confidence: 'HIGH' }] }, now);
+  assert.equal(confirmed.adjustments.find((item) => item.playerId === 'p1')?.netOpportunityDirection, 'MATERIALLY_DOWN');
 };
 
 const testDirectAvailabilityConflictResolutionParity = (): void => {
@@ -509,6 +625,7 @@ const testGolfClassicSlateBuildParity = (): void => {
   // once scoring worked. Shapes below mirror the real API responses fetched live for this test.
   const now2 = new Date('2026-08-27T13:00:00.000Z');
   const bundle = {
+    contestIdentityVerified: true,
     contest: { data: { contestDetail: { name: 'Test Golf Classic', gameTypeId: 6, draftGroupId: 152473, maximumEntries: 17, entries: 10, payoutSummary: [] } }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
     draftGroup: { data: { draftGroup: { eventId: 'evt-1', name: 'TOUR Championship', startTime: '2026-08-27T15:00:00.000Z' } }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
     gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, lineupTemplate: Array.from({ length: 6 }, (_, index) => ({ rosterSlot: { id: 118, name: 'G' }, order: index + 1 })) }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
@@ -518,17 +635,85 @@ const testGolfClassicSlateBuildParity = (): void => {
     ] }, url: 'x', retrievedAt: now2.toISOString(), status: 200 },
   };
   const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'request-1', sport: 'GOLF', league: 'GOLF', contestId: '194164749', contestFormat: 'CLASSIC', userEntryCount: 1, contestName: 'Test Golf Classic', contestLockTime: '2026-08-27T15:00:00.000Z' });
-  assert.equal(slate.validation.status, 'VALID', `Golf Classic slate build must not fail validation: ${JSON.stringify(slate.validation.errors)}`);
-  assert.ok(Object.keys(slate.scoringRules).length > 0, 'GOLF must have a real, non-empty scoring-rules fallback');
+  assert.equal(slate.validation.status, 'BLOCKED', 'Golf Classic slate with no contest scoring values must remain blocked');
+  assert.ok(slate.validation.errors.some((error) => /Authoritative DraftKings scoring values are unavailable/.test(error)));
+  assert.ok(Object.keys(slate.scoringRules).length > 0, 'GOLF may retain the standard scoring profile for diagnostics while blocking entry generation');
   assert.ok(['birdies', 'eagles', 'bogeys', 'pars'].every((key) => key in slate.scoringRules), 'GOLF scoring rules must use the component keys the projection model reads (birdies/eagles/bogeys/pars)');
   assert.equal(slate.playerPool.length, 2);
   assert.equal(slate.playerPool[0].eligibility.G, true, 'every Golf Classic player must be eligible for the G slot, not left with an empty eligibility object');
   assert.equal(slate.rosterRules.slots.G?.count, 6);
 };
 
+const testWnbaOfficialScoringProfileParity = (): void => {
+  const receivedAt = '2026-09-30T12:00:00.000Z';
+  const bundle = {
+    contestIdentityVerified: true,
+    contest: { data: { contest: { contestId: 'wnba-showdown-1', name: 'WNBA Showdown', maximumEntries: 1000 } }, url: 'lobby', retrievedAt: receivedAt, status: 200 },
+    draftGroup: { data: { draftGroup: { eventId: 'wnba-event-1', name: 'ATL at NYL', startTime: '2026-09-30T23:00:00.000Z' } }, url: 'group', retrievedAt: receivedAt, status: 200 },
+    gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, lineupTemplate: Array.from({ length: 6 }, (_, index) => ({ rosterSlot: { id: index === 0 ? 1 : 2, name: index === 0 ? 'CPT' : 'UTIL', ...(index === 0 ? { positionTip: '1.5x' } : {}) }, order: index + 1 })) }, url: 'rules', retrievedAt: receivedAt, status: 200 },
+    draftables: { data: { draftables: Array.from({ length: 6 }, (_, index) => ({ draftableId: index + 1, playerId: index + 1, displayName: `WNBA Player ${index + 1}`, team: index % 2 ? 'NYL' : 'ATL', salary: 7000 })) }, url: 'draftables', retrievedAt: receivedAt, status: 200 },
+  };
+  const context = { tenantId: 'tenant', userId: 'user', requestId: 'wnba-scoring-profile', sport: 'WNBA' as const, league: 'WNBA' as const, contestId: 'wnba-showdown-1', contestFormat: 'SHOWDOWN' as const, userEntryCount: 1, contestLockTime: '2026-09-30T23:00:00.000Z' };
+  const slate = buildValidatedSlateFromBundle(bundle, context);
+  assert.ok(!slate.validation.errors.some((error) => /scoring values are unavailable|scoring rules are incomplete/.test(error)), 'the reviewed official WNBA fantasy scoring profile fills omitted endpoint values');
+  assert.deepEqual(Object.fromEntries(Object.entries(slate.scoringRules).map(([key, value]) => [key, value.value])), { points: 1, threePointersMade: 0.5, rebounds: 1.25, assists: 1.5, steals: 2, blocks: 2, turnovers: -0.5, doubleDouble: 1.5, tripleDouble: 3 });
+  assert.equal(slate.sourceManifest.find((source) => source.source === 'DRAFTKINGS_OFFICIAL_WNBA_FANTASY_SCORING')?.ruleVersion, 'DK_WNBA_FANTASY_SCORING_2026-09-30.1');
+  const conflictingBundle = { ...bundle, gameTypeRules: { ...bundle.gameTypeRules, data: { salaryCap: { maxValue: 50000 }, scoringRules: { points: 0.9 }, lineupTemplate: bundle.gameTypeRules.data.lineupTemplate } } };
+  const conflictingSlate = buildValidatedSlateFromBundle(conflictingBundle, context);
+  assert.ok(conflictingSlate.validation.errors.some((error) => /conflict with the reviewed official scoring profile: points/.test(error)), 'a provider score that disagrees with the official profile must remain blocked');
+};
+
+const testGolfShowdownUsesAuthoritativeNoCaptainTemplate = (): void => {
+  const receivedAt = '2026-09-30T12:00:00.000Z';
+  const template = Array.from({ length: 6 }, (_, index) => ({ rosterSlot: { id: 118, name: 'G' }, order: index + 1 }));
+  const bundle = {
+    contestIdentityVerified: true,
+    contest: { data: { contest: { contestId: 'golf-showdown-1', name: 'Golf Showdown - Round 1', maximumEntries: 1000 } }, url: 'lobby', retrievedAt: receivedAt, status: 200 },
+    draftGroup: { data: { draftGroup: { eventId: 'golf-event-1', name: 'PGA Tournament Round 1', startTime: '2026-10-01T11:00:00.000Z' } }, url: 'group', retrievedAt: receivedAt, status: 200 },
+    gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, lineupTemplate: template }, url: 'rules', retrievedAt: receivedAt, status: 200 },
+    draftables: { data: { draftables: Array.from({ length: 6 }, (_, index) => ({ draftableId: index + 1, playerId: index + 1, displayName: `Golfer ${index + 1}`, position: 'G', rosterSlotId: 118, salary: 8000 + index * 100 })) }, url: 'draftables', retrievedAt: receivedAt, status: 200 },
+  };
+  const context = { tenantId: 'tenant', userId: 'user', requestId: 'golf-showdown-no-captain', sport: 'GOLF' as const, league: 'GOLF' as const, contestId: 'golf-showdown-1', contestFormat: 'SHOWDOWN' as const, userEntryCount: 1, contestName: 'Golf Showdown - Round 1', contestLockTime: '2026-10-01T11:00:00.000Z' };
+  const slate = buildValidatedSlateFromBundle(bundle, context);
+  assert.equal(slate.rosterRules.rosterSize, 6);
+  assert.equal(Object.keys(slate.rosterRules.slots).join(','), 'G', 'Golf Showdown must follow DraftKings’ six-golfer template, not the generic CPT+5 UTIL template');
+  assert.equal(slate.rosterRules.slots.G.count, 6);
+  assert.equal(slate.playerPool[0].eligibility.G, true);
+  assert.equal(slate.playerPool[0].captainSalary, undefined, 'golfers in the no-Captain round format must not receive an invented Captain salary');
+  assert.equal(slate.scoringRules.birdies.value, 5.75);
+  assert.equal(slate.scoringRules.eagles.value, 11);
+  assert.equal(slate.scoringRules.bogeys.value, -1.8);
+  assert.equal(slate.scoringRules.pars.value, 1.5);
+  assert.ok(!slate.validation.errors.some((error) => /Captain\/MVP|Captain salary|scoring values are unavailable|scoring rules are incomplete/.test(error)));
+  assert.equal(slate.sourceManifest.find((source) => source.source === 'DRAFTKINGS_OFFICIAL_GOLF_SHOWDOWN_SCORING')?.ruleVersion, 'DK_GOLF_SHOWDOWN_SCORING_2026-09-30.1');
+  assert.equal(slate.sourceManifest.find((source) => source.source === 'DRAFTKINGS_OFFICIAL_GOLF_SHOWDOWN_SCORING')?.sourceUrl, 'https://pick6.draftkings.com/pick6-rules-and-scoring-pga-single-round');
+  const conflictBundle = { ...bundle, gameTypeRules: { ...bundle.gameTypeRules, data: { salaryCap: { maxValue: 50000 }, scoringRules: { birdies: 3 }, lineupTemplate: template } } };
+  const conflict = buildValidatedSlateFromBundle(conflictBundle, context);
+  assert.ok(conflict.validation.errors.some((error) => /conflict with the reviewed official scoring profile: birdies/.test(error)), 'conflicting game-type scoring must stay blocked');
+  const matchPlayBundle = { ...bundle, draftGroup: { ...bundle.draftGroup, data: { draftGroup: { eventId: 'golf-match', name: 'Presidents Cup Match Play', startTime: '2026-10-01T11:00:00.000Z' } } } };
+  const matchPlay = buildValidatedSlateFromBundle(matchPlayBundle, context);
+  assert.ok(matchPlay.validation.errors.some((error) => /scoring values are unavailable/.test(error)), 'the round stroke-play profile must not be used for explicitly identified match-play events');
+};
+
+const testGolfDraftKingsTournamentLobbyParity = (): void => {
+  const payload = { Contests: [{ s: 13, n: 'DP World Tour $40K Sand Trap', sd: '/Date(1789020900000)/', id: 195250026, dg: 153278, gameType: 'Classic', mec: 56, cs: 1 }], DraftGroups: [{ DraftGroupId: 153278, Sport: 'GOLF', SportId: 13, GameCount: 1, ContestStartTimeSuffix: ' (DP World Tour)' }] };
+  const contests = extractContestSummaries(payload, 'GOLF');
+  const groups = extractGameGroups(payload, 'GOLF', 'CLASSIC');
+  assert.equal(contests.length, 1, 'Golf tournament contests must match DraftKings numeric sport id when the name has no Golf/PGA token');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].matchupLabel, 'DP World Tour');
+  assert.equal(contests[0].contestSize, undefined, 'unknown lobby abbreviations and per-user entry limits must not be interpreted as total field capacity');
+  assert.equal(contests[0].maxEntriesAllowed, 56, 'mec represents the per-user max-entry limit');
+  const field = extractContestSummaries({ contests: [{ id: 'field-1', sport: 'GOLF', name: 'Golf field', gameType: 'Classic', startTime: '2026-09-30T17:00:00.000Z', entries: 32, maximumEntries: 1000, maximumEntriesPerUser: 3 }] }, 'GOLF')[0];
+  assert.equal(field.currentEntries, 32, 'lobby entries must remain the live filled-entry count');
+  assert.equal(field.contestSize, 1000, 'only the maximum total entries value supplies field capacity');
+  assert.equal(field.maxEntriesAllowed, 3, 'per-user entry limit must stay distinct from contest capacity');
+};
+
 const testClassicPositionEligibilityFallbackParity = (): void => {
   const receivedAt = now.toISOString();
   const bundle = {
+    contestIdentityVerified: true,
     contest: { data: { contestDetail: { name: 'Test MLB Classic', maximumEntries: 10, payoutSummary: [] } }, url: 'x', retrievedAt: receivedAt, status: 200 },
     draftGroup: { data: { draftGroup: { eventId: 'evt-mlb', name: 'MLB slate', startTime: receivedAt } }, url: 'x', retrievedAt: receivedAt, status: 200 },
     gameTypeRules: { data: { salaryCap: { maxValue: 50000 }, slots: { P: { count: 1 }, C: { count: 1 }, OF: { count: 1 } } }, url: 'x', retrievedAt: receivedAt, status: 200 },
@@ -552,11 +737,12 @@ const testSeasonBasedInputsParity = (): void => {
   assert.ok(Math.abs(hitterInputs!.hitRate - hitterRow.Hits / hitterRow.PlateAppearances) < 1e-9, 'rate stats must stay computed against season totals, not divided by games again');
 
   const pitcher = { ...baseSlate.playerPool[0], playerName: 'Patrick Corbin', team: 'TOR', position: 'SP' };
-  const pitcherRow = { Name: 'Patrick Corbin', Team: 'TOR', Games: 19, InningsPitchedDecimal: 79.8, PitchingStrikeouts: 62.8, PitchingWalks: 24.9, PitchingHits: 97.7, PitchingEarnedRuns: 48.9, Strikeouts: 0, Walks: 0 };
+  const pitcherRow = { Name: 'Patrick Corbin', Team: 'TOR', Games: 19, GamesStarted: 14, PitchingWins: 5, InningsPitchedDecimal: 79.8, PitchingStrikeouts: 62.8, PitchingWalks: 24.9, PitchingHits: 97.7, PitchingEarnedRuns: 48.9, Strikeouts: 0, Walks: 0 };
   const pitcherInputs = deriveSeasonBasedInputs('MLB', pitcher, [pitcherRow]);
   assert.ok(pitcherInputs);
   assert.ok(pitcherInputs!.strikeoutsPerInning > 0, 'a pitcher\'s real strikeouts live under PitchingStrikeouts, not the bare (batting) Strikeouts field, which is 0 for this row');
   assert.ok(pitcherInputs!.expectedInnings > 3 && pitcherInputs!.expectedInnings < 8, 'a real starter\'s per-game innings should land in a realistic range');
+  assert.equal(pitcherInputs!.winProbability, 5 / 14, 'pitcher win probability is only emitted when wins and starts are both available');
 
   const wr = { ...baseSlate.playerPool[0], playerName: 'K.Allen', team: 'JAX', position: 'WR' };
   const wrRow = { Name: 'K.Allen', Team: 'JAX', Played: 17, ReceivingTargets: 138.2, Receptions: 91.8, ReceivingYards: 880.3, ReceivingTouchdowns: 5.1, RushingAttempts: 0, RushingYards: 0, RushingTouchdowns: 0 };
@@ -567,6 +753,12 @@ const testSeasonBasedInputsParity = (): void => {
 
   assert.equal(deriveSeasonBasedInputs('MLB', hitter, [{ ...hitterRow, Games: 0 }]), undefined, 'zero games played must be treated as no data, never a divide-by-zero guess');
   assert.equal(deriveSeasonBasedInputs('MLB', hitter, []), undefined, 'no matching row must be treated as no data');
+  const priorHitterRow = { ...hitterRow, Games: 130, Hits: 100, Singles: 60, Doubles: 20, HomeRuns: 20 };
+  const weighted = deriveWeightedSeasonInputs('MLB', hitter, [hitterRow], [priorHitterRow], 0.7);
+  assert.ok(weighted.inputs);
+  assert.equal(weighted.usedPrior, true);
+  assert.ok(Math.abs(weighted.inputs!.expectedPA - hitterInputs!.expectedPA) < 1e-9, 'volume remains the weighted per-game rate when both seasons have the same schedule volume');
+  assert.ok(weighted.inputs!.hitRate < hitterInputs!.hitRate, 'current and prior quantitative rates must be blended explicitly rather than silently selecting one season');
 };
 
 const testSeasonParamForParity = (): void => {
@@ -707,6 +899,10 @@ const testContractParity = (): void => {
   assertSlate(baseSlate);
   assertProjection(projection);
   assert.throws(() => assertSlate({ ...baseSlate, scoringRules: {} }), /scoring rules are required/);
+  assert.throws(() => assertSlate({ ...baseSlate, rosterRules: { ...baseSlate.rosterRules, rosterSize: baseSlate.rosterRules.rosterSize + 1 } }), /rosterSize must equal/);
+  assert.throws(() => assertSlate({ ...baseSlate, validation: { status: 'BLOCKED', warnings: [], errors: ['unverified rules'] } }), /unverified rules/);
+  const screenshotSlate = buildValidatedSlateFromScreenshot({ salaryCap: 50000, scoringRules: { points: 1 }, players: [{ playerName: 'Player One', salary: 10000, eligibility: ['CPT', 'UTIL'] }], lockTime: now.toISOString() }, { tenantId: 'tenant', userId: 'user', requestId: 'screenshot-request', assetId: 'screenshot-asset', sport: 'WNBA', league: 'WNBA', contestFormat: 'SHOWDOWN', userEntryCount: 1, receivedAt: now.toISOString() });
+  assert.equal(screenshotSlate.validation.status, 'BLOCKED', 'image extraction must not establish authoritative contest rules or identity');
 };
 
 const testGate1ScoringGoldenFixtures = (): void => {
@@ -741,7 +937,8 @@ const testGate1RoleRedistributionAndMinutesParity = (): void => {
   const minutesSlate = { ...slate, playerPool: slate.playerPool.slice(0, 2).map((player) => ({ ...player, projectionInputs: { expectedMinutes: 30, pointsPerMinute: 1, reboundsPerMinute: 0, assistsPerMinute: 0, stealsPerMinute: 0, blocksPerMinute: 0, turnoversPerMinute: 0, threesPerMinute: 0 } })), scoringRules: basketballRules };
   const minutesAdjustment = adjustSlate(minutesSlate, { ...research, findings: minutesSlate.playerPool.map((player) => ({ id: `availability-${player.playerId}`, subjectId: player.playerId, bucket: 'AVAILABILITY' as const, finding: 'Active.', sourceName: 'test', sourceTier: 1 as const, confidence: 'HIGH' as const })) }, now);
   const projected = projectSlate(minutesSlate, minutesAdjustment, now);
-  assert.equal(projected.players.reduce((sum, player) => sum + player.adjustedOpportunity.expectedMinutes, 0), 240, 'NBA team minutes must reconcile to 240');
+  assert.equal(projected.players.reduce((sum, player) => sum + player.adjustedOpportunity.expectedMinutes, 0), 60, 'an incomplete two-player pool must not be inflated to a full 240-minute team');
+  assert.ok(projected.gaps.some((gap) => /incomplete rotation coverage/.test(gap.reason)));
 };
 
 const testGate1ResearchAttributionParity = (): void => {
@@ -782,12 +979,33 @@ const testProviderIdentityFallbackParity = (): void => {
   assert.equal(findRow(player, [{ FirstName: 'Jose', LastName: 'Ramirez', Games: 10 }, { FirstName: 'Jose', LastName: 'Ramirez', Games: 20 }]), undefined, 'ambiguous name-only matches must remain unresolved');
 };
 
+const testProviderIdentityConflictIsRejectedParity = (): void => {
+  const slate: ValidatedSlate = { ...baseSlate, sport: 'CFB', league: 'CFB', playerPool: [{ ...baseSlate.playerPool[0], playerId: 'dk-1', playerName: 'Correct Player', team: 'CLEM', identity: { draftKingsId: 'dk-1', sportsDataIoId: 'provider-wrong', confidence: 'HIGH', matchedBy: 'PROVIDER_ID' } }] };
+  const result = applyAvailabilitySnapshot(slate, { source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, rosterComplete: false, records: [{ playerName: 'Different Player', team: 'CLEM', providerPlayerId: 'provider-wrong', status: 'ACTIVE', confirmed: false }] });
+  assert.equal(result.playerPool[0].availability?.mappedBy, 'UNMAPPED');
+  assert.equal(result.playerPool[0].availability?.status, 'UNKNOWN');
+  assert.ok(result.playerPool[0].availability?.note?.includes('contradicted'));
+};
+
+const testNonMlbHistoricalTeamMismatchIsNotAcceptedParity = (): void => {
+  const player = { ...baseSlate.playerPool[0], playerName: 'Transfer Player', team: 'CLEM' };
+  const row = findRow(player, [{ PlayerID: 'p-1', Name: 'Transfer Player', Team: 'LSU', Games: 10 }]);
+  assert.equal(row, undefined, 'NFL/CFB historical stats must not match a player from another team by name alone');
+};
+
+const testStaleAvailabilitySnapshotIsRejectedParity = (): void => {
+  const slate = { ...baseSlate, contest: { ...baseSlate.contest, lockTime: '2026-08-23T23:00:00.000Z' } };
+  const result = applyAvailabilitySnapshot(slate, { source: 'ESPN', retrievedAt: '2026-08-22T00:00:00.000Z', confirmedLineupAvailable: false, records: [{ playerName: 'One', team: 'A', status: 'ACTIVE', confirmed: true }] }, now);
+  assert.equal(result.playerPool[0].availability, undefined, 'stale availability must not be applied to the slate');
+  assert.ok(result.validation.warnings.some((warning) => warning.includes('rejected')));
+};
+
 const testGate2SportDistributionAndFallbackParity = (): void => {
   const basketballRules = { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } };
   const slate = { ...baseSlate, sport: 'NBA' as const, league: 'NBA' as const, scoringRules: basketballRules, playerPool: baseSlate.playerPool.slice(0, 2).map((player) => ({ ...player, team: 'A', opponent: 'B', projectionInputs: { expectedMinutes: 30, pointsPerMinute: 1, reboundsPerMinute: 0.2, assistsPerMinute: 0.1, stealsPerMinute: 0.05, blocksPerMinute: 0.02, turnoversPerMinute: 0.1, threesPerMinute: 0.1 } })) };
   const projected = projectSlate(slate, adjustSlate(slate, research, now), now);
   assert.equal(projected.players[0].modelPath, 'SPORT_STRUCTURED');
-  assert.equal(projected.players[0].distribution?.family, 'SPORT_CORRELATED');
+  assert.equal(projected.players[0].distribution?.family, 'SPORT_EVENT');
   assert.equal(projected.players[0].distribution?.correlationGroup, projected.players[1].distribution?.correlationGroup, 'same verified team/opponent context must share a game correlation group');
   assert.deepEqual(projected.players[0].simulatedFantasyPointSamples, projectSlate(slate, adjustSlate(slate, research, now), now).players[0].simulatedFantasyPointSamples, 'sport distributions must be deterministic for reproducible backtests');
 
@@ -811,12 +1029,25 @@ const testGate2CalibrationMetricsParity = (): void => {
 const testGate3ContestSimulationParity = (): void => {
   const slate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestSize: 10, paidPositions: 5, entryFee: 10, payoutStructure: [{ rank: 1, payout: 100 }, { rank: 2, payout: 50 }] } };
   const candidates = optimizeLineups({ validatedSlate: slate, projectionPackage: projection }, { maxCandidates: 20 }, now);
-  assert.equal(candidates.contestSimulation?.status, 'COMPLETE');
-  assert.equal(candidates.contestSimulation?.fieldModel, 'HEURISTIC_CONSTRUCTION_PROXY');
-  assert.equal(candidates.contestSimulation?.payoutModel, 'CONTEST_PAYOUT_STRUCTURE');
-  assert.ok(candidates.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
-  assert.ok(candidates.candidates.every((candidate) => (candidate.winFrequency ?? -1) >= 0 && (candidate.winFrequency ?? 2) <= 1));
-  assert.ok(candidates.candidates.every((candidate) => (candidate.expectedDuplicates ?? -1) >= 0));
+  assert.equal(candidates.contestSimulation?.status, 'UNAVAILABLE');
+  assert.equal(candidates.contestSimulation?.fieldModel, 'UNAVAILABLE');
+  assert.match(candidates.contestSimulation?.reason ?? '', /verified provider projected ownership/i);
+  assert.ok(candidates.candidates.every((candidate) => candidate.contestMetricProvenance === undefined || candidate.contestMetricProvenance === 'UNAVAILABLE'));
+  const ownershipSlate: ValidatedSlate = { ...slate, playerPool: slate.playerPool.map((player) => ({ ...player, projectedOwnership: { classic: 0.2, source: 'PROVIDER' as const } })) };
+  const ownershipCandidates = optimizeLineups({ validatedSlate: ownershipSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
+  assert.equal(ownershipCandidates.contestSimulation?.status, 'COMPLETE');
+  assert.equal(ownershipCandidates.contestSimulation?.fieldModel, 'PROJECTED_OWNERSHIP');
+  assert.ok(ownershipCandidates.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
+
+  const oneCandidate: LineupCandidate = { id: 'same-lineup', playerIds: ['p1', 'p2'], rosterSlots: { G: 'p1', F: 'p2' }, salaryUsed: 9000, salaryRemaining: 1000, expectedPoints: 20, median: 20, ceiling: 20, simulatedScoreSamples: [20], correlationScore: 0, medianRank: 1, ceilingRank: 1, candidateTypes: [], gameScriptCluster: 'TEST', strategicSimilarity: 0, riskFlags: [] };
+  const tieSlate: ValidatedSlate = { ...ownershipSlate, contest: { ...ownershipSlate.contest, contestSize: 3, paidPositions: 2, entryFee: 10, payoutStructure: [{ rank: 1, payout: 100 }, { rank: 2, payout: 50 }] } };
+  const tied = simulateContestField(tieSlate, [oneCandidate], { simulations: 1, seed: 'same' });
+  assert.equal(tied.metrics.get('same-lineup')?.expectedPayout, 50, 'three identical entries tied first split the combined rank 1 and rank 2 prizes equally');
+  assert.equal(tied.metrics.get('same-lineup')?.winFrequency, 1, 'a tie for first counts as a shared first-place outcome');
+  const incompletePayouts = simulateContestField({ ...tieSlate, contest: { ...tieSlate.contest, payoutStructure: [{ rank: 1, payout: 100 }] } }, [oneCandidate], { simulations: 1 });
+  assert.equal(incompletePayouts.payoutModel, 'UNAVAILABLE', 'missing paid-rank payout tiers must not produce ROI');
+  const oversized = simulateContestField({ ...ownershipSlate, contest: { ...ownershipSlate.contest, contestSize: 10_001 } }, [oneCandidate]);
+  assert.equal(oversized.status, 'UNAVAILABLE', 'large fields are not silently truncated or represented as a full contest');
 };
 
 const testResearchDateNormalizationParity = (): void => {
@@ -833,6 +1064,44 @@ const testResearchProviderFailureDoesNotBlockParity = async (): Promise<void> =>
   }).run({ validatedSlate: baseSlate });
   assert.equal(result.providerResults?.find((provider) => provider.provider === 'failing-provider')?.status, 'FAILED');
   assert.equal(result.providerResults?.find((provider) => provider.provider === 'healthy-provider')?.status, 'SUCCEEDED');
+  assert.ok(Date.parse(result.freshThrough) <= Date.parse(result.generatedAt), 'undated research evidence must trigger immediate refresh rather than receive an arbitrary three-hour freshness promise');
+  assert.ok(result.findings.every((finding) => Boolean(finding.expiresAt)), 'every research finding must carry an explicit expiry timestamp');
+};
+
+const testResearchIgnoresGapsForPlayersRemovedFromActiveSlate = async (): Promise<void> => {
+  const activePlayer = { ...baseSlate.playerPool[0], availability: { status: 'ACTIVE' as const, confirmed: false, source: 'ESPN', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' as const } };
+  const slate = { ...baseSlate, playerPool: [activePlayer] };
+  const result = await new ResearchAgent({ providers: [{ name: 'stub', tier: 3, fetch: async () => [] }], now: () => now }).run({
+    validatedSlate: slate,
+    researchGaps: [{ question: 'Is removed player available?', importance: 'CRITICAL', reason: 'No direct availability evidence.', subjectId: 'removed-player-id' }],
+  });
+  assert.equal(result.unknowns?.some((unknown) => unknown.subjectId === 'removed-player-id'), false, 'availability gaps for explicitly removed players must not poison the active slate research stage');
+  assert.equal(result.status, 'COMPLETE');
+};
+
+const testOptionalResearchSynthesisOutageDoesNotDowngradeDirectEvidence = async (): Promise<void> => {
+  const playerPool = baseSlate.playerPool.map((player) => ({ ...player, availability: { status: 'ACTIVE' as const, confirmed: false, source: 'ESPN', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' as const } }));
+  const result = await new ResearchAgent({
+    providers: [{ name: 'stub', tier: 3, fetch: async () => [] }],
+    synthesizer: { synthesize: async () => { throw new Error('OpenAI quota exhausted'); } },
+    now: () => now,
+  }).run({ validatedSlate: { ...baseSlate, playerPool } });
+  assert.equal(result.providerResults?.find((provider) => provider.provider === 'Research Synthesis')?.status, 'FAILED');
+  assert.equal(result.status, 'COMPLETE', 'a failed optional synthesis service must remain diagnostic when direct availability evidence is complete');
+};
+
+const testExpiredContextRemainsDisclosedWithoutDowngradingFreshRequiredEvidence = async (): Promise<void> => {
+  const playerPool = baseSlate.playerPool.map((player) => ({ ...player, availability: { status: 'ACTIVE' as const, confirmed: false, source: 'ESPN', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' as const } }));
+  const result = await new ResearchAgent({
+    providers: [{ name: 'stub', tier: 3, fetch: async () => [] }],
+    synthesizer: { synthesize: async () => [{ id: 'stale-context', subjectId: baseSlate.event.eventId, subjectType: 'EVENT', bucket: 'NEWS_EXTERNAL_CONTEXT', sourceName: 'test', sourceTier: 3, finding: 'Old WNBA background context.', publishedAt: '2026-08-20T12:00:00.000Z', sourcePurpose: 'External context.', confidence: 'MEDIUM' }] },
+    now: () => now,
+  }).run({ validatedSlate: { ...baseSlate, playerPool } });
+  const freshnessWarning = result.unknowns?.find((unknown) => unknown.question.includes('expired or undated'));
+  assert.equal(result.status, 'COMPLETE', 'expired optional context must not downgrade a run with fresh direct availability and no blocking research gaps');
+  assert.equal(freshnessWarning?.importance, 'MEDIUM', `stale context must remain disclosed as a non-blocking warning; got ${JSON.stringify({ unknowns: result.unknowns, findings: result.findings.map(({ bucket, sourceName, publishedAt, expiresAt }) => ({ bucket, sourceName, publishedAt, expiresAt })) })}`);
+  assert.ok(result.findings.some((finding) => Date.parse(finding.expiresAt ?? '') <= Date.parse(result.generatedAt)), 'expired findings remain in the audit record');
+  assert.ok(Date.parse(result.freshThrough) > Date.parse(result.generatedAt) - 1000, 'freshThrough must track current findings rather than old retained audit facts');
 };
 
 const testCollegeFootballSupportParity = (): void => {
@@ -853,6 +1122,48 @@ const testCollegeFootballSupportParity = (): void => {
   assert.equal(projected.players[0].modelPath, 'SPORT_STRUCTURED');
   assert.equal(projected.players[0].distribution?.correlationGroup?.startsWith('CFB:'), true);
   assert.ok(projected.players[0].componentProjection.passingYardBonus !== undefined, 'CFB projection must model the 300-yard passing bonus');
+  assert.ok(projected.players[0].componentProjection.passingYardBonus! <= 1, 'bonus component is an event probability, with points applied by the scoring rule');
+  assert.ok(projected.players[1].componentProjection.receivingYardBonus! <= 1, 'receiving bonus component must not contain its point value');
+};
+
+const testGolfFinishModelReadinessParity = (): void => {
+  const golf: ValidatedSlate = { ...baseSlate, sport: 'GOLF', league: 'GOLF', scoringRules: { birdies: { value: 3 }, eagles: { value: 8 }, bogeys: { value: -0.5 }, pars: { value: 0.5 } }, playerPool: [{ ...baseSlate.playerPool[0], projectionInputs: { birdiesPerRound: 4, eaglesPerRound: 0.2, bogeysPerRound: 2, parsPerRound: 12, roundsRemaining: 4 } }] };
+  const result = projectSlate(golf, adjustSlate(golf, research, now), now);
+  assert.equal(result.status, 'BLOCKED', 'Golf must not present a confident Classic projection while finish-position inputs are absent');
+  assert.ok(result.gaps.some((gap) => gap.reason.includes('projectedFinishPosition')));
+  const showdown: ValidatedSlate = { ...golf, contest: { ...golf.contest, format: 'SHOWDOWN' }, playerPool: [{ ...golf.playerPool[0], projectionInputs: { birdiesPerRound: 4, eaglesPerRound: 0.2, bogeysPerRound: 2, parsPerRound: 12, roundsRemaining: 1 } }] };
+  const showdownResult = projectSlate(showdown, adjustSlate(showdown, research, now), now);
+  assert.notEqual(showdownResult.status, 'BLOCKED', 'Golf Showdown must not require Classic finish-position data');
+  assert.equal(showdownResult.players[0].modelPath, 'SPORT_STRUCTURED');
+  assert.equal(showdownResult.players[0].componentProjection.birdies, 4, 'Showdown projection must score one round');
+};
+
+const testResolvedFactFreshnessAndConflicts = (): void => {
+  const observation = (id: string, value: unknown, status: 'CONFIRMED' | 'PROJECTED' = 'CONFIRMED', changes: Partial<import('../src/lib/engine/contracts').SourceObservation> = {}): import('../src/lib/engine/contracts').SourceObservation => ({ id, tenantId: 'tenant-1', slateId: 'slate-1', sport: 'NFL', eventId: 'game-1', source: 'test', subject: { kind: 'PLAYER', id: 'player-1' }, factType: 'availability', value, observedAt: now.toISOString(), retrievedAt: now.toISOString(), status, identityConfidence: 'EXACT', rawPayloadRef: id, ...changes });
+  const sameTimeConflict = resolveObservations([observation('o1', 'ACTIVE'), observation('o2', 'OUT')], now)[0];
+  assert.equal(sameTimeConflict.state, 'CONFLICT', 'equally fresh, exact, confirmed contradictions remain unresolved');
+  const confirmedWins = resolveObservations([observation('o3', 'OUT', 'CONFIRMED'), observation('o4', 'ACTIVE', 'PROJECTED', { observedAt: new Date(now.getTime() + 60_000).toISOString() })], now)[0];
+  assert.equal(confirmedWins.state, 'ACCEPTED');
+  assert.equal(confirmedWins.value, 'OUT', 'a projected report cannot override a confirmed status assertion');
+  const expired = resolveObservations([observation('o5', 'ACTIVE', 'CONFIRMED', { expiresAt: new Date(now.getTime() - 1).toISOString() })], now)[0];
+  assert.equal(expired.state, 'EXPIRED');
+  const ambiguous = resolveObservations([observation('o6', 'ACTIVE', 'CONFIRMED', { identityConfidence: 'LOW' })], now)[0];
+  assert.equal(ambiguous.state, 'UNKNOWN');
+  const structuredConflict = resolveObservations([
+    observation('o7', { status: 'ACTIVE', roleStatus: 'EXPECTED_STARTER' }, 'CONFIRMED', { factType: 'availability.status', source: 'provider-a' }),
+    observation('o8', { status: 'OUT', roleStatus: 'UNKNOWN' }, 'CONFIRMED', { factType: 'availability.status', source: 'provider-b' }),
+  ], now)[0];
+  assert.equal(structuredConflict.state, 'CONFLICT', 'same-key structured status assertions must conflict instead of becoming unrelated prose facts');
+};
+
+const testWnbaMinutesBudgetParity = (): void => {
+  const wnba: ValidatedSlate = { ...baseSlate, sport: 'WNBA', league: 'WNBA', scoringRules: { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } }, playerPool: [
+    { ...baseSlate.playerPool[0], playerId: 'wnba-a', team: 'ATL', projectionInputs: { expectedMinutes: 40, pointsPerMinute: 1, reboundsPerMinute: 0.2, assistsPerMinute: 0.2, stealsPerMinute: 0.05, blocksPerMinute: 0.03, turnoversPerMinute: 0.1, threesPerMinute: 0.1 } },
+    { ...baseSlate.playerPool[1], playerId: 'wnba-b', team: 'ATL', projectionInputs: { expectedMinutes: 40, pointsPerMinute: 1, reboundsPerMinute: 0.2, assistsPerMinute: 0.2, stealsPerMinute: 0.05, blocksPerMinute: 0.03, turnoversPerMinute: 0.1, threesPerMinute: 0.1 } },
+  ] };
+  const result = projectSlate(wnba, adjustSlate(wnba, research, now), now);
+  assert.equal(result.players.reduce((sum, player) => sum + player.adjustedOpportunity.expectedMinutes, 0), 80, 'an incomplete two-player rotation must not be inflated to 200 regulation minutes');
+  assert.ok(result.gaps.some((gap) => /incomplete rotation coverage/.test(gap.reason)));
 };
 
 const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
@@ -862,17 +1173,104 @@ const testProjectionQuantilesUseOneOrderedDistribution = (): void => {
   assert.ok(projected.projectedOutcomes.medianP50 <= projected.projectedOutcomes.ceilingP90);
 };
 
+const testInstructionPackControls = (): void => {
+  const liveSlate = { event: baseSlate.event, runMode: 'LIVE' as const, liveGameState: { eventId: 'event-1', observedAt: now.toISOString(), source: 'verified-live-feed', status: 'LIVE' as const, period: 2, clockSeconds: 420 } };
+  const live = buildLiveStatePackage(liveSlate);
+  assert.equal(live?.status, 'LIVE');
+  assert.ok(live?.warnings.some((warning) => /fantasy points are extrapolated/i.test(warning)));
+  assert.throws(() => buildLiveStatePackage({ ...liveSlate, liveGameState: { ...liveSlate.liveGameState, eventId: 'different-event' } }), /does not match/);
+
+  const rows = [{ predicted: 0.8, actual: 10, p20: 6, p50: 9, p90: 14, cashPredicted: 0.8, cashed: true, selected: true, alternative: 12, payout: 20, entryFee: 10 }, { predicted: 0.2, actual: 4, p20: 3, p50: 6, p90: 10, cashPredicted: 0.2, cashed: false, selected: true, alternative: 5, payout: 0, entryFee: 10 }];
+  assert.ok(Math.abs((brierScore(rows) ?? 0) - 0.04) < 1e-9);
+  assert.ok((logLoss(rows) ?? 0) > 0);
+  assert.equal(quantileCoverage(rows, 'p20'), 0);
+  assert.equal(quantileCoverage(rows, 'p50'), 0.5);
+  assert.equal(quantileCoverage(rows, 'p90'), 1);
+  assert.equal(rankCorrelation(rows), 1);
+  assert.ok(Math.abs((rankCorrelation([{ predicted: 1, actual: 3 }, { predicted: 1, actual: 2 }, { predicted: 2, actual: 1 }]) ?? 0) + Math.sqrt(3) / 2) < 1e-9, 'rank correlation must use average ranks for ties');
+  assert.ok(Math.abs((regret(rows) ?? 0) - 1.5) < 1e-9);
+  assert.equal(roi(rows), 0);
+  assert.equal(evaluateLessonPromotion({ status: 'ACCUMULATING', sampleCount: 3, independentContests: 2, hasMetrics: true, humanApproved: false }).promotable, false);
+  assert.equal(evaluateLessonPromotion({ status: 'ACCUMULATING', sampleCount: 3, independentContests: 2, hasMetrics: true, humanApproved: true }).status, 'VALIDATED');
+};
+
+const testDraftKingsSlateBundleUsesDraftGroupWithoutContestDetail = async (): Promise<void> => {
+  const requested: string[] = [];
+  const client = new DraftKingsClient({ sportCodes: { MLB: 'MLB' }, fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    const data = url.includes('/lobby/getcontests')
+      ? { Contests: [{ n: 'MLB contest', id: '196209753', dg: '154194', gameType: 'Classic', sd: '2026-09-30T18:00:00.000Z', s: 8 }] }
+      : url.includes('/draftgroups/v1/154194') && !url.includes('/draftgroups/154194/draftables')
+      ? { draftGroup: { draftGroupId: 154194, gameTypeId: 2, minStartTime: '2026-09-30T18:00:00.000Z' } }
+      : url.includes('/gametypes/2/rules') ? { gameTypeId: 2, salaryCap: 50000 }
+        : url.includes('/draftgroups/154194/draftables') ? { draftables: [] }
+          : { error: 'unexpected endpoint' };
+    return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const bundle = await client.getSlateBundleForDraftGroup({ contestId: '196209753', draftGroupId: '154194', sport: 'MLB', format: 'CLASSIC', contestName: 'MLB contest' });
+  assert.equal(bundle.reference.gameTypeId, '2', 'numeric gameTypeId from the group must be normalized');
+  assert.equal(bundle.contestIdentityVerified, true, 'the exact lobby contest/group binding must be verified');
+  assert.equal((bundle.contest.data as { contest: { name: string } }).contest.name, 'MLB contest', 'authoritative lobby values override client labels');
+  assert.ok(requested.some((url) => url.includes('/draftgroups/154194/draftables')), 'the direct player-pool endpoint must be called');
+  assert.ok(requested.every((url) => !url.includes('/contests/v1/contests/')), 'slate loading must not depend on blocked contest details');
+  await assert.rejects(() => client.getSlateBundleForDraftGroup({ contestId: '196209753', draftGroupId: 'different-group', sport: 'MLB', format: 'CLASSIC' }), /not bound to requested draft group/);
+};
+
+const testDraftKingsDefaultWnbaSportCode = async (): Promise<void> => {
+  let requestedUrl = '';
+  const client = new DraftKingsClient({ sportCodes: {}, fetcher: async (input) => {
+    requestedUrl = String(input);
+    return new Response(JSON.stringify({ Contests: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  } });
+  const contests = await client.listContests('WNBA');
+  assert.equal(contests.length, 0);
+  assert.equal(new URL(requestedUrl).searchParams.get('sport'), 'WNBA', 'WNBA generation must use the same built-in lobby code as slate discovery when deployment overrides are absent');
+};
+
+const testDraftKingsCsvFallbackOnApi403 = async (): Promise<void> => {
+  const requested: string[] = [];
+  const csv = 'Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame,Status,Starting\nSP,Chris Sale (44333220),Chris Sale,44333220,P,10000,PHI@ATL 09/30/2026 02:00PM ET,ATL,,,\n';
+  const client = new DraftKingsClient({ sportCodes: { MLB: 'MLB' }, fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.startsWith('https://api.draftkings.com/') || url.includes('/lobby/getcontests')) return new Response('denied', { status: 403 });
+    return new Response(csv, { status: 200, headers: { 'content-type': 'text/csv' } });
+  } });
+  const bundle = await client.getSlateBundleForDraftGroup({ contestId: 'contest-1', draftGroupId: 'group-1', sport: 'MLB', format: 'CLASSIC', contestName: 'MLB CSV fallback' });
+  const slate = buildValidatedSlateFromBundle(bundle, { tenantId: 'tenant-1', userId: 'user-1', requestId: 'csv-fallback', sport: 'MLB', league: 'MLB', contestId: 'contest-1', contestFormat: 'CLASSIC', userEntryCount: 1, contestLockTime: '2026-09-30T18:00:00Z' });
+  assert.equal(slate.playerPool.length, 1, 'CSV fallback may still provide discovery and salary data');
+  assert.equal(slate.playerPool[0].playerName, 'Chris Sale');
+  assert.equal(slate.playerPool[0].salary, 10_000);
+  assert.equal(slate.playerPool[0].team, 'ATL');
+  assert.equal(slate.playerPool[0].opponent, 'PHI');
+  assert.equal(slate.playerPool[0].providerFppg, undefined, 'a blank CSV FPPG is missing data, not a zero-point projection');
+  assert.equal(slate.salaryCap, 50_000);
+  assert.equal(slate.validation.status, 'BLOCKED', 'CSV discovery cannot verify contest rules and must not be entry-ready');
+  assert.ok(slate.validation.errors.some((error) => /Authoritative DraftKings contest rules were unavailable/.test(error)));
+  assert.ok(requested.some((url) => url.includes('/lineup/getavailableplayerscsv?draftGroupId=group-1')));
+  assert.ok(requested.every((url) => !url.includes('/contests/v1/contests/')));
+};
+
 (async () => {
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity();
   await testNflIdentityAndEventResolutionParity();
+  await testWnbaAvailabilityUsesNumericEventTeamIds();
   await testCfbSportsDataIoRosterAndInjuryParity();
+  await testNflSportsDataIoUsesVerifiedScheduleAndInjuryRoutes();
+  await testWnbaSeasonStatsUsesScoresFeedParity();
+  await testGolfSportsDataIoV2ProjectionParity();
+  await testDraftKingsSlateBundleUsesDraftGroupWithoutContestDetail();
+  await testDraftKingsDefaultWnbaSportCode();
+  await testDraftKingsCsvFallbackOnApi403();
   testNflProjectionReadinessParity();
   testNflFullStageReadinessParity();
   await testAvailabilitySeedsResearchParity();
   await testResearchProviderFailureDoesNotBlockParity();
+  await testResearchIgnoresGapsForPlayersRemovedFromActiveSlate();
+  await testOptionalResearchSynthesisOutageDoesNotDowngradeDirectEvidence();
+  await testExpiredContextRemainsDisclosedWithoutDowngradingFreshRequiredEvidence();
   testProjectionQuantilesUseOneOrderedDistribution();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
-  await testMarketContextImpliedTotalParity();
+  await testMarketContextImpliedTotalParity(); testInstructionPackControls();
   console.log('engine parity tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

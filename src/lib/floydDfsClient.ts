@@ -71,7 +71,7 @@ export async function listFloydContests(params: { sport: string; contestType: st
     const sport = String(contest.sport ?? group?.sport ?? params.sport);
     const format = String(contest.format ?? group?.format ?? params.contestType);
     return {
-      contest_id: String(contest.id), external_contest_id: String(contest.id), sport: sport.toLowerCase(), contest_type: format.toLowerCase(), contest_date: lockTime.slice(0, 10), slate_name: String(contest.name ?? group?.name ?? 'DraftKings contest'), game_ids: matchup ? [String(matchup.away ?? ''), String(matchup.home ?? '')].filter(Boolean) : [], salary_cap: 50000, field_size: positiveInteger(contest.contestSize), status: 'draftkings_live', start_time: lockTime, salary_count: 0, data: { source: 'floyd-dfs', matchup, slate_id: group?.id, sport_logo_url: sportLogoUrl(sport) }, updated_at: String(body.retrievedAt ?? new Date().toISOString()),
+      contest_id: String(contest.id), external_contest_id: String(contest.id), sport: sport.toLowerCase(), contest_type: format.toLowerCase(), contest_date: lockTime.slice(0, 10), slate_name: String(contest.name ?? group?.name ?? 'DraftKings contest'), game_ids: matchup ? [String(matchup.away ?? ''), String(matchup.home ?? '')].filter(Boolean) : [], salary_cap: 50000, field_size: positiveInteger(contest.contestSize), status: 'draftkings_live', start_time: lockTime, salary_count: 0, data: { source: 'floyd-dfs', matchup, slate_id: contest.draftGroupId ?? group?.id, sport_logo_url: sportLogoUrl(sport) }, updated_at: String(body.retrievedAt ?? new Date().toISOString()),
     } satisfies DraftKingsSlate;
   });
 }
@@ -114,8 +114,8 @@ function enrichedSlateFrom(stagesValue: unknown, fallbackSlate: unknown): unknow
   return isJsonRecord(slateStage) && slateStage.output_payload ? slateStage.output_payload : fallbackSlate;
 }
 
-export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; minSalaryUsed?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
-  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, minSalaryUsed: input.minSalaryUsed }) });
+export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; minSalaryUsed?: number; maxSharedPlayers?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
+  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, draftGroupId: String(input.contest.data.slate_id ?? ''), contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, minSalaryUsed: input.minSalaryUsed, maxSharedPlayers: input.maxSharedPlayers }) });
   const run = queued.run as JsonRecord;
   // /process is a single request that runs the entire pipeline server-side and only resolves once
   // every stage is done -- awaiting it before polling meant onProgress never fired until the run
@@ -142,9 +142,16 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
       if (processError) throw processError;
       const completedPayload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
       const enrichedSlate = enrichedSlateFrom(completedPayload.stages, queued.slate);
-      const lineups = mapLineups(completedPayload.lineups, enrichedSlate, completedPayload.stages);
-      if (current.state !== 'ready' && current.state !== 'complete') throw new Error(String((current.error as JsonRecord | undefined)?.message ?? 'Floyd DFS blocked lineup generation.'));
-      return { manifest: mapManifest(input, enrichedSlate, completedPayload), lineups, data_warnings: [] };
+      const lineups = mapLineups(completedPayload.lineups, enrichedSlate, completedPayload.stages, completedPayload.trust);
+      if (current.state !== 'ready' && current.state !== 'complete') {
+        const runError = (current.error as JsonRecord | undefined)?.message;
+        const stageErrors = Array.isArray(completedPayload.stages)
+          ? completedPayload.stages.flatMap((stage) => isJsonRecord(stage) ? (Array.isArray(stage.errors) ? stage.errors.map(String) : []) : [])
+          : [];
+        throw new Error(String(runError ?? (stageErrors.length ? stageErrors.join(' ') : 'Floyd DFS blocked lineup generation.')));
+      }
+      const manifest = mapManifest(input, enrichedSlate, completedPayload);
+      return { manifest, lineups, data_warnings: manifest.data_warnings };
     }
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
   }
@@ -171,11 +178,22 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   const validationCaution = input.sport.toLowerCase() === 'golf'
     ? 'Golf is fallback-only: its sport-specific quantitative projection model is not populated.'
     : 'Tournament ranking and cash-line probabilities remain disclosed heuristics or simulations; they are not guaranteed contest outcomes.';
-  const allCautions = [...cautions, validationCaution];
-  return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : 'caution', engine_state: 'MODEL_VALIDATION_REQUIRED', eligible_for_lineups: !blocked, eligible_for_tournament: false, hard_blocks: blocked ? cautions : [], cautions: allCautions }, model_version: 'floyd-dfs', data_warnings: allCautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
+  const trustRow = asRecord(payload.trust);
+  const trust = asRecord(trustRow?.trust_payload);
+  const trustCaution = trust ? `Run trust is ${String(trust.dataTier ?? 'UNKNOWN')} data / ${String(trust.modelTier ?? 'UNKNOWN')} model; search is ${String(trust.searchCompleteness ?? 'UNKNOWN')}.` : 'Run trust metadata is unavailable.';
+  const trustGaps = Array.isArray(trust?.missingRequiredFacts) ? trust.missingRequiredFacts.slice(0, 3).map(String) : [];
+  const releaseReasons = Array.isArray(trust?.releaseReasons) ? trust.releaseReasons.map(String) : [];
+  const entryEligible = trust?.entryEligible === true;
+  const slateValidation = asRecord(slate?.validation);
+  const slateWarnings = Array.isArray(slateValidation?.warnings) ? slateValidation.warnings.map(String) : [];
+  const allCautions = [...cautions, ...slateWarnings, validationCaution, trustCaution, ...releaseReasons, ...trustGaps.map((gap) => `Unresolved data gate: ${gap}`)];
+  return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : 'caution', engine_state: 'MODEL_VALIDATION_REQUIRED', eligible_for_lineups: !blocked && entryEligible, eligible_for_tournament: false, hard_blocks: blocked ? cautions : [], cautions: allCautions }, model_version: 'floyd-dfs', data_warnings: allCautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
 }
 
-function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown): Lineup[] {
+function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, trustValue: unknown): Lineup[] {
+  const trustRow = asRecord(trustValue);
+  const trust = asRecord(trustRow?.trust_payload);
+  const entryEligible = trust?.entryEligible === true;
   const slate = slateValue as JsonRecord | undefined;
   const projections = new Map<string, number>();
   const stages = Array.isArray(stagesValue) ? stagesValue as JsonRecord[] : [];
@@ -209,10 +227,10 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown): 
     // disclosed simulated estimate. The persisted row's own cash_line_probability column is only
     // ever the calibrated value (null pre-approval), kept as a fallback for older persisted rows.
     const cashLineProbability = typeof payload.cashLineProbability === 'number' ? Number(payload.cashLineProbability) : typeof (row as JsonRecord).cash_line_probability === 'number' ? Number((row as JsonRecord).cash_line_probability) : undefined;
-    const cashLineConfidence = payload.cashLineConfidence === 'CALIBRATED' || payload.cashLineConfidence === 'SIMULATED_ESTIMATE' ? payload.cashLineConfidence : cashLineProbability !== undefined ? 'CALIBRATED' : 'UNAVAILABLE';
+    const cashLineConfidence = payload.cashLineConfidence === 'CALIBRATED' || payload.cashLineConfidence === 'SIMULATED_ESTIMATE' ? payload.cashLineConfidence : typeof (row as JsonRecord).cash_line_probability === 'number' ? 'CALIBRATED' : 'UNAVAILABLE';
     const contestKind = asRecord(slate?.contest)?.contestKind;
     const contest_kind = contestKind === 'CASH' || contestKind === 'GPP' ? contestKind : 'UNKNOWN';
-    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? 0, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], ceiling_score: Number(payload.ceiling ?? 0), narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
+    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, status: typeof (row as JsonRecord).status === 'string' ? String((row as JsonRecord).status) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), expected_points: typeof payload.expectedPoints === 'number' ? payload.expectedPoints : undefined, salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? null, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], ceiling_score: Number(payload.ceiling ?? 0), narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: !entryEligible ? 'PROVISIONAL' : payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
   });
 }
 

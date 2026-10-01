@@ -9,7 +9,7 @@ export const DEFAULT_RSS_FEEDS: readonly RssFeedConfig[] = [
   { url: 'https://www.espn.com/espn/rss/nba/news', name: 'ESPN NBA', tier: 2, tags: ['NBA'] },
   { url: 'https://www.espn.com/espn/rss/wnba/news', name: 'ESPN WNBA', tier: 2, tags: ['WNBA'] },
   { url: 'https://www.espn.com/espn/rss/mlb/news', name: 'ESPN MLB', tier: 2, tags: ['MLB'] },
-  { url: 'https://www.espn.com/espn/rss/golf/news', name: 'ESPN Golf', tier: 2, tags: ['GOLF'] },
+  { url: 'https://www.espn.com/espn/rss/golf/news', name: 'ESPN Golf RSS', tier: 2, tags: ['GOLF'] },
   { url: 'https://www.espn.com/espn/rss/ncf/news', name: 'ESPN College Football', tier: 2, tags: ['CFB'] },
   { url: 'https://www.ncaa.com/news/football/fbs/rss.xml', name: 'NCAA FBS Football', tier: 1, tags: ['CFB'] },
   { url: 'https://sports.yahoo.com/college-football/rss/', name: 'Yahoo College Football', tier: 2, tags: ['CFB'] },
