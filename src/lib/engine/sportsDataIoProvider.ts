@@ -3,6 +3,8 @@ import { normalizeProviderName, normalizeTeamCode, parseAvailabilityRecords, typ
 
 export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; }
 export interface GolfProjectionRefresh { rows: Record<string, unknown>[]; tournamentName?: string; warning?: string; }
+export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
+export interface WnbaRecentPlayerMinutes { playerId?: string; name?: string; team?: string; minutes: number[]; }
 
 export class SportsDataIoClient {
   private readonly fetcher: typeof fetch;
@@ -193,6 +195,52 @@ export class SportsDataIoClient {
     const payload = await this.get<unknown>(sport, feed, 'PlayerSeasonStats', seasonParam, signal);
     if (!Array.isArray(payload)) return [];
     return payload.flatMap((value) => (value && typeof value === 'object' ? [value as Record<string, unknown>] : []));
+  }
+  /** Final MLB player game stats. The result is useful for role/workload diagnostics;
+   * it must be filtered to games before the slate lock before historical projection use. */
+  async getMlbPlayerGameLogs(season: string, playerId: string | number, count = 10, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
+    return rowsFromPayload(await this.get<unknown>('MLB', 'stats', 'PlayerGameStatsBySeason', `${encodeURIComponent(season)}/${encodeURIComponent(String(playerId))}/${Math.max(1, Math.min(25, Math.floor(count)))}`, signal)).flatMap((value) => { const row = asRecord(value); return row ? [row] : []; });
+  }
+  /** SportsDataIO MLB schedule rows include forecast temperature, wind and conditions. */
+  async getMlbGameWeather(date: string, signal?: AbortSignal): Promise<SportsDataIoGameWeather[]> {
+    const rows = rowsFromPayload(await this.get<unknown>('MLB', 'scores', 'GamesByDate', date, signal));
+    return rows.flatMap((value) => {
+      const row = asRecord(value); if (!row) return [];
+      return [{ gameId: readIdentifier(row, ['GameID', 'GameId']), homeTeam: readString(row, ['HomeTeam']), awayTeam: readString(row, ['AwayTeam']), temperatureLow: readNumber(row, ['ForecastTempLow']), temperatureHigh: readNumber(row, ['ForecastTempHigh']), windSpeed: readNumber(row, ['ForecastWindSpeed']), windDirection: readString(row, ['ForecastWindDirection']), description: readString(row, ['ForecastDescription']) }];
+    });
+  }
+  /** WNBA exposes final player minutes nested in its final box-score feed. This bounded
+   * lookback uses only dates strictly before the slate date, preventing same-day/future leakage. */
+  async getWnbaRecentMinutes(eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> {
+    const target = new Date(`${eventDate.slice(0, 10)}T00:00:00.000Z`);
+    if (!Number.isFinite(target.getTime())) return [];
+    const dates = Array.from({ length: Math.max(1, Math.min(45, Math.floor(lookbackDays))) }, (_, index) => {
+      const day = new Date(target); day.setUTCDate(day.getUTCDate() - index - 1); return day.toISOString().slice(0, 10);
+    });
+    const byPlayer = new Map<string, { playerId?: string; name?: string; team?: string; minutes: number[] }>();
+    // Keep request concurrency modest; the provider's published interval is one minute
+    // for box scores, and empty dates are expected during the off-season.
+    for (let index = 0; index < dates.length; index += 4) {
+      const batches = await Promise.all(dates.slice(index, index + 4).map(async (date) => {
+        try { return rowsFromPayload(await this.get<unknown>('WNBA', 'scores', 'BoxScores', date, signal)); }
+        catch { return []; }
+      }));
+      for (const boxScores of batches) for (const boxValue of boxScores) {
+        const box = asRecord(boxValue); if (!box) continue;
+        for (const playerValue of rowsFromPayload(box.PlayerGames)) {
+          const player = asRecord(playerValue); if (!player) continue;
+          const id = readIdentifier(player, ['PlayerID', 'PlayerId', 'playerId']);
+          const name = readString(player, ['Name', 'PlayerName', 'name']);
+          const team = readString(player, ['Team', 'team', 'TeamAbbreviation']);
+          const minutes = readNumber(player, ['Minutes', 'minutes']);
+          if ((!id && !name) || minutes === undefined || minutes < 0) continue;
+          const key = id ?? `${normalizeProviderName(name ?? '')}|${normalizeTeamCode(team ?? '')}`;
+          const row = byPlayer.get(key) ?? { playerId: id, name, team, minutes: [] };
+          row.minutes.push(minutes); byPlayer.set(key, row);
+        }
+      }
+    }
+    return [...byPlayer.values()].map((row) => ({ ...(row.playerId ? { playerId: row.playerId } : {}), ...(row.name ? { name: row.name } : {}), ...(row.team ? { team: row.team } : {}), minutes: row.minutes.slice(0, 10) }));
   }
   async getGolfTournamentProjectionInputs(slate: ValidatedSlate, signal?: AbortSignal): Promise<GolfProjectionRefresh> {
     const season = String(new Date(slate.event.eventDate).getUTCFullYear());

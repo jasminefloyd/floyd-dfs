@@ -23,6 +23,9 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED' };
 }
 
+// Default to the deterministic tournament composite. The ownership-weighted opponent-field
+// simulation remains diagnostic until an out-of-sample release gate passes, so its win/ROI
+// frequencies do not choose lineups.
 // Default to the tournament-composite rank (already balances median/ceiling/frequency) — sorting
 // by raw median alone is exactly the "always pick highest median" anti-pattern the design docs
 // warn against, and it's the wrong objective for a tournament regardless of contest size. The
@@ -34,23 +37,19 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
 function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined): LineupCandidate[] {
   if (slate.contest.objective === 'MAX_FPTS') return [...candidates].sort((a, b) => (b.expectedPoints ?? b.median) - (a.expectedPoints ?? a.median));
   if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (cashRankScore(b, slate, calibration) - cashRankScore(a, slate, calibration)));
-  const hasContestMetrics = candidates.some((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION');
-  if (hasContestMetrics) return [...candidates].sort((a, b) => contestRankScore(b) - contestRankScore(a));
+  // `JOINT_FIELD_SIMULATION` is an unvalidated diagnostic, not an objective input.
   return [...candidates].sort((a, b) => heuristicTournamentRankOf(a) - heuristicTournamentRankOf(b));
 }
 
-function contestRankScore(candidate: LineupCandidate): number { return candidate.roi ?? candidate.topOnePercentFrequency ?? candidate.winFrequency ?? Number.NEGATIVE_INFINITY; }
-function cashRankScore(candidate: LineupCandidate, slate: ValidatedSlate, calibration: CashLineCalibration | undefined): number { return candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION' && slate.contest.paidPositions !== undefined ? (candidate.cashFrequency ?? -1) : (resolveCashLineProbability(candidate, calibration).probability ?? -1); }
+function cashRankScore(candidate: LineupCandidate, _slate: ValidatedSlate, calibration: CashLineCalibration | undefined): number { return resolveCashLineProbability(candidate, calibration).probability ?? (candidate.expectedPoints ?? candidate.median); }
 
 export interface CashLineResolution { probability?: number; confidence: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE'; }
-// Prefers real, historically-calibrated probability once enough resolved contest results exist
-// (CashLineCalibration.status === 'APPROVED'); falls back to the simulated/manual raw estimate
-// computed in Optimize; UNAVAILABLE when neither exists (e.g. an UNKNOWN-kind contest) rather
-// than fabricating a number.
+// Probability is exposed only after an explicit calibration release. Raw optimizer simulations
+// remain diagnostic and cannot be represented as cash-line or win probabilities.
 export function resolveCashLineProbability(candidate: LineupCandidate, calibration: CashLineCalibration | undefined): CashLineResolution {
   if (candidate.cashLineProbability === undefined) return { confidence: 'UNAVAILABLE' };
   if (calibration) { const calibrated = calibratedCashLineProbability(candidate.cashLineProbability, calibration); if (calibrated !== null) return { probability: calibrated, confidence: 'CALIBRATED' }; }
-  return { probability: candidate.cashLineProbability, confidence: 'SIMULATED_ESTIMATE' };
+  return { confidence: 'UNAVAILABLE' };
 }
 
 // Cash games are probability-based, not a diversity problem: repeating the single best
@@ -130,6 +129,7 @@ function explain(candidate: LineupCandidate, bulletNumber: number, input: Select
     candidate.candidateTypes.length ? `Profile: ${candidate.candidateTypes.join(', ').replaceAll('_', ' ').toLowerCase()}.` : "Selected from the optimizer's ranked candidate set.",
     candidate.riskFlags.length ? `Watch: ${candidate.riskFlags[0]}` : 'No projection risk flag was attached to this candidate.',
   ];
+  if (input.validatedSlate.contest.objective !== 'MAX_FPTS' && candidate.contestMetricProvenance !== 'JOINT_FIELD_SIMULATION') rationale.push('Contest rank is not modeled: this order uses a lineup construction heuristic, not a validated cash, win, or payout probability.');
   // Cash-game shortfall is disclosed, never hidden -- the portfolio is still filled from the best
   // available candidate (choosePortfolio never blocks), this only makes clear when that candidate
   // didn't actually clear the 85% target rather than silently presenting it as if it had.

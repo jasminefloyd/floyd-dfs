@@ -20,7 +20,7 @@ export function deriveSeasonBasedInputs(sport: Sport, player: SlatePlayer, seaso
   const gamesPlayed = gamesPlayedFromRow(row);
   if (gamesPlayed <= 0) return undefined;
   if (sport === 'NBA' || sport === 'WNBA') return deriveBasketballInputs(row, gamesPlayed);
-  if (sport === 'MLB') return isPitcher(player) ? derivePitcherInputs(row, gamesPlayed) : deriveHitterInputs(row, gamesPlayed);
+  if (sport === 'MLB') return isPitcher(player) ? derivePitcherInputs(row, player, gamesPlayed) : deriveHitterInputs(row, gamesPlayed);
   if (sport === 'NFL' || sport === 'CFB') return isQuarterback(player) ? deriveQuarterbackInputs(row, gamesPlayed) : deriveSkillPlayerInputs(row, gamesPlayed);
   return undefined;
 }
@@ -118,16 +118,22 @@ function deriveHitterInputs(row: Record<string, unknown>, gamesPlayed = 1): Reco
 // `PitchingStrikeouts: 62.8` (their real total)). Pitching* is checked first since it's the
 // verified-correct field for season rows; the bare names stay as a fallback for any other row
 // shape this function might still receive.
-function derivePitcherInputs(row: Record<string, unknown>, gamesPlayed = 1): Record<string, number> | undefined {
+function derivePitcherInputs(row: Record<string, unknown>, player: SlatePlayer, gamesPlayed = 1): Record<string, number> | undefined {
   const innings = readNumber(row, ['InningsPitchedDecimal', 'InningsPitched', 'inningsPitched']);
   if (!innings || innings <= 0 || gamesPlayed <= 0) return undefined;
   const strikeouts = readNumber(row, ['PitchingStrikeouts', 'Strikeouts', 'strikeouts']) ?? 0;
   const walks = readNumber(row, ['PitchingWalks', 'Walks', 'BaseOnBallsAllowed', 'walks']) ?? 0;
   const hitsAllowed = readNumber(row, ['PitchingHits', 'HitsAllowed', 'hitsAllowed']) ?? 0;
   const earnedRuns = readNumber(row, ['PitchingEarnedRuns', 'EarnedRuns', 'earnedRuns']) ?? 0;
-  const result = { expectedInnings: innings / gamesPlayed, strikeoutsPerInning: strikeouts / innings, walksPerInning: walks / innings, hitsAllowedPerInning: hitsAllowed / innings, earnedRunsPerInning: earnedRuns / innings };
   const wins = readNumber(row, ['PitchingWins', 'Wins', 'wins']);
   const starts = readNumber(row, ['PitchingGamesStarted', 'GamesStarted', 'gamesStarted']);
+  const startingRole = /^SP$/i.test(player.position ?? '') || player.availability?.status === 'CONFIRMED_STARTER' || player.availability?.roleStatus === 'CONFIRMED_STARTER';
+  // Total season innings must be divided by starts for a starting pitcher, not all games
+  // appeared. Relievers use appearances because their workload is per bullpen appearance.
+  // If starter role is known but starts are absent, leave the workload unresolved.
+  if (startingRole && (!starts || starts <= 0)) return undefined;
+  const expectedInnings = innings / (startingRole ? starts! : gamesPlayed);
+  const result = { expectedInnings, strikeoutsPerInning: strikeouts / innings, walksPerInning: walks / innings, hitsAllowedPerInning: hitsAllowed / innings, earnedRunsPerInning: earnedRuns / innings };
   return wins !== undefined && starts !== undefined && starts > 0 ? { ...result, winProbability: Math.max(0, Math.min(1, wins / starts)) } : result;
 }
 

@@ -15,6 +15,8 @@ export interface CashLinePredictionInput {
 export interface CashLineObservation {
   rawProbability: number;
   beatCashLine: boolean;
+  /** A DraftKings contest is the independent validation unit, not a lineup entry. */
+  contestId?: string;
 }
 
 export interface CashLineCalibrationBin {
@@ -32,6 +34,8 @@ export interface CashLineCalibration {
   targetProbability: number;
   sampleCount: number;
   approvedSampleCount: number;
+  independentContestCount: number;
+  releaseGate: 'DISABLED_PENDING_OUT_OF_SAMPLE_VALIDATION';
   bins: CashLineCalibrationBin[];
 }
 
@@ -43,7 +47,17 @@ export function rawCashLineProbability(input: CashLinePredictionInput): number |
 }
 
 export function buildCashLineCalibration(observations: CashLineObservation[]): CashLineCalibration {
-  const valid = observations.filter((item) => Number.isFinite(item.rawProbability));
+  const validRows = observations.filter((item) => Number.isFinite(item.rawProbability) && Boolean(item.contestId?.trim()));
+  // Keep one predeclared representative per contest: repeated lineups from one field
+  // cannot inflate apparent calibration sample size. Deterministic selection avoids
+  // making duplicate import order affect the result.
+  const byContest = new Map<string, CashLineObservation>();
+  for (const item of validRows) {
+    const key = item.contestId!.trim();
+    const prior = byContest.get(key);
+    if (!prior || item.rawProbability < prior.rawProbability) byContest.set(key, item);
+  }
+  const valid = [...byContest.values()];
   const bins = Array.from({ length: 20 }, (_, index) => {
     const lower = index / 20;
     const upper = (index + 1) / 20;
@@ -53,8 +67,10 @@ export function buildCashLineCalibration(observations: CashLineObservation[]): C
   }).filter((bin) => bin.samples > 0);
   const approved = bins.filter((bin) => bin.lower >= CASH_LINE_TARGET_PROBABILITY && bin.samples >= CASH_LINE_MIN_BUCKET_SAMPLES && bin.lowerConfidenceBound >= CASH_LINE_TARGET_PROBABILITY);
   const approvedSampleCount = approved.reduce((sum, bin) => sum + bin.samples, 0);
-  const status: CashLineCalibrationStatus = valid.length < CASH_LINE_MIN_APPROVAL_SAMPLES ? 'PENDING_DATA' : approvedSampleCount >= CASH_LINE_MIN_APPROVAL_SAMPLES ? 'APPROVED' : 'UNCALIBRATED';
-  return { status, version: CASH_LINE_CALIBRATION_VERSION, targetProbability: CASH_LINE_TARGET_PROBABILITY, sampleCount: valid.length, approvedSampleCount, bins };
+  // Win probabilities stay off until a chronological holdout plus same-slate baseline
+  // evaluation has been reviewed and explicitly released. This function is descriptive only.
+  const status: CashLineCalibrationStatus = valid.length < CASH_LINE_MIN_APPROVAL_SAMPLES ? 'PENDING_DATA' : 'UNCALIBRATED';
+  return { status, version: CASH_LINE_CALIBRATION_VERSION, targetProbability: CASH_LINE_TARGET_PROBABILITY, sampleCount: observations.filter((item) => Number.isFinite(item.rawProbability)).length, approvedSampleCount, independentContestCount: valid.length, releaseGate: 'DISABLED_PENDING_OUT_OF_SAMPLE_VALIDATION', bins };
 }
 
 export function calibratedCashLineProbability(rawProbability: number | null, calibration: CashLineCalibration): number | null {

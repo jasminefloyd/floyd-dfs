@@ -36,6 +36,7 @@ export function projectionReadiness(sport: Sport, player: SlatePlayer, format?: 
 export function projectSlate(slate: ValidatedSlate, adjustmentPackage: AdjustmentPackage, now = new Date()): ProjectionPackage {
   let players: ProjectionPackage['players'] = [];
   const gaps: ProjectionPackage['gaps'] = [];
+  const prepared: Array<{ player: SlatePlayer; values: Record<string, number>; adjustment?: PlayerAdjustment }> = [];
   let golfFallbackCount = 0;
   const golfMissing: Array<{ name: string; fields: string[] }> = [];
   for (const player of slate.playerPool) {
@@ -47,7 +48,17 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
       continue;
     }
     const adjustment = adjustmentPackage.adjustments.find((item) => item.playerId === player.playerId);
-    if (values && !missing.length) players.push(projectPlayer(slate, player, values, adjustment));
+    if (values && !missing.length) {
+      let adjustedValues = applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
+      // A DraftKings RP slot is not a starter workload. Keep the model from turning a bad
+      // provider role match into a five-inning projection; long-relief scenarios still need
+      // explicit, event-specific evidence before they can exceed this conservative bound.
+      if (slate.sport === 'MLB' && /^RP$/i.test(String(player.position ?? '')) && adjustedValues.expectedInnings > 3) {
+        gaps.push({ reason: `${player.playerName} is listed as a reliever but had ${adjustedValues.expectedInnings.toFixed(1)} expected innings; workload was capped at 3.0 pending verified long-relief/opening-role evidence.` });
+        adjustedValues = { ...adjustedValues, expectedInnings: 3 };
+      }
+      prepared.push({ player, values: adjustedValues, adjustment });
+    }
     else { players.push(projectFromProviderFppg(player, adjustment)); if (slate.sport === 'GOLF') golfFallbackCount += 1; }
   }
   if (golfMissing.length) {
@@ -55,7 +66,8 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
     const fields = [...new Set(golfMissing.flatMap(({ fields: missing }) => missing))].join(', ');
     gaps.push({ reason: `Golf structured projections are missing required inputs for ${golfMissing.length}/${slate.playerPool.length} golfers (${fields}). Sample: ${sample}${golfMissing.length > 5 ? ', and others' : ''}. Check SportsDataIO Golf tournament lookup, feed access, and golfer-name matching; lineups remain blocked until inputs are available.` });
   }
-  if (slate.sport === 'NBA' || slate.sport === 'WNBA') players = reconcileBasketballMinutes(players, slate, gaps);
+  if (slate.sport === 'NBA' || slate.sport === 'WNBA') reconcileBasketballOpportunities(prepared, slate, gaps);
+  players.push(...prepared.map(({ player, values, adjustment }) => projectPlayer(slate, player, values, adjustment, true)));
   if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); any candidate uses DraftKings provider FPPG only and is provisional. Verified skill, course, weather, and finish/cut inputs are still required before entry.` });
   // DK's own FPPG is enough to produce a clearly provisional research candidate, but not an
   // entry-ready Golf projection. Keep the candidate path available for QA and comparison while
@@ -86,11 +98,11 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const ceiling = quantile(orderedSamples, 0.9);
   const confidence = adjustment?.roleCertainty ?? 'LOW';
   const uncertaintyFactors = ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`, ...(rawMedian < 0 ? ['Provider FPPG was negative and was clamped to zero for the non-negative fallback distribution.'] : [])];
-  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
+  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
 }
 
-function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
-  const adjusted = applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
+function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined, valuesArePrepared = false): ProjectionPackage['players'][number] {
+  const adjusted = valuesArePrepared ? values : applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
   const components = componentsFor(slate, player, adjusted);
   const rules = scoringRulesFor(slate, components);
   const analyticalMedian = scoreComponents(components, rules);
@@ -104,11 +116,12 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const median = quantile(orderedSamples, 0.5);
   const ceiling = quantile(orderedSamples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
+  if (slate.sport === 'WNBA' && (adjusted.expectedMinutes ?? 99) <= 8 && player.availability?.roleStatus !== 'CONFIRMED_STARTER') uncertaintyFactors.push('Low-minute WNBA role is not confirmed; the current event distribution does not model a separate DNP probability.');
   if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
   const opportunityDelta = Object.fromEntries(Object.keys(values).map((key) => [key, (adjusted[key] ?? 0) - (values[key] ?? 0)]));
-  return { playerId: player.playerId, salary: player.salary, baselineOpportunity: values, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
+  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: values, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
 }
 
 function componentsFor(slate: ValidatedSlate, player: SlatePlayer, v: Record<string, number>): Record<string, number> {
@@ -169,14 +182,23 @@ function simulateSportScores(sport: Sport | 'FPPG', player: SlatePlayer, compone
   for (let i = 0; i < SIMULATION_RUNS; i += 1) {
     environmentSeed = next(environmentSeed); const gameNoise = (environmentSeed / 4294967296 - 0.5) * sportEnvironmentWidth(sport);
     const random = () => { seed = next(seed); return seed / 4294967296; };
-    const sampled = sport === 'FPPG' ? sampleAggregate(components, random, noiseWidth) : sport === 'MLB' ? sampleMlb(player, inputs, random) : sport === 'NFL' || sport === 'CFB' ? sampleFootball(player, inputs, rules, random, gameNoise) : sport === 'GOLF' ? sampleGolf(components, random) : sampleBasketball(components, inputs, rules, random, gameNoise);
+    const sampled = sport === 'FPPG' ? sampleAggregate(components, random, noiseWidth) : sport === 'MLB' ? sampleMlb(player, inputs, random) : sport === 'NFL' || sport === 'CFB' ? sampleFootball(player, inputs, rules, random, gameNoise) : sport === 'GOLF' ? sampleGolf(components, random) : sampleBasketball(player, components, inputs, rules, random, gameNoise);
     scores.push(scoreComponents(sampled, rules));
   }
   return scores;
 }
 function sampleAggregate(components: Record<string, number>, random: () => number, width: number): Record<string, number> { return Object.fromEntries(Object.entries(components).map(([key, value]) => [key, Math.max(0, value * (1 + (random() - 0.5) * width))])); }
-function sampleBasketball(components: Record<string, number>, inputs: Record<string, number>, rules: Record<string, { value: number }>, random: () => number, gameNoise: number): Record<string, number> {
-  const minutes = positiveNormal(inputs.expectedMinutes ?? 0, Math.max(1, (inputs.expectedMinutes ?? 0) * 0.12), random);
+function sampleBasketball(player: SlatePlayer, components: Record<string, number>, inputs: Record<string, number>, rules: Record<string, { value: number }>, random: () => number, gameNoise: number): Record<string, number> {
+  const minutesMean = inputs.expectedMinutes ?? 0;
+  const sourcedP10 = inputs.minutesP10;
+  const sourcedP90 = inputs.minutesP90;
+  const sourcedMinutesBand = Number.isFinite(sourcedP10) && Number.isFinite(sourcedP90) && sourcedP10! >= 0 && sourcedP90! >= sourcedP10!;
+  // Prefer provider-supplied role quantiles. Until game-log-derived minutes are available,
+  // unconfirmed WNBA roles get a wider provisional minutes distribution; this widens risk but
+  // does not pretend to know a calibrated DNP probability.
+  const roleUnconfirmed = player.availability?.roleStatus !== 'CONFIRMED_STARTER' && player.availability?.roleStatus !== 'EXPECTED_STARTER';
+  const minutesDeviation = sourcedMinutesBand ? Math.max(1, (sourcedP90! - sourcedP10!) / 2.563) : Math.max(1, minutesMean * (roleUnconfirmed ? 0.25 : 0.12));
+  const minutes = positiveNormal(minutesMean, minutesDeviation, random);
   const minuteRatio = inputs.expectedMinutes ? minutes / inputs.expectedMinutes : 1;
   const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => {
     const environment = 1 + gameNoise * 0.35;
@@ -252,6 +274,8 @@ function applySportContext(slate: ValidatedSlate, player: SlatePlayer, values: R
   if (slate.sport === 'NBA' || slate.sport === 'WNBA') {
     const context = player.sportContext?.nba;
     if (context?.minutesP50 !== undefined && Number.isFinite(context.minutesP50)) adjusted.expectedMinutes = context.minutesP50;
+    if (context?.minutesP10 !== undefined && Number.isFinite(context.minutesP10)) adjusted.minutesP10 = context.minutesP10;
+    if (context?.minutesP90 !== undefined && Number.isFinite(context.minutesP90)) adjusted.minutesP90 = context.minutesP90;
     if (context?.paceMultiplier !== undefined) for (const field of ['pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute']) if (Number.isFinite(adjusted[field])) adjusted[field] *= context.paceMultiplier;
     if (context?.usageMultiplier !== undefined && Number.isFinite(adjusted.pointsPerMinute)) adjusted.pointsPerMinute *= context.usageMultiplier;
   }
@@ -284,18 +308,16 @@ function adjustmentFields(type?: string): string[] {
   }
 }
 
-function reconcileBasketballMinutes(players: ProjectionPackage['players'], slate: ValidatedSlate, gaps: ProjectionPackage['gaps']): ProjectionPackage['players'] {
-  const playerById = new Map(slate.playerPool.map((player) => [player.playerId, player]));
-  const byTeam = new Map<string, ProjectionPackage['players']>();
-  for (const player of players) {
-    const slatePlayer = playerById.get(player.playerId);
-    const team = slatePlayer?.team;
-    if (!team || player.modelPath !== 'SPORT_STRUCTURED' || !Number.isFinite(player.adjustedOpportunity.expectedMinutes)) continue;
-    if (['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'].includes(slatePlayer?.availability?.status ?? '')) continue;
-    byTeam.set(team, [...(byTeam.get(team) ?? []), player]);
+function reconcileBasketballOpportunities(prepared: Array<{ player: SlatePlayer; values: Record<string, number>; adjustment?: PlayerAdjustment }>, slate: ValidatedSlate, gaps: ProjectionPackage['gaps']): void {
+  const byTeam = new Map<string, typeof prepared>();
+  for (const item of prepared) {
+    const team = item.player.team;
+    if (!team || !Number.isFinite(item.values.expectedMinutes)) continue;
+    if (['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'].includes(item.player.availability?.status ?? '')) continue;
+    byTeam.set(team, [...(byTeam.get(team) ?? []), item]);
   }
   for (const [team, teamPlayers] of byTeam.entries()) {
-    const total = teamPlayers.reduce((sum, player) => sum + (player.adjustedOpportunity.expectedMinutes ?? 0), 0);
+    const total = teamPlayers.reduce((sum, player) => sum + (player.values.expectedMinutes ?? 0), 0);
     if (!(total > 0)) continue;
     const targetMinutes = slate.sport === 'WNBA' ? 200 : 240;
     if (total < targetMinutes - 1) gaps.push({ reason: `${team} ${slate.sport} projected player pool accounts for ${total.toFixed(1)} of ${targetMinutes} regulation minutes; incomplete rotation coverage is not inflated into the missing minutes.` });
@@ -304,18 +326,7 @@ function reconcileBasketballMinutes(players: ProjectionPackage['players'], slate
     if (total <= targetMinutes) continue;
     const factor = targetMinutes / total;
     for (const player of teamPlayers) {
-      const before = player.adjustedOpportunity.expectedMinutes;
-      const adjustedOpportunity = { ...player.adjustedOpportunity, expectedMinutes: before * factor };
-      const opportunityDelta = { ...player.opportunityDelta, expectedMinutes: adjustedOpportunity.expectedMinutes - (player.baselineOpportunity.expectedMinutes ?? 0) };
-      const componentProjection = Object.fromEntries(Object.entries(player.componentProjection).map(([key, value]) => [key, value * factor]));
-      const samples = (player.simulatedFantasyPointSamples ?? []).map((sample) => sample * factor);
-      const sorted = [...samples].sort((a, b) => a - b);
-      player.adjustedOpportunity = adjustedOpportunity;
-      player.opportunityDelta = opportunityDelta;
-      player.componentProjection = componentProjection;
-      if (sorted.length) { player.simulatedFantasyPointSamples = samples; player.projectedOutcomes = { floorP20: quantile(sorted, 0.2), medianP50: quantile(sorted, 0.5), ceilingP90: quantile(sorted, 0.9) }; }
-      player.salaryEfficiency = { medianPer1k: player.salary ? player.projectedOutcomes.medianP50 / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? player.projectedOutcomes.ceilingP90 / (player.salary / 1000) : 0 };
+      player.values = { ...player.values, expectedMinutes: (player.values.expectedMinutes ?? 0) * factor };
     }
   }
-  return players;
 }

@@ -195,20 +195,40 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, t
   const trust = asRecord(trustRow?.trust_payload);
   const entryEligible = trust?.entryEligible === true;
   const slate = slateValue as JsonRecord | undefined;
-  const projections = new Map<string, number>();
+  const projections = new Map<string, JsonRecord>();
   const stages = Array.isArray(stagesValue) ? stagesValue as JsonRecord[] : [];
   const projectionStage = [...stages].reverse().find((stage) => String(stage.stage) === 'PROJECTION');
   const projectionOutput = (projectionStage?.output_payload ?? projectionStage?.output) as JsonRecord | undefined;
   if (Array.isArray(projectionOutput?.players)) {
     for (const value of projectionOutput.players) {
       const player = value as JsonRecord;
-      if (typeof player.playerId === 'string' && typeof (player.projectedOutcomes as JsonRecord | undefined)?.medianP50 === 'number') projections.set(player.playerId, Number((player.projectedOutcomes as JsonRecord).medianP50));
+      if (typeof player.playerId === 'string') projections.set(player.playerId, player);
     }
   }
+  const researchStage = [...stages].reverse().find((stage) => String(stage.stage) === 'RESEARCH');
+  const researchOutput = asRecord(researchStage?.output_payload ?? researchStage?.output);
+  const researchFindings = Array.isArray(researchOutput?.findings) ? researchOutput.findings.filter(isJsonRecord) : [];
   const players = new Map((Array.isArray(slate?.playerPool) ? slate.playerPool : []).map((player) => {
     const mapped = mapPlayer(player, String(slate?.sport ?? ''));
     const projection = projections.get(mapped.id);
-    return [mapped.id, projection === undefined ? mapped : { ...mapped, projected_points: projection, contextual_projection: projection }] as const;
+    const outcomes = asRecord(projection?.projectedOutcomes);
+    const adjusted = asRecord(projection?.adjustedOpportunity);
+    const availability = asRecord(asRecord(player)?.availability);
+    const findings = researchFindings.filter((finding) => String(finding.subjectId ?? '') === mapped.id).sort((a, b) => Date.parse(String(b.retrievedAt ?? '')) - Date.parse(String(a.retrievedAt ?? '')));
+    const latestFinding = findings[0];
+    const roleStatus = typeof availability?.roleStatus === 'string' ? availability.roleStatus : undefined;
+    const uncertainty = Array.isArray(projection?.uncertaintyFactors) ? projection!.uncertaintyFactors.map(String).filter((note) => /role|minute|dnp|rotation|starter|workload|restriction/i.test(note)).slice(0, 1).join(' ') : '';
+    return [mapped.id, {
+      ...mapped,
+      ...(typeof outcomes?.medianP50 === 'number' ? { projected_points: outcomes.medianP50, contextual_projection: outcomes.medianP50, p50_projection: outcomes.medianP50 } : {}),
+      ...(typeof outcomes?.floorP20 === 'number' ? { p20_projection: outcomes.floorP20 } : {}),
+      ...(typeof outcomes?.ceilingP90 === 'number' ? { p90_projection: outcomes.ceilingP90 } : {}),
+      ...(typeof adjusted?.expectedMinutes === 'number' ? { minutes_projection: adjusted.expectedMinutes } : {}),
+      ...(roleStatus ? { role_status: roleStatus } : {}),
+      ...(typeof projection?.confidence === 'string' ? { projection_confidence: projection.confidence } : {}),
+      ...(uncertainty ? { role_uncertainty: uncertainty } : {}),
+      ...(latestFinding ? { news_note: String(latestFinding.finding ?? ''), news_source: String(latestFinding.sourceName ?? 'Source unavailable'), news_freshness: freshnessLabel(latestFinding.retrievedAt) } : { news_freshness: 'no relevant player news retrieved' }),
+    }] as const;
   }));
   return (Array.isArray(value) ? value : []).map((row, index) => {
     const payload = ((row as JsonRecord).lineup_payload ?? {}) as JsonRecord;
@@ -226,11 +246,11 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, t
     // available number -- calibrated once enough real contest results exist, otherwise the
     // disclosed simulated estimate. The persisted row's own cash_line_probability column is only
     // ever the calibrated value (null pre-approval), kept as a fallback for older persisted rows.
-    const cashLineProbability = typeof payload.cashLineProbability === 'number' ? Number(payload.cashLineProbability) : typeof (row as JsonRecord).cash_line_probability === 'number' ? Number((row as JsonRecord).cash_line_probability) : undefined;
-    const cashLineConfidence = payload.cashLineConfidence === 'CALIBRATED' || payload.cashLineConfidence === 'SIMULATED_ESTIMATE' ? payload.cashLineConfidence : typeof (row as JsonRecord).cash_line_probability === 'number' ? 'CALIBRATED' : 'UNAVAILABLE';
+    const cashLineProbability = undefined;
+    const cashLineConfidence: Lineup['cash_line_confidence'] = 'UNAVAILABLE';
     const contestKind = asRecord(slate?.contest)?.contestKind;
     const contest_kind = contestKind === 'CASH' || contestKind === 'GPP' ? contestKind : 'UNKNOWN';
-    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, status: typeof (row as JsonRecord).status === 'string' ? String((row as JsonRecord).status) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), expected_points: typeof payload.expectedPoints === 'number' ? payload.expectedPoints : undefined, salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? null, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], ceiling_score: Number(payload.ceiling ?? 0), narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: !entryEligible ? 'PROVISIONAL' : payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
+    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, status: typeof (row as JsonRecord).status === 'string' ? String((row as JsonRecord).status) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), expected_points: typeof payload.expectedPoints === 'number' ? payload.expectedPoints : undefined, salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? null, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], floor_score: typeof payload.floor === 'number' ? payload.floor : undefined, ceiling_score: typeof payload.ceiling === 'number' ? payload.ceiling : undefined, narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: !entryEligible ? 'PROVISIONAL' : payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
   });
 }
 
@@ -257,6 +277,7 @@ function positiveNumber(value: unknown): number | undefined {
 }
 
 function asRecord(value: unknown): JsonRecord | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : undefined; }
+function freshnessLabel(value: unknown): string { if (typeof value !== 'string') return 'retrieval time unavailable'; const timestamp = Date.parse(value); if (!Number.isFinite(timestamp)) return 'retrieval time unavailable'; const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000)); return minutes < 1 ? 'just retrieved' : minutes < 60 ? `retrieved ${minutes}m ago` : minutes < 1440 ? `retrieved ${Math.floor(minutes / 60)}h ago` : `retrieved ${Math.floor(minutes / 1440)}d ago`; }
 
 // The engine reports a richer status vocabulary per stage (Slate uses VALID/WARNING/BLOCKED;
 // the rest use COMPLETE/PARTIAL/BLOCKED) because those distinctions matter for diagnostics.

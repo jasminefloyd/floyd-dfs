@@ -50,6 +50,9 @@ export interface ModelPromotionDecision {
   reason: string;
 }
 
+export const PREREGISTERED_VALIDATION = { minimumIndependentSlatesPerSport: 30, minimumHoldoutPlayerRows: 100, requiredModelMaeImprovement: 0.03, probabilityReleaseRequiresReviewedChronologicalHoldout: true } as const;
+export interface PairedProjectionBaselineRow { slateId: string; sport: Sport; generatedAt: string; lockTime: string; candidatePoints: number; candidateFloor?: number; candidateCeiling?: number; baselinePoints: number; actualPoints: number; role?: string; }
+
 export interface CalibrationMetrics {
   sport: Sport;
   sampleSize: number;
@@ -74,6 +77,37 @@ export function validatePreLockBacktestRows(rows: PreLockBacktestRow[]): string[
     else if (generated >= lock) errors.push(`row ${index} was generated at or after lock and is excluded from a pre-lock backtest.`);
   }
   return errors;
+}
+
+/** Same-slate, paired comparison. Entire slates are held out chronologically; entries
+ * from a single event never count as independent slates for sample-size reporting. */
+export function evaluatePairedProjectionBaseline(rows: PairedProjectionBaselineRow[], holdoutCutoff: string) {
+  const cutoff = Date.parse(holdoutCutoff);
+  if (!Number.isFinite(cutoff)) throw new Error('holdoutCutoff must be a valid timestamp.');
+  const valid = rows.filter((row) => {
+    const generated = Date.parse(row.generatedAt); const lock = Date.parse(row.lockTime);
+    return Number.isFinite(generated) && Number.isFinite(lock) && generated < lock
+      && Number.isFinite(row.candidatePoints) && Number.isFinite(row.baselinePoints) && Number.isFinite(row.actualPoints);
+  });
+  const metric = (items: PairedProjectionBaselineRow[]) => {
+    const slateCount = new Set(items.map((row) => row.slateId)).size;
+    const candidateErrors = items.map((row) => row.candidatePoints - row.actualPoints);
+    const candidateMae = items.length ? mean(candidateErrors.map(Math.abs)) : null;
+    const baselineMae = items.length ? mean(items.map((row) => Math.abs(row.baselinePoints - row.actualPoints))) : null;
+    const withFloor = items.filter((row) => Number.isFinite(row.candidateFloor));
+    const withCeiling = items.filter((row) => Number.isFinite(row.candidateCeiling));
+    const relativeMaeImprovement = candidateMae !== null && baselineMae !== null && baselineMae > 0 ? (baselineMae - candidateMae) / baselineMae : null;
+    const enoughData = slateCount >= PREREGISTERED_VALIDATION.minimumIndependentSlatesPerSport && items.length >= PREREGISTERED_VALIDATION.minimumHoldoutPlayerRows;
+    const meetsImprovement = relativeMaeImprovement !== null && relativeMaeImprovement >= PREREGISTERED_VALIDATION.requiredModelMaeImprovement;
+    return { playerRows: items.length, independentSlates: slateCount, candidateMae, candidateRmse: items.length ? Math.sqrt(mean(candidateErrors.map((error) => error ** 2))) : null, candidateBias: items.length ? mean(candidateErrors) : null, baselineMae, relativeMaeImprovement, candidateQuantileCoverage: { p20: withFloor.length ? withFloor.filter((row) => row.actualPoints <= row.candidateFloor!).length / withFloor.length : null, p50: items.length ? items.filter((row) => row.actualPoints <= row.candidatePoints).length / items.length : null, p90: withCeiling.length ? withCeiling.filter((row) => row.actualPoints <= row.candidateCeiling!).length / withCeiling.length : null }, status: !enoughData ? 'INSUFFICIENT_SAMPLE' as const : meetsImprovement ? 'CRITERIA_MET_REQUIRES_REVIEW' as const : 'IMPROVEMENT_THRESHOLD_NOT_MET' as const };
+  };
+  const train = valid.filter((row) => Date.parse(row.lockTime) < cutoff);
+  const holdout = valid.filter((row) => Date.parse(row.lockTime) >= cutoff);
+  const bySport = Object.fromEntries([...new Set(valid.map((row) => row.sport))].map((sport) => [sport, metric(holdout.filter((row) => row.sport === sport))]));
+  const byRole = Object.fromEntries([...new Set(holdout.map((row) => row.role ?? 'UNKNOWN'))].map((role) => [role, metric(holdout.filter((row) => (row.role ?? 'UNKNOWN') === role))]));
+  const sportRoleKeys = [...new Set(holdout.map((row) => `${row.sport}::${row.role ?? 'UNKNOWN'}`))];
+  const bySportAndRole = Object.fromEntries(sportRoleKeys.map((key) => { const [sport, role] = key.split('::'); return [key, metric(holdout.filter((row) => row.sport === sport && (row.role ?? 'UNKNOWN') === role))]; }));
+  return { cutoff: new Date(cutoff).toISOString(), excludedPostLockRows: rows.length - valid.length, training: metric(train), holdout: metric(holdout), holdoutBySport: bySport, holdoutByRole: byRole, holdoutBySportAndRole: bySportAndRole, promotionRequires: PREREGISTERED_VALIDATION, releaseStatus: 'HOLD' as const, note: 'Descriptive paired metrics do not activate win probabilities; release also requires independent contest outcome validation and explicit review.' };
 }
 
 /** Evaluates generated lineups without inventing contest results or optimal scores. */

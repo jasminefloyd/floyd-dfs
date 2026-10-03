@@ -19,6 +19,9 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   const snapshots = [
     { snapshot_type: 'VALIDATED_DRAFTKINGS_SLATE', source: 'DRAFTKINGS', payload: rawSlate, source_retrieved_at: rawSlate.receivedAt },
     { snapshot_type: 'ENRICHED_RUN_SLATE', source: 'ENGINE', payload: slate, source_retrieved_at: slate.receivedAt },
+    // Persist the exact pre-lock projection inputs, outcomes, and model version used for
+    // selection. This is the immutable forecast record required for later calibration.
+    { snapshot_type: 'PRE_LOCK_PROJECTION_PACKAGE', source: 'ENGINE', payload: projection, source_retrieved_at: projection.generatedAt },
   ].map((snapshot) => ({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, ...snapshot, content_sha256: digest(snapshot.payload) }));
   const snapshotResult = await db.from('floyd_dfs_run_data_snapshots').upsert(snapshots, { onConflict: 'tenant_id,generation_run_id,snapshot_type,source,content_sha256', ignoreDuplicates: true });
   if (snapshotResult.error) throw snapshotResult.error;

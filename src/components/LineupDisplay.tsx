@@ -31,6 +31,11 @@ export interface LineupPlayer {
   game_id?: string;
   minutes_projection?: number;
   role_stability?: number;
+  role_status?: string;
+  projection_confidence?: string;
+  role_uncertainty?: string;
+  news_freshness?: string;
+  news_source?: string;
   minutes_volatility?: number;
   recent_fantasy_per_minute?: number;
   minutes_trend?: 'up' | 'down' | 'stable' | 'unknown';
@@ -146,7 +151,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
     <div className="space-y-4">
       {manifest?.readiness?.cautions?.length ? (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 shadow-sm">
-          <span className="font-black">Engine state: {manifest.readiness.engine_state}.</span> This lineup set is not validated for real-money selection. {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
+          <span className="font-black">Engine state: {manifest.readiness.engine_state}.</span> These are provisional projections, not validated entry recommendations; contest rank and win probability are unavailable. {manifest.is_fallback ? 'This lineup set uses cached MIOS data. ' : ''}{manifest.readiness.cautions[0]}
         </div>
       ) : null}
       {manifest?.sport?.toLowerCase() === 'mlb' && lineups.some((lineup) => lineup.players.some((player) => player.lineup_status !== 'confirmed')) ? (
@@ -211,9 +216,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
               </div>
 
               {(lineup.projected_points || lineup.ceiling_score) ? (
-                <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200">
+              <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200">
                   <Metric label="Median FPTS" value={lineup.projected_points.toFixed(1)} />
-                  <Metric label="Ceiling" value={lineup.ceiling_score?.toFixed(1) ?? '—'} />
+                  <Metric label="P20–P90 range" value={lineup.floor_score !== undefined && lineup.ceiling_score !== undefined ? `${lineup.floor_score.toFixed(1)}–${lineup.ceiling_score.toFixed(1)}` : 'Unavailable'} />
                 </div>
               ) : null}
 
@@ -295,6 +300,8 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                           {player.news_evidence?.is_speculative ? (
                             <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-amber-700">Unconfirmed news signal</p>
                           ) : null}
+                          {player.news_freshness || player.news_source ? <p className="mt-1 text-[10px] font-medium text-slate-500">News: {player.news_source ?? 'source unavailable'}{player.news_freshness ? ` · ${player.news_freshness}` : ''}</p> : null}
+                          {player.role_status || player.role_uncertainty ? <p className="mt-1 text-[10px] font-bold text-amber-800">Role: {(player.role_status ?? 'unconfirmed').replaceAll('_', ' ').toLowerCase()}{player.projection_confidence ? ` · ${player.projection_confidence.toLowerCase()} model confidence` : ''}{player.role_uncertainty ? ` · ${player.role_uncertainty}` : ''}</p> : null}
                         </div>
                         <div className="col-span-2 grid grid-cols-2 gap-2 border-t border-slate-200 pt-2 text-left sm:col-span-1 sm:ml-auto sm:block sm:border-t-0 sm:pt-0 sm:text-right">
                           <div>
@@ -339,8 +346,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     onClick={() => void markEntered(lineup)}
                     className="w-full rounded-xl bg-[#0b1f3a] py-3 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:cursor-default disabled:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
-                    {lineup.id && enteredIds.has(lineup.id) ? <><Check className="inline h-4 w-4" aria-hidden="true" /> Marked as entered</> : savingIds.has(lineup.id ?? '') ? 'Saving…' : 'Mark as entered'}
+                    {lineup.id && enteredIds.has(lineup.id) ? <><Check className="inline h-4 w-4" aria-hidden="true" /> Entry recorded</> : savingIds.has(lineup.id ?? '') ? 'Saving…' : 'Record external entry'}
                   </button>
+                  <p className="mt-2 text-center text-[11px] text-slate-500">This records a lineup you entered on DraftKings; it does not submit the lineup.</p>
                   {lineup.id && saveErrors[lineup.id] ? <p role="alert" className="mt-2 text-sm font-semibold text-red-700">{saveErrors[lineup.id]}</p> : null}
                 </div>
               </div>

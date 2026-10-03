@@ -15,7 +15,7 @@ import { findingsFromAvailability } from '../src/lib/engine/researchEvidence';
 import { findConflicts, normalizeArticles } from '../src/lib/engine/researchEvidence';
 import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
-import { evaluateProjectionCalibration, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
+import { evaluateProjectionCalibration, evaluatePairedProjectionBaseline, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
 import { seasonParamFor, SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
@@ -108,16 +108,24 @@ const testNegativeProviderFppgFallbackParity = (): void => {
   assert.ok(player.uncertaintyFactors.some((factor) => factor.includes('clamped to zero')));
 };
 
+const testMlbRelieverWorkloadGuardParity = (): void => {
+  const mlb: ValidatedSlate = {
+    ...baseSlate,
+    sport: 'MLB', league: 'MLB',
+    scoringRules: { inningPitched: { value: 2.25 }, strikeout: { value: 2 }, walkAgainst: { value: -0.6 }, hitAgainst: { value: -0.6 }, earnedRun: { value: -2 } },
+    playerPool: [{ ...baseSlate.playerPool[0], position: 'RP', projectionInputs: { expectedInnings: 5.2, strikeoutsPerInning: 1, walksPerInning: 0.3, hitsAllowedPerInning: 0.8, earnedRunsPerInning: 0.4 }, availability: { status: 'ACTIVE', confirmed: true, source: 'test', retrievedAt: now.toISOString() } }],
+  };
+  const result = projectSlate(mlb, adjustSlate(mlb, research, now), now);
+  assert.equal(result.players[0].adjustedOpportunity.expectedInnings, 3, 'an RP-labelled slate player must not inherit a starter-like full game workload');
+  assert.ok(result.gaps.some((gap) => /reliever.*capped at 3.0/.test(gap.reason)));
+};
+
 const testCashLineFieldEstimateParity = (): void => {
   const cashSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, contestKind: 'CASH', paidPositions: 50, contestSize: 100 } };
   const result = optimizeLineups({ validatedSlate: cashSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
   assert.equal(result.status, 'COMPLETE');
-  assert.ok(result.cashLineEstimate, 'a cash-game contest with known paid positions/size should produce a simulated cash-line estimate');
-  assert.equal(result.cashLineEstimate?.source, 'SIMULATED');
-  for (const candidate of result.candidates) {
-    assert.ok(candidate.cashLineProbability !== undefined, 'every candidate should get a cash-line probability once an estimate exists');
-    assert.ok(candidate.cashLineProbability! >= 0 && candidate.cashLineProbability! <= 1);
-  }
+  assert.equal(result.cashLineEstimate, undefined, 'cash-line estimates must not be derived from the optimizer candidate pool');
+  assert.ok(result.candidates.every((candidate) => candidate.cashLineProbability === undefined), 'no cash probability should be claimed without an independent threshold/model');
 
   const manualCashSlate: ValidatedSlate = { ...baseSlate, contest: { ...baseSlate.contest, cashLine: 20 } };
   const manualResult = optimizeLineups({ validatedSlate: manualCashSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
@@ -151,15 +159,15 @@ const testCashGameSelectionParity = (): void => {
   const result = selectLineups({ validatedSlate: cashSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
   assert.equal(result.status, 'COMPLETE');
   assert.equal(result.selectedLineups.length, 1);
-  assert.equal(result.selectedLineups[0].cashLineProbability, 0.92, 'should rank the candidate that clears the 85% target first');
-  assert.ok(!result.selectedLineups[0].rationale.some((line) => line.includes('below the')), 'a candidate that clears the target should not carry a shortfall disclosure');
+  assert.equal(result.selectedLineups[0].cashLineProbability, undefined, 'unvalidated estimates must never be surfaced as probabilities');
+  assert.equal(result.selectedLineups[0].cashLineConfidence, 'UNAVAILABLE');
 
   // Force every candidate below target -- selection must still return the requested count, never
   // fewer just because nothing clears the cash bar, and must disclose the shortfall.
   const allBelowTarget = { ...optimizer, candidates: optimizer.candidates.map((candidate) => ({ ...candidate, cashLineProbability: 0.5 })) };
   const shortfallResult = selectLineups({ validatedSlate: cashSlate, researchPackage: research, optimizerPackage: allBelowTarget }, now);
   assert.equal(shortfallResult.selectedLineups.length, 1, 'selection must never return fewer lineups just because no candidate clears the cash target');
-  assert.ok(shortfallResult.selectedLineups[0].rationale.some((line) => line.includes('below the 85% target')), 'a shortfall must be disclosed, not hidden');
+  assert.equal(shortfallResult.selectedLineups[0].cashLineProbability, undefined);
 };
 
 const testGppSelectionUnaffectedByCashLineParity = (): void => {
@@ -170,6 +178,9 @@ const testGppSelectionUnaffectedByCashLineParity = (): void => {
   const result = selectLineups({ validatedSlate: gppSlate, researchPackage: research, optimizerPackage: withProbabilities }, now);
   const chosen = optimizer.candidates.find((candidate) => candidate.id === result.selectedLineups[0].candidateId);
   assert.equal(chosen?.heuristicTournamentRank ?? chosen?.tournamentRank, 1, 'GPP selection must rank by the heuristic tournament composite, ignoring cash-line probability entirely');
+  const withUnvalidatedFieldSim = { ...optimizer, candidates: optimizer.candidates.map((candidate, index) => ({ ...candidate, contestMetricProvenance: 'JOINT_FIELD_SIMULATION' as const, roi: index === 0 ? -1 : 100, winFrequency: index === 0 ? 0 : 1 })) };
+  const diagnosticOnly = selectLineups({ validatedSlate: gppSlate, researchPackage: research, optimizerPackage: withUnvalidatedFieldSim }, now);
+  assert.equal(diagnosticOnly.selectedLineups[0].candidateId, chosen?.id, 'unvalidated opponent-field simulation remains diagnostic and does not select entries');
   const expectedPointSlate: ValidatedSlate = { ...gppSlate, contest: { ...gppSlate.contest, objective: 'MAX_FPTS' } };
   const expectedPointCandidates = optimizer.candidates.slice(0, 2).map((candidate, index) => ({ ...candidate, expectedPoints: index === 0 ? 10 : 50 }));
   const expectedPointResult = selectLineups({ validatedSlate: expectedPointSlate, researchPackage: research, optimizerPackage: { candidates: expectedPointCandidates } }, now);
@@ -364,6 +375,24 @@ const testWnbaSeasonStatsUsesScoresFeedParity = async (): Promise<void> => {
   assert.ok(deriveSeasonBasedInputs('WNBA', lasVegasPlayer, [lasVegasStats]), 'LVA DraftKings players must match SportsDataIO/ESPN LV team codes for component projections');
 };
 
+const testSportsDataIoHistoricalContextFeedsParity = async (): Promise<void> => {
+  const requested: string[] = [];
+  const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
+    const url = String(input); requested.push(url);
+    if (url.endsWith('/mlb/scores/json/GamesByDate/2026-09-30')) return new Response(JSON.stringify([{ GameID: 1, HomeTeam: 'NYY', AwayTeam: 'BOS', ForecastTempLow: 68, ForecastTempHigh: 74, ForecastWindSpeed: 8, ForecastWindDirection: 'W', ForecastDescription: 'Clear' }]), { status: 200 });
+    if (url.endsWith('/mlb/stats/json/PlayerGameStatsBySeason/2026/123/10')) return new Response(JSON.stringify([{ DateTime: '2026-09-28T20:00:00Z', Started: true, InningsPitchedDecimal: 5.2 }]), { status: 200 });
+    if (/\/wnba\/scores\/json\/BoxScores\/2026-09-29$/.test(url)) return new Response(JSON.stringify([{ PlayerGames: [{ PlayerID: 7, Name: 'Player Seven', Team: 'IND', Minutes: 31.5 }] }]), { status: 200 });
+    return new Response(JSON.stringify([]), { status: 200 });
+  } });
+  const weather = await client.getMlbGameWeather('2026-09-30');
+  assert.equal(weather[0]?.temperatureHigh, 74);
+  assert.equal((await client.getMlbPlayerGameLogs('2026', 123, 10))[0]?.InningsPitchedDecimal, 5.2);
+  const minutes = await client.getWnbaRecentMinutes('2026-09-30', 2);
+  assert.equal(minutes.find((row) => row.playerId === '7')?.minutes[0], 31.5);
+  assert.ok(requested.some((url) => url.endsWith('/wnba/scores/json/BoxScores/2026-09-29')));
+  assert.ok(!requested.some((url) => url.endsWith('/wnba/scores/json/BoxScores/2026-09-30')));
+};
+
 const testGolfSportsDataIoV2ProjectionParity = async (): Promise<void> => {
   const requested: string[] = [];
   const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
@@ -438,14 +467,35 @@ const testContestKindClassificationParity = (): void => {
 };
 
 const testCashLineCalibrationBoundaryParity = (): void => {
-  const observations = Array.from({ length: 120 }, (_, index) => ({ rawProbability: 0.85, beatCashLine: index % 20 !== 0 }));
+  const observations = Array.from({ length: 120 }, (_, index) => ({ contestId: `contest-${index}`, rawProbability: 0.85, beatCashLine: index % 20 !== 0 }));
   const calibration = buildCashLineCalibration(observations);
-  assert.equal(calibration.status, 'APPROVED');
+  assert.equal(calibration.status, 'UNCALIBRATED');
+  assert.equal(calibration.independentContestCount, 120);
+  assert.equal(calibration.releaseGate, 'DISABLED_PENDING_OUT_OF_SAMPLE_VALIDATION');
   const probability = calibratedCashLineProbability(0.85, calibration);
-  assert.ok(probability !== null);
+  assert.equal(probability, null);
   const bin = calibration.bins.find((item) => item.lower === 0.85);
   assert.ok(bin);
-  assert.equal(probability, bin?.observedRate);
+  assert.equal(bin?.samples, 120);
+  const sameContest = buildCashLineCalibration(Array.from({ length: 120 }, (_, index) => ({ contestId: 'one-contest', rawProbability: 0.85, beatCashLine: index % 2 === 0 })));
+  assert.equal(sameContest.independentContestCount, 1);
+  assert.equal(sameContest.status, 'PENDING_DATA');
+};
+
+const testPairedBaselineHoldoutParity = (): void => {
+  const rows = [
+    { slateId: 's1', sport: 'MLB' as const, generatedAt: '2026-08-01T10:00:00Z', lockTime: '2026-08-01T12:00:00Z', candidatePoints: 10, baselinePoints: 8, actualPoints: 9, role: 'P' },
+    { slateId: 's1', sport: 'MLB' as const, generatedAt: '2026-08-01T10:00:00Z', lockTime: '2026-08-01T12:00:00Z', candidatePoints: 12, baselinePoints: 11, actualPoints: 10, role: 'H' },
+    { slateId: 's2', sport: 'MLB' as const, generatedAt: '2026-08-03T13:00:00Z', lockTime: '2026-08-03T12:00:00Z', candidatePoints: 10, baselinePoints: 10, actualPoints: 10, role: 'P' },
+    { slateId: 's3', sport: 'MLB' as const, generatedAt: '2026-08-06T10:00:00Z', lockTime: '2026-08-06T12:00:00Z', candidatePoints: 10, candidateFloor: 8, candidateCeiling: 12, baselinePoints: 10, actualPoints: 10, role: 'P' },
+  ];
+  const result = evaluatePairedProjectionBaseline(rows, '2026-08-05T00:00:00Z');
+  assert.equal(result.excludedPostLockRows, 1);
+  assert.equal(result.holdout.playerRows, 1);
+  assert.equal(result.holdout.independentSlates, 1);
+  assert.equal(result.holdout.candidateQuantileCoverage.p50, 1);
+  assert.equal(result.holdoutBySportAndRole['MLB::P'].playerRows, 1);
+  assert.equal(result.releaseStatus, 'HOLD');
 };
 
 const testConflictingEvidenceNetsRealSignalParity = (): void => {
@@ -745,7 +795,7 @@ const testSeasonBasedInputsParity = (): void => {
   const pitcherInputs = deriveSeasonBasedInputs('MLB', pitcher, [pitcherRow]);
   assert.ok(pitcherInputs);
   assert.ok(pitcherInputs!.strikeoutsPerInning > 0, 'a pitcher\'s real strikeouts live under PitchingStrikeouts, not the bare (batting) Strikeouts field, which is 0 for this row');
-  assert.ok(pitcherInputs!.expectedInnings > 3 && pitcherInputs!.expectedInnings < 8, 'a real starter\'s per-game innings should land in a realistic range');
+  assert.ok(Math.abs(pitcherInputs!.expectedInnings - pitcherRow.InningsPitchedDecimal / pitcherRow.GamesStarted) < 1e-9, 'starter workload must use innings per start instead of all game appearances');
   assert.equal(pitcherInputs!.winProbability, 5 / 14, 'pitcher win probability is only emitted when wins and starts are both available');
 
   const wr = { ...baseSlate.playerPool[0], playerName: 'K.Allen', team: 'JAX', position: 'WR' };
@@ -1035,21 +1085,27 @@ const testGate3ContestSimulationParity = (): void => {
   const candidates = optimizeLineups({ validatedSlate: slate, projectionPackage: projection }, { maxCandidates: 20 }, now);
   assert.equal(candidates.contestSimulation?.status, 'UNAVAILABLE');
   assert.equal(candidates.contestSimulation?.fieldModel, 'UNAVAILABLE');
-  assert.match(candidates.contestSimulation?.reason ?? '', /verified provider projected ownership/i);
+  assert.match(candidates.contestSimulation?.reason ?? '', /ownership|outcome samples/i);
   assert.ok(candidates.candidates.every((candidate) => candidate.contestMetricProvenance === undefined || candidate.contestMetricProvenance === 'UNAVAILABLE'));
   const ownershipSlate: ValidatedSlate = { ...slate, playerPool: slate.playerPool.map((player) => ({ ...player, projectedOwnership: { classic: 0.2, source: 'PROVIDER' as const } })) };
   const ownershipCandidates = optimizeLineups({ validatedSlate: ownershipSlate, projectionPackage: projection }, { maxCandidates: 20 }, now);
-  assert.equal(ownershipCandidates.contestSimulation?.status, 'COMPLETE');
-  assert.equal(ownershipCandidates.contestSimulation?.fieldModel, 'PROJECTED_OWNERSHIP');
-  assert.ok(ownershipCandidates.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
+  assert.equal(ownershipCandidates.contestSimulation?.status, 'UNAVAILABLE', 'player ownership is not a substitute for an independent opponent lineup field');
+  assert.equal(ownershipCandidates.contestSimulation?.fieldModel, 'UNAVAILABLE');
+  assert.ok(ownershipCandidates.candidates.every((candidate) => candidate.contestMetricProvenance === 'UNAVAILABLE'));
+
+  const ownershipProjection: ProjectionPackage = { ...projection, players: projection.players.map((player) => ({ ...player, simulatedFantasyPointSamples: [player.projectedOutcomes.medianP50, player.projectedOutcomes.ceilingP90, player.projectedOutcomes.floorP20] })) };
+  const ownershipBacked = optimizeLineups({ validatedSlate: ownershipSlate, projectionPackage: ownershipProjection }, { maxCandidates: 20 }, now);
+  assert.equal(ownershipBacked.contestSimulation?.status, 'COMPLETE', 'independent legal opponent lineups should be simulated when provider ownership and player outcome distributions exist');
+  assert.equal(ownershipBacked.contestSimulation?.fieldModel, 'PROJECTED_OWNERSHIP');
+  assert.equal(ownershipBacked.contestSimulation?.fieldEntries, 9);
+  assert.ok(ownershipBacked.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
 
   const oneCandidate: LineupCandidate = { id: 'same-lineup', playerIds: ['p1', 'p2'], rosterSlots: { G: 'p1', F: 'p2' }, salaryUsed: 9000, salaryRemaining: 1000, expectedPoints: 20, median: 20, ceiling: 20, simulatedScoreSamples: [20], correlationScore: 0, medianRank: 1, ceilingRank: 1, candidateTypes: [], gameScriptCluster: 'TEST', strategicSimilarity: 0, riskFlags: [] };
   const tieSlate: ValidatedSlate = { ...ownershipSlate, contest: { ...ownershipSlate.contest, contestSize: 3, paidPositions: 2, entryFee: 10, payoutStructure: [{ rank: 1, payout: 100 }, { rank: 2, payout: 50 }] } };
   const tied = simulateContestField(tieSlate, [oneCandidate], { simulations: 1, seed: 'same' });
-  assert.equal(tied.metrics.get('same-lineup')?.expectedPayout, 50, 'three identical entries tied first split the combined rank 1 and rank 2 prizes equally');
-  assert.equal(tied.metrics.get('same-lineup')?.winFrequency, 1, 'a tie for first counts as a shared first-place outcome');
+  assert.equal(tied.status, 'UNAVAILABLE', 'field simulation requires a projection distribution for every provider-owned player');
   const incompletePayouts = simulateContestField({ ...tieSlate, contest: { ...tieSlate.contest, payoutStructure: [{ rank: 1, payout: 100 }] } }, [oneCandidate], { simulations: 1 });
-  assert.equal(incompletePayouts.payoutModel, 'UNAVAILABLE', 'missing paid-rank payout tiers must not produce ROI');
+  assert.equal(incompletePayouts.payoutModel, 'UNAVAILABLE', 'field probabilities and ROI remain unavailable without an independent field model');
   const oversized = simulateContestField({ ...ownershipSlate, contest: { ...ownershipSlate.contest, contestSize: 10_001 } }, [oneCandidate]);
   assert.equal(oversized.status, 'UNAVAILABLE', 'large fields are not silently truncated or represented as a full contest');
 };
@@ -1281,6 +1337,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
 };
 
 (async () => {
+  testMlbRelieverWorkloadGuardParity(); testPairedBaselineHoldoutParity();
   testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
@@ -1288,6 +1345,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
   await testCfbSportsDataIoRosterAndInjuryParity();
   await testNflSportsDataIoUsesVerifiedScheduleAndInjuryRoutes();
   await testWnbaSeasonStatsUsesScoresFeedParity();
+  await testSportsDataIoHistoricalContextFeedsParity();
   await testGolfSportsDataIoV2ProjectionParity();
   await testDraftKingsSlateBundleUsesDraftGroupWithoutContestDetail();
   await testDraftKingsDefaultWnbaSportCode();

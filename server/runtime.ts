@@ -285,6 +285,82 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         stages.projectionDataSourceWarnings = warnings;
       } catch (error) { stages.projectionDataSourceWarnings = [error instanceof Error ? error.message : 'SportsDataIO season-stats refresh failed.']; }
     }
+    if (workingSlate.sport === 'MLB') {
+      try {
+        const date = new Date(workingSlate.event.eventDate).toISOString().slice(0, 10);
+        const games = await availability.getMlbGameWeather(date);
+        const teams = new Set(workingSlate.playerPool.map((player) => normalizeTeamCode(String(player.team ?? ''))));
+        const game = games.find((row) => teams.has(normalizeTeamCode(row.homeTeam ?? '')) && teams.has(normalizeTeamCode(row.awayTeam ?? '')));
+        const retrievedAt = new Date().toISOString();
+        const players = await Promise.all(workingSlate.playerPool.map(async (player) => {
+          const isPitcher = /^(SP|RP|P)$/i.test(String(player.position ?? ''));
+          const id = player.identity?.sportsDataIoId;
+          let projectionInputs = player.projectionInputs;
+          if (isPitcher && id) {
+            try {
+              const logs = await availability.getMlbPlayerGameLogs(seasonParamFor('MLB', workingSlate.event.eventDate), id, 10);
+              const lock = new Date(workingSlate.contest.lockTime).getTime();
+              const preLockLogs = logs.filter((row) => {
+                const timestamp = Date.parse(String(row.DateTime ?? row.Day ?? row.Date ?? ''));
+                return Number.isFinite(timestamp) && timestamp < lock;
+              });
+              const starts = preLockLogs.filter((row) => row.Started === true || Number(row.Started) === 1 || Number(row.PitchingGamesStarted ?? row.GamesStarted ?? 0) > 0);
+              const innings = starts.flatMap((row) => {
+                const value = Number(row.InningsPitchedDecimal ?? row.InningsPitched ?? NaN);
+                return Number.isFinite(value) && value > 0 ? [value] : [];
+              }).slice(0, 5);
+              if (innings.length && projectionInputs?.expectedInnings !== undefined) {
+                const recentAverage = innings.reduce((sum, value) => sum + value, 0) / innings.length;
+                projectionInputs = { ...projectionInputs, expectedInnings: projectionInputs.expectedInnings * 0.5 + recentAverage * 0.5 };
+              }
+            } catch (error) {
+              stages.workloadWarnings = [...((stages.workloadWarnings as string[] | undefined) ?? []), `Recent MLB workload unavailable for ${player.playerName}: ${error instanceof Error ? error.message : 'feed request failed'}.`];
+            }
+          }
+          const team = normalizeTeamCode(String(player.team ?? ''));
+          const gameWeather = game && [game.homeTeam, game.awayTeam].some((value) => normalizeTeamCode(value ?? '') === team) ? {
+            ...(game.temperatureLow !== undefined ? { temperatureLow: game.temperatureLow } : {}),
+            ...(game.temperatureHigh !== undefined ? { temperatureHigh: game.temperatureHigh } : {}),
+            ...(game.windSpeed !== undefined ? { windSpeed: game.windSpeed } : {}),
+            ...(game.windDirection ? { windDirection: game.windDirection } : {}),
+            ...(game.description ? { description: game.description } : {}), retrievedAt,
+          } : undefined;
+          return { ...player, ...(projectionInputs ? { projectionInputs } : {}), ...(gameWeather ? { sportContext: { ...player.sportContext, mlb: { ...player.sportContext?.mlb, gameWeather } } } : {}) };
+        }));
+        workingSlate = { ...workingSlate, playerPool: players };
+        if (!game) stages.weatherWarning = `SportsDataIO returned no matching MLB game weather record for ${date}; no weather adjustment was applied.`;
+        else stages.weatherWarning = 'SportsDataIO game-day forecast fields were attached to MLB player context. No unvalidated numeric weather multiplier was applied.';
+      } catch (error) {
+        stages.weatherWarning = `MLB game-day forecast lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
+      }
+    }
+    if (workingSlate.sport === 'WNBA') {
+      try {
+        const recentRows = await availability.getWnbaRecentMinutes(workingSlate.event.eventDate, 28);
+        const byId = new Map(recentRows.flatMap((row) => row.playerId ? [[row.playerId, row.minutes] as const] : []));
+        const byNameTeam = new Map(recentRows.flatMap((row) => row.name ? [[`${normalizeProviderName(row.name)}|${normalizeTeamCode(row.team ?? '')}`, row.minutes] as const] : []));
+        let matched = 0;
+        const playerPool = workingSlate.playerPool.map((player) => {
+          const samples = (player.identity?.sportsDataIoId ? byId.get(player.identity.sportsDataIoId) : undefined)
+            ?? byNameTeam.get(`${normalizeProviderName(player.playerName)}|${normalizeTeamCode(String(player.team ?? ''))}`);
+          if (!samples?.length) return player;
+          matched += 1;
+          const ordered = [...samples].sort((a, b) => a - b);
+          const quantile = (q: number) => ordered[Math.min(ordered.length - 1, Math.floor((ordered.length - 1) * q))];
+          const recentMedian = quantile(0.5);
+          const expectedMinutes = player.projectionInputs?.expectedMinutes;
+          const minutesP50 = expectedMinutes !== undefined ? expectedMinutes * 0.5 + recentMedian * 0.5 : recentMedian;
+          const minutesP10 = Math.min(quantile(0.1), minutesP50);
+          const minutesP90 = Math.max(quantile(0.9), minutesP50);
+          return { ...player, projectionInputs: { ...player.projectionInputs, expectedMinutes: minutesP50, minutesP10, minutesP90 }, sportContext: { ...player.sportContext, nba: { ...player.sportContext?.nba, minutesP10, minutesP50, minutesP90 } } };
+        });
+        workingSlate = { ...workingSlate, playerPool };
+        stages.wnbaMinutesHistory = { source: 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, retrievedAt: new Date().toISOString() };
+        if (matched < playerPool.length) stages.wnbaMinutesWarning = `Recent WNBA minutes were available for ${matched}/${playerPool.length} players. Missing histories retain season-based minutes; role uncertainty remains provisional.`;
+      } catch (error) {
+        stages.wnbaMinutesWarning = `Recent WNBA game minutes lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
+      }
+    }
   }
   // SportsDataIO is authoritative for CFB roster membership and injury status when its complete
   // team rosters resolve. It intentionally cannot confirm college starters. ESPN remains a
@@ -383,7 +459,14 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const projectionRows = await db.from('floyd_dfs_player_projections').insert(projection.players.map((player) => ({ tenant_id: run.tenant_id, projection_run_id: projectionRun.data.id, player_id: player.playerId, baseline_opportunity: player.baselineOpportunity, adjusted_opportunity: player.adjustedOpportunity, opportunity_delta: player.opportunityDelta, component_projection: player.componentProjection, simulated_fantasy_point_samples: player.simulatedFantasyPointSamples ?? [], distribution: player.distribution ?? {}, model_path: player.modelPath ?? 'UNKNOWN_LEGACY', floor_p20: player.projectedOutcomes.floorP20, median_p50: player.projectedOutcomes.medianP50, ceiling_p90: player.projectedOutcomes.ceilingP90, median_per_1k: player.salaryEfficiency.medianPer1k, ceiling_per_1k: player.salaryEfficiency.ceilingPer1k, confidence: player.confidence, uncertainty_factors: player.uncertaintyFactors, watch_dependencies: player.watchDependencies, model_version: player.modelVersion })));
   if (projectionRows.error) throw projectionRows.error;
   const rosterSize = workingSlate.rosterRules.rosterSize;
-  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, ...(runOptions.maxSharedPlayers !== undefined && rosterSize > 0 ? { portfolioConstraints: { maxLineupOverlap: Math.min(1, runOptions.maxSharedPlayers / rosterSize) } } : {}) });
+  const multiEntryGpp = workingSlate.contest.contestKind === 'GPP' && workingSlate.contest.userEntryCount > 1;
+  const maxLineupOverlap = runOptions.maxSharedPlayers !== undefined && rosterSize > 0
+    ? Math.min(1, runOptions.maxSharedPlayers / rosterSize)
+    : multiEntryGpp ? 0.6 : undefined;
+  const portfolioConstraints = multiEntryGpp
+    ? { ...(maxLineupOverlap !== undefined ? { maxLineupOverlap } : {}), ...(workingSlate.contest.format === 'SHOWDOWN' ? { maxCaptainExposure: 0.5 } : {}) }
+    : maxLineupOverlap !== undefined ? { maxLineupOverlap } : undefined;
+  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, ...(portfolioConstraints ? { portfolioConstraints } : {}) });
   assertOptimizer(optimizer, workingSlate);
   assertContestMetrics(optimizer);
   stages.optimizer = optimizer;

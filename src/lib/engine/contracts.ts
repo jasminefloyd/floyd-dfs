@@ -173,7 +173,7 @@ export interface SlatePlayer {
   /** Optional provider-derived context. Missing fields are unknown, never inferred. */
   sportContext?: {
     nba?: { activeRotation?: boolean; starter?: boolean; minutesP10?: number; minutesP50?: number; minutesP90?: number; paceMultiplier?: number; usageMultiplier?: number };
-    mlb?: { battingOrder?: number; expectedPA?: number; platoonMultiplier?: number; parkRunMultiplier?: number; opposingStarterQuality?: number; bullpenQuality?: number; weatherRunMultiplier?: number };
+    mlb?: { battingOrder?: number; expectedPA?: number; platoonMultiplier?: number; parkRunMultiplier?: number; opposingStarterQuality?: number; bullpenQuality?: number; weatherRunMultiplier?: number; gameWeather?: { temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; retrievedAt: string } };
     nfl?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
     cfb?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
     golf?: { strokesGainedTotal?: number; courseFit?: number; weatherMultiplier?: number; cutProbability?: number; finishPositionP50?: number };
@@ -278,6 +278,8 @@ export interface StageExecutionResult<T = unknown> {
 export interface PlayerProjection {
   playerId: string;
   salary: number;
+  /** Same-slate pre-lock provider baseline, retained for paired validation only. */
+  baselineFppg?: number;
   baselineOpportunity: Record<string, number>;
   adjustedOpportunity: Record<string, number>;
   opportunityDelta: Record<string, number>;
