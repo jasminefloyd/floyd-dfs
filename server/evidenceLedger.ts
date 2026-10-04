@@ -22,6 +22,9 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
     // Persist the exact pre-lock projection inputs, outcomes, and model version used for
     // selection. This is the immutable forecast record required for later calibration.
     { snapshot_type: 'PRE_LOCK_PROJECTION_PACKAGE', source: 'ENGINE', payload: projection, source_retrieved_at: projection.generatedAt },
+    // One content-addressed artifact captures the exact contest slate, joined provider data,
+    // research evidence, adjustments, forecasts, selection and versions needed to reproduce a run.
+    { snapshot_type: 'COMPLETE_RUN_EVIDENCE', source: 'ENGINE', payload: { snapshotVersion: 'complete-run-evidence.v1', capturedAt: new Date().toISOString(), timing: { generatedAt: projection.generatedAt, lockTime: slate.contest.lockTime, preLock: Date.parse(projection.generatedAt) < Date.parse(slate.contest.lockTime) }, slateId: slate.slateId, contestIdentity: { draftKingsContestId: slate.contest.draftKingsContestId, name: slate.contest.name, format: slate.contest.format, lockTime: slate.contest.lockTime, objective: slate.contest.objective, contestKind: slate.contest.contestKind, contestSize: slate.contest.contestSize, entryFee: slate.contest.entryFee, paidPositions: slate.contest.paidPositions, payoutStructure: slate.contest.payoutStructure }, rawSlate, enrichedSlate: slate, research, adjustment, projection, optimizer, selection, modelVersions: { research: research.version, adjustment: adjustment.version, projection: projection.modelVersion, optimizer: optimizer.version, selection: selection.version }, sourceTimestamps: { slate: slate.receivedAt, research: research.generatedAt, projection: projection.generatedAt, weather: slate.playerPool.flatMap((player) => player.sportContext?.mlb?.gameWeather?.retrievedAt ? [player.sportContext.mlb.gameWeather.retrievedAt] : []), availability: slate.playerPool.flatMap((player) => player.availability?.retrievedAt ? [player.availability.retrievedAt] : []) } }, source_retrieved_at: projection.generatedAt },
   ].map((snapshot) => ({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, ...snapshot, content_sha256: digest(snapshot.payload) }));
   const snapshotResult = await db.from('floyd_dfs_run_data_snapshots').upsert(snapshots, { onConflict: 'tenant_id,generation_run_id,snapshot_type,source,content_sha256', ignoreDuplicates: true });
   if (snapshotResult.error) throw snapshotResult.error;
@@ -104,7 +107,24 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   const candidates = new Map(optimizer.candidates.map((candidate) => [candidate.id, candidate]));
   const traces = selection.selectedLineups.map((lineup) => {
     const candidate = candidates.get(lineup.candidateId);
-    const row = { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, lineup_candidate_key: lineup.candidateId, trace_payload: { lineup, candidate, objective: optimizer.objectiveProfile, searchCompleteness: optimizer.searchCompleteness, engineState: optimizer.engineState, researchFreshThrough: research.freshThrough, missingFacts: research.unknowns ?? [], projectionGaps: projection.gaps, sourceFindingIds: research.findings.filter((finding) => lineup.playerIds.includes(finding.subjectId)).map((finding) => finding.id) } };
+    const lineupFindings = research.findings.filter((finding) => lineup.playerIds.includes(finding.subjectId));
+    const recommendationEvidence = lineupFindings.map((finding) => ({
+      playerId: finding.subjectId, source: finding.sourceName, url: finding.sourceUrl,
+      retrievedAt: finding.retrievedAt, publishedAt: finding.publishedAt, expiresAt: finding.expiresAt,
+      confidence: finding.confidence, finding: finding.finding,
+      projectionEffect: adjustment.adjustments.find((item) => item.playerId === finding.subjectId)?.adjustments
+        .filter((item) => (item.evidenceFindingIds ?? []).includes(finding.id))
+        .map((item) => ({ type: item.adjustmentType, direction: item.direction, magnitude: item.magnitude, rationale: item.rationale })) ?? [],
+      uncertainty: finding.confidence === 'LOW' || finding.confidence === 'MEDIUM' ? 'Evidence strength is limited; do not treat this as a confirmed role or availability fact.' : undefined,
+    }));
+    const unresolvedPlayerInputs = lineup.playerIds.flatMap((playerId) => {
+      const player = slate.playerPool.find((item) => item.playerId === playerId);
+      if (!player) return [];
+      const missing = [!player.availability || Date.now() - Date.parse(player.availability.retrievedAt) > 12 * 60 * 60 * 1000 ? 'availability evidence missing or stale' : '', player.sportContext?.mlb?.workloadWarning ?? ''].filter(Boolean);
+      return missing.length ? [{ playerId, issues: missing }] : [];
+    });
+    const tracePayload = { lineup, candidate, objective: optimizer.objectiveProfile, searchCompleteness: optimizer.searchCompleteness, engineState: optimizer.engineState, researchFreshThrough: research.freshThrough, missingFacts: research.unknowns ?? [], projectionGaps: projection.gaps, sourceFindingIds: lineupFindings.map((finding) => finding.id), recommendationEvidence, unresolvedPlayerInputs };
+    const row = { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, lineup_candidate_key: lineup.candidateId, trace_payload: tracePayload };
     return { ...row, content_sha256: digest(row.trace_payload) };
   });
   if (traces.length) {

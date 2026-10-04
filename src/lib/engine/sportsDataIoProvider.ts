@@ -3,7 +3,7 @@ import { normalizeProviderName, normalizeTeamCode, parseAvailabilityRecords, typ
 
 export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; }
 export interface GolfProjectionRefresh { rows: Record<string, unknown>[]; tournamentName?: string; warning?: string; }
-export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
+export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; homeProbablePitcherId?: string; awayProbablePitcherId?: string; homeProbablePitcher?: string; awayProbablePitcher?: string; homeOpener?: boolean; awayOpener?: boolean; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
 export interface WnbaRecentPlayerMinutes { playerId?: string; name?: string; team?: string; minutes: number[]; }
 
 export class SportsDataIoClient {
@@ -206,7 +206,7 @@ export class SportsDataIoClient {
     const rows = rowsFromPayload(await this.get<unknown>('MLB', 'scores', 'GamesByDate', date, signal));
     return rows.flatMap((value) => {
       const row = asRecord(value); if (!row) return [];
-      return [{ gameId: readIdentifier(row, ['GameID', 'GameId']), homeTeam: readString(row, ['HomeTeam']), awayTeam: readString(row, ['AwayTeam']), temperatureLow: readNumber(row, ['ForecastTempLow']), temperatureHigh: readNumber(row, ['ForecastTempHigh']), windSpeed: readNumber(row, ['ForecastWindSpeed']), windDirection: readString(row, ['ForecastWindDirection']), description: readString(row, ['ForecastDescription']) }];
+      return [{ gameId: readIdentifier(row, ['GameID', 'GameId']), homeTeam: readString(row, ['HomeTeam']), awayTeam: readString(row, ['AwayTeam']), homeProbablePitcherId: readIdentifier(row, ['HomeTeamProbablePitcherID']), awayProbablePitcherId: readIdentifier(row, ['AwayTeamProbablePitcherID']), homeProbablePitcher: readString(row, ['HomeTeamStartingPitcher']), awayProbablePitcher: readString(row, ['AwayTeamStartingPitcher']), homeOpener: readBoolean(row, ['HomeTeamOpener']), awayOpener: readBoolean(row, ['AwayTeamOpener']), temperatureLow: readNumber(row, ['ForecastTempLow']), temperatureHigh: readNumber(row, ['ForecastTempHigh']), windSpeed: readNumber(row, ['ForecastWindSpeed']), windDirection: readString(row, ['ForecastWindDirection']), description: readString(row, ['ForecastDescription']) }];
     });
   }
   /** WNBA exposes final player minutes nested in its final box-score feed. This bounded
@@ -345,4 +345,5 @@ function asRecord(value: unknown): Record<string, unknown> | undefined { return 
 function readString(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]).trim(); return undefined; }
 function readIdentifier(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) { const value = record[key]; if ((typeof value === 'string' || typeof value === 'number') && String(value).trim()) return String(value).trim(); } return undefined; }
 function readNumber(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'number' && Number.isFinite(value)) return value; if (typeof value === 'string' && Number.isFinite(Number(value))) return Number(value); } return undefined; }
+function readBoolean(record: Record<string, unknown>, keys: string[]): boolean | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'boolean') return value; if (typeof value === 'number' && (value === 0 || value === 1)) return value === 1; if (typeof value === 'string' && /^(true|false)$/i.test(value)) return value.toLowerCase() === 'true'; } return undefined; }
 function fullName(record: Record<string, unknown>): string | undefined { const first = readString(record, ['FirstName', 'firstName']); const last = readString(record, ['LastName', 'lastName']); return first && last ? `${first} ${last}` : first ?? last; }

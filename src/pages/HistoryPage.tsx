@@ -12,6 +12,7 @@ export default function HistoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [fieldImportStatus, setFieldImportStatus] = useState<string | null>(null);
   useEffect(() => { void floydRequest<{ lineups: HistoryRow[] }>('/api/lineups').then((data) => setRows(data.lineups ?? [])).catch((reason) => setError(reason instanceof Error ? reason.message : 'Unable to load lineup history.')); }, []);
   const filtered = rows.filter((row) => status === 'all' || String(row.status ?? '').toLowerCase() === status);
   async function importResults(file?: File) {
@@ -25,10 +26,21 @@ export default function HistoryPage() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to import contest results.'); }
     finally { setImporting(false); }
   }
+  async function importField(file?: File) {
+    if (!file) return;
+    setImporting(true); setFieldImportStatus(null); setError(null);
+    try {
+      const csvText = await file.text();
+      const result = await floydRequest<{ imported: number; failed: number; errors?: Array<{ row: number; error: string }> }>('/api/results/import-field', { method: 'POST', body: JSON.stringify({ csvText }) });
+      setFieldImportStatus(`Imported ${result.imported} contest field row(s); ${result.failed} row(s) need attention.${result.errors?.[0] ? ` First issue: row ${result.errors[0].row}: ${result.errors[0].error}` : ''}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to import DraftKings standings.'); }
+    finally { setImporting(false); }
+  }
   return <AppPage eyebrow="04 / HISTORY" title="Your lineup history." subtitle="Every generated and entered lineup stays attached to its run lineage.">
     <div className="mb-4 flex flex-wrap gap-2">{['all', 'generated', 'entered'].map((value) => <button key={value} type="button" onClick={() => setStatus(value)} className={`rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${status === value ? 'border-[#0b1f3a] bg-[#0b1f3a] text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{value}</button>)}</div>
-    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import DraftKings results CSV'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Add a <code>lineup_id</code> column to the DraftKings export to match each entry in this history.</span></div>
+    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import my DraftKings results'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Requires a <code>lineup_id</code> column to match your entry.</span><label className="cursor-pointer rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900">Import full contest standings<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importField(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Field CSV: contest_id, external_entry_id, sport, contest_format, field_size, entry_fee, paid_positions, finish_position, actual_dk_points, payout, player_ids.</span></div>
     {importStatus ? <p className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">{importStatus}</p> : null}
+    {fieldImportStatus ? <p className="mb-3 rounded-md border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900">{fieldImportStatus}</p> : null}
     {error ? <ErrorBox message={error} /> : filtered.length ? <div className="grid gap-3 md:grid-cols-2">{filtered.map((row, index) => <HistoryCard key={String(row.id ?? index)} row={row} />)}</div> : <EmptyState text="No persisted lineups match this filter." />}
   </AppPage>;
 }
@@ -37,7 +49,10 @@ function HistoryCard({ row }: { row: HistoryRow }) {
   const payload = (row.lineup_payload ?? {}) as HistoryRow;
   const players = Array.isArray(payload.playerIds) ? payload.playerIds.length : 0;
   const isEntered = String(row.status ?? '').toLowerCase() === 'entered';
-  const hasRecordedResult = typeof row.actual_dk_points === 'number';
+  const hasRecordedResult = Number.isFinite(Number(row.actual_dk_points));
+  const reconciliation = String(row.reconciliation_status ?? 'UNVERIFIED');
+  const resultPayload = row.result_payload && typeof row.result_payload === 'object' ? row.result_payload as HistoryRow : {};
+  const reconciliationDetail = resultPayload.reconciliation && typeof resultPayload.reconciliation === 'object' ? resultPayload.reconciliation as HistoryRow : {};
   const generationRunId = historyGenerationRunId(row);
   return <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-[var(--shadow-subtle)]">
     <div className="flex items-start justify-between gap-3">
@@ -53,7 +68,7 @@ function HistoryCard({ row }: { row: HistoryRow }) {
       <Metric label="Salary" value={formatMoney(payload.salaryUsed)} />
       <Metric label="Players" value={String(players || '—')} />
     </div>
-    {hasRecordedResult ? <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900"><p className="font-black">Recorded contest result</p><p className="mt-1">{Number(row.actual_dk_points).toFixed(2)} actual points{typeof row.cash_line === 'number' ? ` · cash line ${Number(row.cash_line).toFixed(2)} · ${row.beat_cash_line ? 'cleared' : 'missed'}` : ''}{typeof row.finish_position === 'number' ? ` · rank #${row.finish_position}` : ''}{typeof row.payout === 'number' ? ` · payout $${Number(row.payout).toFixed(2)}` : ''}</p></div> : null}
+    {hasRecordedResult ? <div className={`mt-3 rounded-lg border p-3 text-xs ${reconciliation === 'MATCHED' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-300 bg-amber-50 text-amber-950'}`}><p className="font-black">Contest outcome · {reconciliation.replaceAll('_', ' ')}{row.model_evaluation_eligible === true ? ' · eligible for evaluation' : ' · excluded from model evaluation'}</p><p className="mt-1">{Number(row.actual_dk_points).toFixed(2)} actual points{Number.isFinite(Number(row.cash_line)) ? ` · cash line ${Number(row.cash_line).toFixed(2)} · ${row.beat_cash_line ? 'cleared' : 'missed'}` : ''}{Number.isFinite(Number(row.finish_position)) ? ` · rank #${row.finish_position}` : ''}{Number.isFinite(Number(row.payout)) ? ` · payout $${Number(row.payout).toFixed(2)}` : ''}</p>{typeof reconciliationDetail.reasons === 'string' ? <p className="mt-1">{reconciliationDetail.reasons}</p> : Array.isArray(reconciliationDetail.reasons) && reconciliationDetail.reasons.length ? <p className="mt-1">{reconciliationDetail.reasons.map(String).join(' ')}</p> : null}</div> : null}
     <div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-500">
       <span>{formatDate(String(row.created_at ?? ''))}</span>
       {generationRunId ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${encodeURIComponent(generationRunId)}`}>View run</Link> : <span className="text-[10px] text-slate-400">Run lineage unavailable</span>}

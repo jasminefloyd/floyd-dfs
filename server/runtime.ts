@@ -293,8 +293,16 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         const game = games.find((row) => teams.has(normalizeTeamCode(row.homeTeam ?? '')) && teams.has(normalizeTeamCode(row.awayTeam ?? '')));
         const retrievedAt = new Date().toISOString();
         const players = await Promise.all(workingSlate.playerPool.map(async (player) => {
+          const team = normalizeTeamCode(String(player.team ?? ''));
+          const opponent = normalizeTeamCode(String(player.opponent ?? ''));
+          const playerGame = games.find((row) => [normalizeTeamCode(row.homeTeam ?? ''), normalizeTeamCode(row.awayTeam ?? '')].includes(team) && [normalizeTeamCode(row.homeTeam ?? ''), normalizeTeamCode(row.awayTeam ?? '')].includes(opponent));
           const isPitcher = /^(SP|RP|P)$/i.test(String(player.position ?? ''));
           const id = player.identity?.sportsDataIoId;
+          const homePitcher = playerGame && normalizeTeamCode(playerGame.homeTeam ?? '') === team;
+          const probablePitcherId = playerGame ? homePitcher ? playerGame.homeProbablePitcherId : playerGame.awayProbablePitcherId : undefined;
+          const probablePitcherName = playerGame ? homePitcher ? playerGame.homeProbablePitcher : playerGame.awayProbablePitcher : undefined;
+          const probableStarter = Boolean(playerGame && ((id && probablePitcherId && id === probablePitcherId) || (probablePitcherName && normalizeProviderName(probablePitcherName) === normalizeProviderName(player.playerName))));
+          const scheduledOpener = Boolean(probableStarter && playerGame && (homePitcher ? playerGame.homeOpener : playerGame.awayOpener));
           let projectionInputs = player.projectionInputs;
           if (isPitcher && id) {
             try {
@@ -304,26 +312,46 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
                 const timestamp = Date.parse(String(row.DateTime ?? row.Day ?? row.Date ?? ''));
                 return Number.isFinite(timestamp) && timestamp < lock;
               });
-              const starts = preLockLogs.filter((row) => row.Started === true || Number(row.Started) === 1 || Number(row.PitchingGamesStarted ?? row.GamesStarted ?? 0) > 0);
-              const innings = starts.flatMap((row) => {
+              const isStarted = (row: Record<string, unknown>) => row.Started === true || Number(row.Started) === 1 || Number(row.PitchingGamesStarted ?? row.GamesStarted ?? 0) > 0;
+              const starts = preLockLogs.filter(isStarted);
+              const relief = preLockLogs.filter((row) => !isStarted(row));
+              const declaredRole = probableStarter || String(player.position ?? '').toUpperCase() === 'SP' || player.availability?.status === 'CONFIRMED_STARTER' ? 'STARTER' : String(player.position ?? '').toUpperCase() === 'RP' ? 'RELIEVER' : 'UNKNOWN';
+              const starterInnings = starts.flatMap((row) => {
                 const value = Number(row.InningsPitchedDecimal ?? row.InningsPitched ?? NaN);
                 return Number.isFinite(value) && value > 0 ? [value] : [];
               }).slice(0, 5);
+              const reliefInnings = relief.flatMap((row) => {
+                const value = Number(row.InningsPitchedDecimal ?? row.InningsPitched ?? NaN);
+                return Number.isFinite(value) && value >= 0 ? [value] : [];
+              }).slice(0, 5);
+              const role = declaredRole === 'UNKNOWN' ? starts.length >= 3 && starts.length / Math.max(1, preLockLogs.length) >= 0.6 ? 'STARTER' : relief.length >= 3 ? 'RELIEVER' : 'UNKNOWN' : declaredRole;
+              const recentShortStarter = role === 'STARTER' && starterInnings.length >= 3 && starterInnings.filter((value) => value <= 2).length / starterInnings.length >= 0.5;
+              const opener = scheduledOpener || recentShortStarter;
+              const workloadRole = opener ? 'RELIEVER' : role;
+              const innings = workloadRole === 'STARTER' ? starterInnings : workloadRole === 'RELIEVER' ? reliefInnings : [];
               if (innings.length && projectionInputs?.expectedInnings !== undefined) {
                 const recentAverage = innings.reduce((sum, value) => sum + value, 0) / innings.length;
                 projectionInputs = { ...projectionInputs, expectedInnings: projectionInputs.expectedInnings * 0.5 + recentAverage * 0.5 };
               }
+              const workload = innings.length ? innings.reduce((sum, value) => sum + value, 0) / innings.length : undefined;
+              const recentPitches = preLockLogs.flatMap((row) => { const value = Number(row.PitchesThrown ?? NaN); const dateValue = Date.parse(String(row.DateTime ?? row.Day ?? row.Date ?? '')); return Number.isFinite(value) && value >= 0 && Number.isFinite(dateValue) && Number.isFinite(lock) && dateValue >= lock - 72 * 60 * 60 * 1000 ? [value] : []; });
+              const pitchValues = innings.map((_, index) => Number((role === 'STARTER' ? starts : relief)[index]?.PitchesThrown ?? NaN)).filter((value) => Number.isFinite(value) && value >= 0);
+              const expectedPitchesP50 = pitchValues.length ? [...pitchValues].sort((a,b) => a-b)[Math.floor((pitchValues.length - 1) * 0.5)] : undefined;
+              const workloadWarning = role === 'UNKNOWN' ? 'Pitcher role is unresolved; no starter workload was assumed.' : opener ? innings.length ? 'Opener/short-outing role uses the player’s recent relief innings; verify any explicit pitch limit.' : 'Opener plan detected, but no recent relief workload sample exists; expected innings remain provisional.' : role === 'RELIEVER' ? 'Recent pitcher logs are available, but team bullpen availability is not included in this projection.' : !probableStarter && player.availability?.status !== 'CONFIRMED_STARTER' ? 'Historical starter workload is modeled, but the current probable starter is not matched to this player.' : undefined;
+              const pitchRestWarning = recentPitches.length ? 'Pitcher threw pitches within 72 hours before lock; workload impact is surfaced but no unvalidated numeric penalty is applied.' : undefined;
+              const completeWorkloadWarning = [workloadWarning, pitchRestWarning].filter(Boolean).join(' ');
+              player = { ...player, sportContext: { ...player.sportContext, mlb: { ...player.sportContext?.mlb, pitcherRole: opener ? 'OPENER' : role, probableStarter, ...(probablePitcherId ? { probablePitcherId } : {}), ...(workload === undefined ? {} : { expectedInningsP10: Math.max(0, Math.min(...innings)), expectedInningsP50: workload, expectedInningsP90: Math.max(...innings) }), ...(expectedPitchesP50 === undefined ? {} : { expectedPitchesP50 }), ...(recentPitches.length ? { recentPitchesLast3Days: recentPitches.reduce((sum,value) => sum + value, 0) } : {}), workloadSampleCount: innings.length, workloadRetrievedAt: new Date().toISOString(), bullpenAvailability: 'UNKNOWN', ...(completeWorkloadWarning ? { workloadWarning: completeWorkloadWarning } : {}) } } };
+              if (workloadWarning || pitchRestWarning) stages.workloadWarnings = [...((stages.workloadWarnings as string[] | undefined) ?? []), `${player.playerName}: ${[workloadWarning, pitchRestWarning].filter(Boolean).join(' ')}`];
             } catch (error) {
               stages.workloadWarnings = [...((stages.workloadWarnings as string[] | undefined) ?? []), `Recent MLB workload unavailable for ${player.playerName}: ${error instanceof Error ? error.message : 'feed request failed'}.`];
             }
           }
-          const team = normalizeTeamCode(String(player.team ?? ''));
-          const gameWeather = game && [game.homeTeam, game.awayTeam].some((value) => normalizeTeamCode(value ?? '') === team) ? {
-            ...(game.temperatureLow !== undefined ? { temperatureLow: game.temperatureLow } : {}),
-            ...(game.temperatureHigh !== undefined ? { temperatureHigh: game.temperatureHigh } : {}),
-            ...(game.windSpeed !== undefined ? { windSpeed: game.windSpeed } : {}),
-            ...(game.windDirection ? { windDirection: game.windDirection } : {}),
-            ...(game.description ? { description: game.description } : {}), retrievedAt,
+          const gameWeather = playerGame ? {
+            ...(playerGame.temperatureLow !== undefined ? { temperatureLow: playerGame.temperatureLow } : {}),
+            ...(playerGame.temperatureHigh !== undefined ? { temperatureHigh: playerGame.temperatureHigh } : {}),
+            ...(playerGame.windSpeed !== undefined ? { windSpeed: playerGame.windSpeed } : {}),
+            ...(playerGame.windDirection ? { windDirection: playerGame.windDirection } : {}),
+            ...(playerGame.description ? { description: playerGame.description } : {}), retrievedAt,
           } : undefined;
           return { ...player, ...(projectionInputs ? { projectionInputs } : {}), ...(gameWeather ? { sportContext: { ...player.sportContext, mlb: { ...player.sportContext?.mlb, gameWeather } } } : {}) };
         }));
@@ -348,11 +376,12 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           const ordered = [...samples].sort((a, b) => a - b);
           const quantile = (q: number) => ordered[Math.min(ordered.length - 1, Math.floor((ordered.length - 1) * q))];
           const recentMedian = quantile(0.5);
+          const limitedMinutesRisk = ordered.length >= 5 ? ordered.filter((minutes) => minutes <= 10).length / ordered.length : 0;
           const expectedMinutes = player.projectionInputs?.expectedMinutes;
           const minutesP50 = expectedMinutes !== undefined ? expectedMinutes * 0.5 + recentMedian * 0.5 : recentMedian;
           const minutesP10 = Math.min(quantile(0.1), minutesP50);
           const minutesP90 = Math.max(quantile(0.9), minutesP50);
-          return { ...player, projectionInputs: { ...player.projectionInputs, expectedMinutes: minutesP50, minutesP10, minutesP90 }, sportContext: { ...player.sportContext, nba: { ...player.sportContext?.nba, minutesP10, minutesP50, minutesP90 } } };
+          return { ...player, projectionInputs: { ...player.projectionInputs, expectedMinutes: minutesP50, minutesP10, minutesP90, limitedMinutesRisk }, sportContext: { ...player.sportContext, nba: { ...player.sportContext?.nba, minutesP10, minutesP50, minutesP90, limitedMinutesRisk, minutesSampleCount: ordered.length, minutesRetrievedAt: new Date().toISOString() } } };
         });
         workingSlate = { ...workingSlate, playerPool };
         stages.wnbaMinutesHistory = { source: 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, retrievedAt: new Date().toISOString() };
@@ -368,6 +397,11 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (espnProjection && ['NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
     if (workingSlate.sport !== 'CFB' || !cfbSportsDataRosterAvailable) try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate), new Date()); }
     catch (error) { const message = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `ESPN availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
+  }
+  if (workingSlate.sport === 'WNBA') {
+    const now = Date.now();
+    const stale = workingSlate.playerPool.filter((player) => { const retrieved = Date.parse(player.availability?.retrievedAt ?? ''); return !Number.isFinite(retrieved) || now - retrieved > 12 * 60 * 60 * 1000; });
+    if (stale.length) stages.wnbaAvailabilityFreshnessWarning = `Current structured injury/role evidence is missing or older than 12 hours for ${stale.length}/${workingSlate.playerPool.length} WNBA players. SportsDataIO does not confirm pregame lineups; treat role and DNP risk as unresolved for these players.`;
   }
   if (['NFL', 'CFB'].includes(workingSlate.sport)) {
     const notReady = workingSlate.playerPool.flatMap((player) => {

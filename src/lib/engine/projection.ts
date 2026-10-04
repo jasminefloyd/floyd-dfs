@@ -198,7 +198,12 @@ function sampleBasketball(player: SlatePlayer, components: Record<string, number
   // does not pretend to know a calibrated DNP probability.
   const roleUnconfirmed = player.availability?.roleStatus !== 'CONFIRMED_STARTER' && player.availability?.roleStatus !== 'EXPECTED_STARTER';
   const minutesDeviation = sourcedMinutesBand ? Math.max(1, (sourcedP90! - sourcedP10!) / 2.563) : Math.max(1, minutesMean * (roleUnconfirmed ? 0.25 : 0.12));
-  const minutes = positiveNormal(minutesMean, minutesDeviation, random);
+  // Historical low-minute outcomes are sampled as a separate tail event so a player with
+  // recurring restricted appearances does not get represented by a deceptively tight mean.
+  const limitedRisk = clampRate(inputs.limitedMinutesRisk ?? 0);
+  const minutes = random() < limitedRisk
+    ? (sourcedMinutesBand ? Math.max(0, sourcedP10!) : Math.max(0, minutesMean * 0.25))
+    : positiveNormal(minutesMean, minutesDeviation, random);
   const minuteRatio = inputs.expectedMinutes ? minutes / inputs.expectedMinutes : 1;
   const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => {
     const environment = 1 + gameNoise * 0.35;
@@ -276,6 +281,7 @@ function applySportContext(slate: ValidatedSlate, player: SlatePlayer, values: R
     if (context?.minutesP50 !== undefined && Number.isFinite(context.minutesP50)) adjusted.expectedMinutes = context.minutesP50;
     if (context?.minutesP10 !== undefined && Number.isFinite(context.minutesP10)) adjusted.minutesP10 = context.minutesP10;
     if (context?.minutesP90 !== undefined && Number.isFinite(context.minutesP90)) adjusted.minutesP90 = context.minutesP90;
+    if (context?.limitedMinutesRisk !== undefined && Number.isFinite(context.limitedMinutesRisk)) adjusted.limitedMinutesRisk = context.limitedMinutesRisk;
     if (context?.paceMultiplier !== undefined) for (const field of ['pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute']) if (Number.isFinite(adjusted[field])) adjusted[field] *= context.paceMultiplier;
     if (context?.usageMultiplier !== undefined && Number.isFinite(adjusted.pointsPerMinute)) adjusted.pointsPerMinute *= context.usageMultiplier;
   }

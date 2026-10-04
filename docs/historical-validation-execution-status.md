@@ -1,9 +1,11 @@
 # Historical Validation and Trust Improvements: Execution Status
 
-**Updated:** October 2, 2026
+**Updated:** October 3, 2026
 **Scope:** MLB, WNBA, NFL, College Football, and Golf. The app also supports NBA; it is outside this five-sport workstream.
 
 ## Results at a glance
+
+The October 3 follow-up below supersedes earlier row counts and reconciliation statuses in this document.
 
 The work is materially advanced, but it is not complete enough to claim validated scoring or winning probability.
 
@@ -97,3 +99,34 @@ The importer needs `SUPABASE_URL` (or `VITE_SUPABASE_URL`), `SUPABASE_SERVICE_RO
 4. Import DraftKings standings for existing results (or manually add full contest labels). The linked database still has five results, zero contest IDs, zero field sizes, zero payouts, two cash lines, and four finish positions. Investigate the two MLB score mismatches before accepting their score labels.
 5. Run the paired holdout after enough independent event slates accumulate. Report MAE, bias, quantile coverage, and role errors separately by sport; hold back probabilities until acceptance criteria pass.
 6. Build a validated MLB weather/run-environment model, WNBA DNP/minutes-role model, and explicit MLB opener/limit/bullpen workload scenarios before claiming those factors are quantitatively modeled.
+
+## October 3 implementation follow-up
+
+### Completed in code and linked database
+
+- Added source-integrity and finality fields for historical player actuals, plus append-only actual revisions and official field-entry records. Source-stat integrity is checked before an actual can enter calibration; calibration now requires verified final/corrected actuals.
+- Added sport-specific valid DK point increments (MLB/WNBA 0.25, NFL/CFB 0.1, Golf 0.5), MLB component-integrity checks, and WNBA integer-stat checks. Revision correction detection compares source score/components, so a change in validation policy does not falsely label unchanged stats as corrected.
+- Reconciled all five saved contest results after the source audit. The two MLB rows are `SOURCE_INVALID`, `model_evaluation_eligible=false`; imported SportsDataIO batter/pitcher components include impossible fractional counting stats (for example fractional at-bats and strikeouts). The source feed cannot prove which recorded contest total is correct, so neither saved score was changed. The other three results are `UNAVAILABLE` because exact event-matched player actuals were not available. All five remain excluded from model evaluation.
+- Latest backfill imported 2,645 matched actual rows: 94 MLB rows pass integrity checks; 2,481 MLB and all 70 WNBA rows are quarantined as `INVALID_SOURCE`. NFL, CFB, and Golf still have no usable matched player actual rows from the archived packages. The importer reports the unsupported CFB scoring and Golf format gaps instead of inventing values.
+- New runs now persist a content-addressed `COMPLETE_RUN_EVIDENCE` record with lock-time classification, slate/player pool, DraftKings contest identity and rules, research, adjustments, projections, optimizer/selection results, model versions, and source timestamps. The database rejects updates/deletes to run snapshots, actual revisions, and imported field rows.
+- Backfilled run evidence from retained data: 204 of 299 generation runs had a saved validated slate and received an immutable complete or explicitly partial legacy snapshot. The other 95 have no validated slate in the saved generation request, so the missing input cannot be reconstructed.
+- Added WNBA recent low-minute risk as a lower-tail event in fantasy-point simulation, with sample count and retrieval time. Historical player actuals now retain box-score minutes separately from scoring components for opportunity diagnosis. The UI/run evidence warns when structured availability is missing or older than 12 hours. This is a limited-minutes risk proxy; SportsDataIO box scores do not supply a reliable DNP denominator, and WNBA lineup/rotation uncertainty must remain visible.
+- Added MLB schedule probable-pitcher IDs and opener flags, per-game weather matching, recent starter/reliever innings and pitch-count summaries, recent 72-hour pitches when logs provide them, and explicit workload warnings. Team bullpen availability and manager-imposed pitch limits remain unknown unless a direct source confirms them; no guessed numerical penalty is applied.
+- Added a pre-lock recheck that refreshes structured availability/news and compares MLB weather, records affected lineups, and offers a new DraftKings-backed replacement run before lock. Existing/entered lineups remain immutable.
+- Added a standings CSV import for full field entries and a contest diagnostic comparing archived pre-lock ownership to actual field ownership. The simulator remains `DIAGNOSTIC_ONLY`; one contest cannot activate probability claims.
+- Official DraftKings CSV results are distinguished from manual labels, but a lineup becomes eligible for model evaluation only after all player actuals pass source validation and the player-score sum matches the recorded score. Validated official results can create post-slate diagnoses for scoring integrity, playing-time deviations, late availability/role changes, weather changes, research gaps, projection misses, and ordinary variance. Learning observations are deduplicated by contest identity so multiple entries do not count as independent repeat evidence.
+- Lineup decision traces now preserve source links, retrieval/publication/expiry timestamps, confidence, mapped projection effects, and unresolved stale evidence.
+
+### Validation and live state
+
+- `npm run check:server`, `npm run test:parity`, `npm run lint`, `npm run build`, and `git diff --check` pass. Vite prints a non-blocking warning because the workspace Node runtime is 20.13.1 and Vite recommends 20.19+; the production build still completes.
+- Migration `20261003010000_actual_integrity_and_contest_field_validation.sql` was applied to the linked database and marked applied in Supabase migration history.
+- The imported player actuals are not broadly trustworthy yet: most MLB rows and all WNBA rows currently fail component integrity, while archived NFL/CFB/Golf joins remain incomplete. Keep performance claims and all win probabilities disabled. Re-import or reconcile against a corrected provider source or official DraftKings scoring export before using those rows.
+
+### Remaining external evidence dependencies
+
+1. Resolve the two MLB recorded totals using official DraftKings standings or corrected event-matched player actuals plus the saved contest's exact scoring/roster rules. Do not mark either as matched until the source components validate and the score sum agrees.
+2. Identify a reliable WNBA source that records inactive/DNP players and pregame role changes; an appearance-only box-score sample cannot estimate DNP frequency.
+3. Verify MLB pitch limits and team bullpen usage from an event-specific source, then evaluate those features on a frozen holdout before allowing them to change projected innings.
+4. Backfill complete outcome labels and exact player actuals for NFL/CFB/Golf, repair empty Golf projection packages, and supply round-level Golf Showdown outcomes.
+5. Import multi-contest standings and evaluate field ownership/payout simulation chronologically. Until enough independent contests pass the preregistered calibration review, keep simulator metrics diagnostic and win probability unavailable.

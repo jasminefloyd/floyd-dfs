@@ -379,13 +379,15 @@ const testSportsDataIoHistoricalContextFeedsParity = async (): Promise<void> => 
   const requested: string[] = [];
   const client = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
     const url = String(input); requested.push(url);
-    if (url.endsWith('/mlb/scores/json/GamesByDate/2026-09-30')) return new Response(JSON.stringify([{ GameID: 1, HomeTeam: 'NYY', AwayTeam: 'BOS', ForecastTempLow: 68, ForecastTempHigh: 74, ForecastWindSpeed: 8, ForecastWindDirection: 'W', ForecastDescription: 'Clear' }]), { status: 200 });
+    if (url.endsWith('/mlb/scores/json/GamesByDate/2026-09-30')) return new Response(JSON.stringify([{ GameID: 1, HomeTeam: 'NYY', AwayTeam: 'BOS', HomeTeamProbablePitcherID: 123, AwayTeamProbablePitcherID: 124, HomeTeamOpener: true, ForecastTempLow: 68, ForecastTempHigh: 74, ForecastWindSpeed: 8, ForecastWindDirection: 'W', ForecastDescription: 'Clear' }]), { status: 200 });
     if (url.endsWith('/mlb/stats/json/PlayerGameStatsBySeason/2026/123/10')) return new Response(JSON.stringify([{ DateTime: '2026-09-28T20:00:00Z', Started: true, InningsPitchedDecimal: 5.2 }]), { status: 200 });
     if (/\/wnba\/scores\/json\/BoxScores\/2026-09-29$/.test(url)) return new Response(JSON.stringify([{ PlayerGames: [{ PlayerID: 7, Name: 'Player Seven', Team: 'IND', Minutes: 31.5 }] }]), { status: 200 });
     return new Response(JSON.stringify([]), { status: 200 });
   } });
   const weather = await client.getMlbGameWeather('2026-09-30');
   assert.equal(weather[0]?.temperatureHigh, 74);
+  assert.equal(weather[0]?.homeProbablePitcherId, '123');
+  assert.equal(weather[0]?.homeOpener, true);
   assert.equal((await client.getMlbPlayerGameLogs('2026', 123, 10))[0]?.InningsPitchedDecimal, 5.2);
   const minutes = await client.getWnbaRecentMinutes('2026-09-30', 2);
   assert.equal(minutes.find((row) => row.playerId === '7')?.minutes[0], 31.5);

@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { createHash } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 
@@ -83,7 +84,7 @@ async function feed(sport, date, slate) {
   return rows;
 }
 
-const report = { eligibleProjectionRuns: eligible.length, importedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
+const report = { eligibleProjectionRuns: eligible.length, importedRows: 0, verifiedRows: 0, quarantinedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
 for (const item of eligible) {
   const { projection, slate, eventDate, lock, generated } = item;
   const sport = projection.sport;
@@ -135,11 +136,33 @@ for (const item of eligible) {
     if (sport === 'GOLF' && slate.contest?.format !== 'CLASSIC') continue;
     const actual = scoreActual(sport, matches[0], slate.contest?.scoringRules);
     if (!Number.isFinite(actual.points)) { report.bySport[sport].unscorableMatches += 1; continue; }
-    prepared.push({ tenant_id: tenant.id, generation_run_id: projection.generation_run_id, projection_run_id: projection.id, slate_id: `${sport}:${slate.event?.eventId ?? eventDate}:${eventDate}:${slate.contest?.format ?? 'UNKNOWN'}`, sport, event_date: eventDate, player_id: String(player.playerId), provider_player_id: providerId || String(matches[0].PlayerID ?? ''), player_name: String(player.playerName), team: player.team ?? null, position: player.position ?? null, model_version: projection.model_version, projection_generated_at: generated, lock_time: lock, projected_floor: projected.floor, projected_median: projected.median, projected_ceiling: projected.ceiling, baseline_fppg: projected.baselineFppg ?? (Number.isFinite(Number(player.providerFppg)) ? Number(player.providerFppg) : null), actual_dk_points: actual.points, actual_components: actual.components, provider: 'SPORTSDATAIO_FINAL', identity_match: matchType });
+    const integrity = validateActual(sport, matches[0], actual);
+    const actualRow = { tenant_id: tenant.id, generation_run_id: projection.generation_run_id, projection_run_id: projection.id, slate_id: `${sport}:${slate.event?.eventId ?? eventDate}:${eventDate}:${slate.contest?.format ?? 'UNKNOWN'}`, sport, contest_format: slate.contest?.format ?? 'UNKNOWN', event_date: eventDate, player_id: String(player.playerId), provider_player_id: providerId || String(matches[0].PlayerID ?? ''), player_name: String(player.playerName), team: player.team ?? null, position: player.position ?? null, model_version: projection.model_version, projection_generated_at: generated, lock_time: lock, projected_floor: projected.floor, projected_median: projected.median, projected_ceiling: projected.ceiling, baseline_fppg: projected.baselineFppg ?? (Number.isFinite(Number(player.providerFppg)) ? Number(player.providerFppg) : null), actual_dk_points: actual.points, actual_components: actual.components, provider: 'SPORTSDATAIO_FINAL', identity_match: matchType, source_validation_status: integrity.valid ? 'VERIFIED' : 'INVALID_SOURCE', source_validation_reason: integrity.reason ?? null, source_retrieved_at: new Date().toISOString(), finality_status: 'FINAL' };
+    actualRow.content_sha256 = createHash('sha256').update(stableJson({ points: actualRow.actual_dk_points, components: actualRow.actual_components, provider: actualRow.provider })).digest('hex');
+    prepared.push(actualRow);
   }
   for (let offset = 0; offset < prepared.length; offset += 500) {
-    const { error } = await db.from('floyd_dfs_historical_player_actuals').upsert(prepared.slice(offset, offset + 500), { onConflict: 'tenant_id,projection_run_id,player_id' });
+    const batch = prepared.slice(offset, offset + 500);
+    const projectionRunId = batch[0]?.projection_run_id;
+    const playerIds = batch.map((row) => row.player_id);
+    if (projectionRunId && playerIds.length) {
+      const prior = await db.from('floyd_dfs_player_actual_revisions').select('player_id,actual_dk_points,actual_components').eq('tenant_id', tenant.id).eq('projection_run_id', projectionRunId).in('player_id', playerIds).order('imported_at', { ascending: false });
+      if (prior.error) throw prior.error;
+      const priorByPlayer = new Map();
+      for (const revision of prior.data ?? []) if (!priorByPlayer.has(String(revision.player_id))) priorByPlayer.set(String(revision.player_id), { points: Number(revision.actual_dk_points), components: revision.actual_components });
+      for (const row of batch) {
+        const previous = priorByPlayer.get(row.player_id);
+        if (previous && (previous.points !== row.actual_dk_points || stableJson(scoringComponents(previous.components)) !== stableJson(scoringComponents(row.actual_components)))) row.finality_status = 'CORRECTED';
+      }
+    }
+    const historicalRows = batch.map(({ content_sha256: _contentSha, ...row }) => row);
+    const { error } = await db.from('floyd_dfs_historical_player_actuals').upsert(historicalRows, { onConflict: 'tenant_id,projection_run_id,player_id' });
     if (error) throw error;
+    const revisions = batch.map((row) => ({ tenant_id: row.tenant_id, generation_run_id: row.generation_run_id, projection_run_id: row.projection_run_id, sport: row.sport, event_date: row.event_date, player_id: row.player_id, actual_dk_points: row.actual_dk_points, actual_components: row.actual_components, source: row.provider, source_validation_status: row.source_validation_status, source_validation_reason: row.source_validation_reason, finality_status: row.finality_status, source_retrieved_at: row.source_retrieved_at, content_sha256: row.content_sha256 }));
+    const revisionResult = await db.from('floyd_dfs_player_actual_revisions').upsert(revisions, { onConflict: 'tenant_id,projection_run_id,player_id,content_sha256', ignoreDuplicates: true });
+    if (revisionResult.error) throw revisionResult.error;
+    report.verifiedRows += batch.filter((row) => row.source_validation_status === 'VERIFIED').length;
+    report.quarantinedRows += batch.filter((row) => row.source_validation_status !== 'VERIFIED').length;
   }
   report.importedRows += prepared.length;
   report.bySport[sport].importedRows += prepared.length;
@@ -148,9 +171,9 @@ report.resultReconciliation = await reconcileExistingResults();
 console.log(JSON.stringify(report, null, 2));
 
 async function reconcileExistingResults() {
-  const { data: results, error } = await db.from('floyd_dfs_contest_results').select('id,generated_lineup_id,actual_dk_points,result_payload').eq('tenant_id', tenant.id).limit(5000);
+  const { data: results, error } = await db.from('floyd_dfs_contest_results').select('id,generated_lineup_id,actual_dk_points,result_payload,official_outcome').eq('tenant_id', tenant.id).limit(5000);
   if (error) throw error;
-  const summary = { total: results?.length ?? 0, matched: 0, scoreMismatch: 0, unavailable: 0 };
+  const summary = { total: results?.length ?? 0, matched: 0, scoreMismatch: 0, sourceInvalid: 0, unavailable: 0 };
   for (const result of results ?? []) {
     const { data: lineup, error: lineupError } = await db.from('floyd_dfs_generated_lineups').select('id,lineup_payload,selection_run_id').eq('tenant_id', tenant.id).eq('id', result.generated_lineup_id).maybeSingle();
     if (lineupError) throw lineupError;
@@ -161,10 +184,12 @@ async function reconcileExistingResults() {
     const slate = run?.request_payload?.input?.validatedSlate;
     const ids = [...new Set(array(lineup?.lineup_payload?.playerIds).map(String))];
     if (!generationRunId || !slate || !ids.length) { summary.unavailable += 1; continue; }
-    const { data: actuals, error: actualError } = await db.from('floyd_dfs_historical_player_actuals').select('player_id,actual_dk_points').eq('tenant_id', tenant.id).eq('generation_run_id', generationRunId).in('player_id', ids);
+    const { data: actuals, error: actualError } = await db.from('floyd_dfs_historical_player_actuals').select('player_id,actual_dk_points,source_validation_status,source_validation_reason').eq('tenant_id', tenant.id).eq('generation_run_id', generationRunId).in('player_id', ids);
     if (actualError) throw actualError;
     const byPlayer = new Map((actuals ?? []).map((row) => [String(row.player_id), Number(row.actual_dk_points)]));
-    if (ids.some((id) => !Number.isFinite(byPlayer.get(id)))) { summary.unavailable += 1; continue; }
+    if (ids.some((id) => !Number.isFinite(byPlayer.get(id)))) { summary.unavailable += 1; await saveReconciliation(result, 'UNAVAILABLE', null, null, ids.length, false); continue; }
+    const invalid = (actuals ?? []).filter((row) => ids.includes(String(row.player_id)) && row.source_validation_status !== 'VERIFIED');
+    if (invalid.length) { summary.sourceInvalid += 1; await saveReconciliation(result, 'SOURCE_INVALID', null, null, ids.length, false, invalid.map((row) => row.source_validation_reason).filter(Boolean)); continue; }
     const slots = lineup?.lineup_payload?.rosterSlots ?? {};
     const multiplierForPlayer = (playerId) => {
       const slot = Object.entries(slots).find(([, assigned]) => String(assigned) === playerId)?.[0];
@@ -176,12 +201,17 @@ async function reconcileExistingResults() {
     const entered = Number(result.actual_dk_points);
     const difference = Number.isFinite(entered) ? Number((computed - entered).toFixed(4)) : null;
     const status = difference !== null && Math.abs(difference) <= 0.05 ? 'MATCHED' : 'SCORE_MISMATCH';
-    const priorPayload = result.result_payload && typeof result.result_payload === 'object' ? result.result_payload : {};
-    const { error: updateError } = await db.from('floyd_dfs_contest_results').update({ result_payload: { ...priorPayload, reconciliation: { status, computedPlayerActualScore: Number(computed.toFixed(4)), recordedActualScore: Number.isFinite(entered) ? entered : null, difference, playerCount: ids.length, source: 'SPORTSDATAIO_FINAL', scoring: 'saved DraftKings scoring and roster multipliers', reconciledAt: new Date().toISOString() } } }).eq('tenant_id', tenant.id).eq('id', result.id);
-    if (updateError) throw updateError;
+    await saveReconciliation(result, status === 'SCORE_MISMATCH' ? 'MISMATCH' : status, Number(computed.toFixed(4)), difference, ids.length, status === 'MATCHED' && result.official_outcome === true);
     if (status === 'MATCHED') summary.matched += 1; else summary.scoreMismatch += 1;
   }
   return summary;
+}
+
+async function saveReconciliation(result, status, computed, difference, playerCount, eligible, reasons = []) {
+  const priorPayload = result.result_payload && typeof result.result_payload === 'object' ? result.result_payload : {};
+  const reconciliation = { status, computedPlayerActualScore: computed, recordedActualScore: Number.isFinite(Number(result.actual_dk_points)) ? Number(result.actual_dk_points) : null, difference, playerCount, source: 'SPORTSDATAIO_FINAL', scoring: 'saved DraftKings scoring and roster multipliers', reasons, reconciledAt: new Date().toISOString() };
+  const { error } = await db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, result_payload: { ...priorPayload, reconciliation } }).eq('tenant_id', tenant.id).eq('id', result.id);
+  if (error) throw error;
 }
 
 function array(value) { return Array.isArray(value) ? value : []; }
@@ -204,7 +234,21 @@ function scoreActual(sport, row, scoring) {
   const components = { points: Number(row.Points ?? 0), threePointersMade: Number(row.ThreePointersMade ?? 0), rebounds: Number(row.Rebounds ?? 0), assists: Number(row.Assists ?? 0), steals: Number(row.Steals ?? 0), blocks: Number(row.BlockedShots ?? 0), turnovers: Number(row.Turnovers ?? 0), doubleDouble: Number(row.DoubleDoubles ?? 0), tripleDouble: Number(row.TripleDoubles ?? 0) };
   const required = Object.keys(components);
   if (wnbaConflicts || required.some((key) => !Number.isFinite(rules[key]))) return { points: NaN, components };
-  return { points: required.reduce((sum, key) => sum + components[key] * rules[key], 0), components };
+  return { points: required.reduce((sum, key) => sum + components[key] * rules[key], 0), components: { ...components, ...(Number.isFinite(Number(row.Minutes)) ? { minutes: Number(row.Minutes) } : {}) } };
 }
 function pick(row, keys) { return Object.fromEntries(keys.flatMap((key) => Number.isFinite(Number(row[key])) ? [[key, Number(row[key])]] : [])); }
+function validateActual(sport, row, actual) {
+  const increment = sport === 'MLB' || sport === 'WNBA' ? 0.25 : sport === 'NFL' || sport === 'CFB' ? 0.1 : 0.5;
+  if (!Number.isFinite(actual.points) || Math.abs(actual.points / increment - Math.round(actual.points / increment)) > 1e-6) return { valid: false, reason: `Fantasy points are missing or not on a valid ${increment}-point increment.` };
+  if (sport === 'MLB') {
+    const whole = ['AtBats','Runs','Hits','Singles','Doubles','Triples','HomeRuns','RunsBattedIn','Strikeouts','Walks','HitByPitch','StolenBases','PitchingStrikeouts','PitchingEarnedRuns','Wins','Saves'];
+    for (const field of whole) if (row[field] !== null && row[field] !== undefined && (!Number.isInteger(Number(row[field])) || Number(row[field]) < 0)) return { valid: false, reason: `MLB component ${field} must be a nonnegative integer.` };
+    const ip = Number(row.InningsPitchedDecimal);
+    if (Number.isFinite(ip) && Math.abs(ip * 10 - Math.round(ip * 10)) < 1e-6 && ![0,1,2].includes(Math.round(ip * 10) % 10)) return { valid: false, reason: 'MLB innings pitched must use .0, .1, or .2 notation.' };
+  }
+  if (sport === 'WNBA') for (const [field, value] of Object.entries(actual.components)) if (field !== 'minutes' && (!Number.isInteger(value) || value < 0)) return { valid: false, reason: `WNBA component ${field} must be a nonnegative integer.` };
+  return { valid: true };
+}
 function normalizeNflSeasonType(value) { const code = String(value ?? '').toUpperCase(); if (code === '2' || code === 'PRE') return 'PRE'; if (code === '3' || code === 'POST') return 'POST'; return 'REG'; }
+function scoringComponents(value) { return Object.fromEntries(Object.entries(value && typeof value === 'object' ? value : {}).filter(([key]) => !['minutes','pitchesthrown','pitchesthrownstrikes'].includes(key.toLowerCase()))); }
+function stableJson(value) { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`; return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([key,item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`; }

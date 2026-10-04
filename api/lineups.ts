@@ -10,7 +10,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const lineupIds = rows.map((row) => String(row.id));
     const contestResults: Record<string, unknown>[] = [];
     for (let offset = 0; offset < lineupIds.length; offset += 300) {
-      const resultRows = await context.db.from('floyd_dfs_contest_results').select('generated_lineup_id,actual_dk_points,cash_line,beat_cash_line,finish_position,finish_percentile,payout,roi,contest_id,contest_name,sport,contest_format,field_size,entry_fee,paid_positions,outcome_source,external_entry_id,measured_at').eq('tenant_id', context.tenantId).in('generated_lineup_id', lineupIds.slice(offset, offset + 300)).order('measured_at', { ascending: false });
+      const resultRows = await context.db.from('floyd_dfs_contest_results').select('generated_lineup_id,actual_dk_points,cash_line,beat_cash_line,finish_position,finish_percentile,payout,roi,contest_id,contest_name,sport,contest_format,field_size,entry_fee,paid_positions,outcome_source,external_entry_id,measured_at,reconciliation_status,model_evaluation_eligible,official_outcome,result_payload').eq('tenant_id', context.tenantId).in('generated_lineup_id', lineupIds.slice(offset, offset + 300)).order('measured_at', { ascending: false });
       if (resultRows.error) throw resultRows.error;
       contestResults.push(...(resultRows.data ?? []));
     }

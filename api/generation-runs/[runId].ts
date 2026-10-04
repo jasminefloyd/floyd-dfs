@@ -22,6 +22,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (selection.error) throw selection.error;
     const trust = await context.db.from('floyd_dfs_run_trust').select('revision,trust_payload,created_at').eq('tenant_id', context.tenantId).eq('generation_run_id', id).order('revision', { ascending: false }).limit(1).maybeSingle();
     if (trust.error) throw trust.error;
-    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [], trust: trust.data ?? null });
+    const traces = await context.db.from('floyd_dfs_lineup_decision_traces').select('lineup_candidate_key,trace_payload,content_sha256').eq('tenant_id', context.tenantId).eq('generation_run_id', id);
+    if (traces.error) throw traces.error;
+    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [], trust: trust.data ?? null, decisionTraces: traces.data ?? [] });
   } catch (error) { respondError(req, res, error); }
 }

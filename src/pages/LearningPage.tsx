@@ -13,10 +13,13 @@ export default function LearningPage() {
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [lessonsError, setLessonsError] = useState<string | null>(null);
   const [forecastValidation, setForecastValidation] = useState<ForecastValidation | null>(null);
   const [pairedBaseline, setPairedBaseline] = useState<PairedBaseline | null>(null);
+  const [contestId, setContestId] = useState('');
+  const [fieldValidation, setFieldValidation] = useState<Record<string, unknown> | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -47,6 +50,21 @@ export default function LearningPage() {
     }
   }
 
+  async function refreshRun() {
+    if (!runId.trim()) return;
+    setRefreshing(true); setError(null);
+    try {
+      const response = await floydRequest<Record<string, unknown>>(`/api/generation-runs/${encodeURIComponent(runId.trim())}/refresh`, { method: 'POST', body: JSON.stringify({}) });
+      setResult({ ...(result ?? {}), refresh: response });
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to queue replacement lineups.'); }
+    finally { setRefreshing(false); }
+  }
+
+  async function validateField() {
+    try { setError(null); const report = await floydRequest<Record<string, unknown>>(`/api/learning/contest-field-validation?contestId=${encodeURIComponent(contestId.trim())}`); setFieldValidation(report); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to compare imported contest field.'); }
+  }
+
   return (
     <AppPage eyebrow="06 / LEARNING LOOP" title="Learning, measured." subtitle="Review the deterministic controls used to evaluate entered lineups and pre-lock changes.">
       <div className="grid gap-4 md:grid-cols-2">
@@ -73,7 +91,7 @@ export default function LearningPage() {
         </section>
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
           <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Result</p>
-          {error ? <div className="mt-3"><ErrorBox message={error} /></div> : result ? <pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-50 p-3 text-xs text-slate-700">{JSON.stringify(result, null, 2)}</pre> : <p className="mt-3 text-sm text-slate-500">No check has been run in this session.</p>}
+          {error ? <div className="mt-3"><ErrorBox message={error} /></div> : result ? <><pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-50 p-3 text-xs text-slate-700">{JSON.stringify(result, null, 2)}</pre>{runId.trim() && result.replacementsAvailableBeforeLock === true ? <button type="button" onClick={() => void refreshRun()} disabled={refreshing} className="mt-3 rounded-md bg-[#0b1f3a] px-4 py-2.5 text-xs font-black text-white disabled:opacity-50">{refreshing ? 'Queueing replacement…' : 'Re-optimize from current DraftKings slate'}</button> : null}</> : <p className="mt-3 text-sm text-slate-500">No check has been run in this session.</p>}
         </section>
       </div>
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
@@ -90,6 +108,13 @@ export default function LearningPage() {
           </div>
           <p className="mt-3 text-[10px] leading-5 text-slate-500">{forecastValidation.note}</p>
         </> : <p className="mt-3 text-sm text-slate-500">Loading saved result coverage…</p>}
+      </section>
+      <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
+        <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Contest field diagnostic</p>
+        <h2 className="mt-2 text-xl font-black text-[#0b1f3a]">Compare ownership with actual standings.</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-600">Import a completed standings CSV from History, then compare actual player ownership with the archived pre-lock estimates. One contest remains diagnostic and cannot enable win probabilities.</p>
+        <div className="mt-3 flex flex-wrap gap-2"><input value={contestId} onChange={(event) => setContestId(event.target.value)} placeholder="DraftKings contest ID" className="min-w-56 rounded-md border border-slate-300 px-3 py-2 text-sm" /><button type="button" onClick={() => void validateField()} disabled={!contestId.trim()} className="rounded-md bg-[#0b1f3a] px-4 py-2 text-xs font-black text-white disabled:opacity-50">Run field diagnostic</button></div>
+        {fieldValidation ? <pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-50 p-3 text-xs text-slate-700">{JSON.stringify(fieldValidation, null, 2)}</pre> : null}
       </section>
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
         <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Chronological paired evaluation</p>

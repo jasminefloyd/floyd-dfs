@@ -3,7 +3,7 @@ import { buildCashLineCalibration, calibratedCashLineProbability, CASH_LINE_CALI
 import { evaluatePairedProjectionBaseline } from '../../src/lib/engine/calibration.js';
 import { cors, method, respondError, tenantContext } from '../../server/runtime.js';
 
-interface ForecastOutcome { sport: string; predicted: number; actual: number; p20?: number; p50?: number; p90?: number; }
+interface ForecastOutcome { sport: string; format: string; predicted: number; actual: number; p20?: number; p50?: number; p90?: number; }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET', 'POST'])) return;
@@ -11,7 +11,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const context = await tenantContext();
     const lineups = await context.db.from('floyd_dfs_generated_lineups').select('id,raw_cash_line_probability,lineup_payload,floyd_dfs_selection_runs!inner(generation_run_id,selection_package)').eq('tenant_id', context.tenantId).limit(5000);
     if (lineups.error) throw lineups.error;
-    const results = await context.db.from('floyd_dfs_contest_results').select('generated_lineup_id,contest_id,beat_cash_line,actual_dk_points,measured_at').eq('tenant_id', context.tenantId).order('measured_at', { ascending: false }).limit(5000);
+    const results = await context.db.from('floyd_dfs_contest_results').select('generated_lineup_id,contest_id,beat_cash_line,actual_dk_points,measured_at,reconciliation_status,model_evaluation_eligible,official_outcome,contest_format').eq('tenant_id', context.tenantId).eq('model_evaluation_eligible', true).eq('reconciliation_status', 'MATCHED').eq('official_outcome', true).order('measured_at', { ascending: false }).limit(5000);
     if (results.error) throw results.error;
     const projectionRuns = await context.db.from('floyd_dfs_projection_runs').select('generation_run_id,sport,model_version,projection_package,created_at').eq('tenant_id', context.tenantId).order('created_at', { ascending: false }).limit(5000);
     if (projectionRuns.error) throw projectionRuns.error;
@@ -20,9 +20,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (generationRows.error) throw generationRows.error;
     const generationById = new Map((generationRows.data ?? []).map((row) => [String(row.id), row]));
     const projectionAudit = summarizePreLockPackages(projectionRuns.data ?? [], generationById);
-    const historicalActuals = await context.db.from('floyd_dfs_historical_player_actuals').select('slate_id,sport,position,projection_generated_at,lock_time,projected_floor,projected_median,projected_ceiling,baseline_fppg,actual_dk_points').eq('tenant_id', context.tenantId).limit(20000);
+    const historicalActuals = await context.db.from('floyd_dfs_historical_player_actuals').select('slate_id,sport,contest_format,position,projection_generated_at,lock_time,projected_floor,projected_median,projected_ceiling,baseline_fppg,actual_dk_points,source_validation_status,finality_status').eq('tenant_id', context.tenantId).eq('source_validation_status', 'VERIFIED').in('finality_status', ['FINAL','CORRECTED']).limit(20000);
     if (historicalActuals.error) throw historicalActuals.error;
-    const pairedRows = (historicalActuals.data ?? []).flatMap((row) => row.baseline_fppg === null || row.projected_median === null ? [] : [{ slateId: String(row.slate_id), sport: String(row.sport).toUpperCase() as import('../../src/lib/engine/contracts.js').Sport, role: row.position ? String(row.position) : 'UNKNOWN', generatedAt: String(row.projection_generated_at), lockTime: String(row.lock_time), candidatePoints: Number(row.projected_median), candidateFloor: row.projected_floor === null ? undefined : Number(row.projected_floor), candidateCeiling: row.projected_ceiling === null ? undefined : Number(row.projected_ceiling), baselinePoints: Number(row.baseline_fppg), actualPoints: Number(row.actual_dk_points) }]);
+    const pairedRows = (historicalActuals.data ?? []).flatMap((row) => row.baseline_fppg === null || row.projected_median === null ? [] : [{ slateId: String(row.slate_id), sport: String(row.sport).toUpperCase() as import('../../src/lib/engine/contracts.js').Sport, role: `${String(row.contest_format ?? 'UNKNOWN')}:${row.position ? String(row.position) : 'UNKNOWN'}`, generatedAt: String(row.projection_generated_at), lockTime: String(row.lock_time), candidatePoints: Number(row.projected_median), candidateFloor: row.projected_floor === null ? undefined : Number(row.projected_floor), candidateCeiling: row.projected_ceiling === null ? undefined : Number(row.projected_ceiling), baselinePoints: Number(row.baseline_fppg), actualPoints: Number(row.actual_dk_points) }]);
     const pairedBaseline = evaluatePairedProjectionBaseline(pairedRows, '2026-09-08T00:00:00.000Z');
     const lineupById = new Map((lineups.data ?? []).map((row) => [String(row.id), row]));
     const latestResults = new Map<string, (typeof results.data extends (infer T)[] | null ? T : never)>();
@@ -38,7 +38,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const relationValue = row.floyd_dfs_selection_runs;
       const selection = Array.isArray(relationValue) ? relationValue[0] : relationValue;
       const selectionPackage = asRecord(asRecord(selection)?.selection_package);
-      forecasts.push({ sport: String(selectionPackage?.sport ?? 'UNKNOWN').toUpperCase(), predicted, actual, ...optionalFinite(payload?.floor, 'p20'), ...optionalFinite(payload?.median, 'p50'), ...optionalFinite(payload?.ceiling, 'p90') });
+      if (outcome?.model_evaluation_eligible !== true || outcome?.official_outcome !== true) continue;
+      forecasts.push({ sport: String(selectionPackage?.sport ?? 'UNKNOWN').toUpperCase(), format: String(outcome?.contest_format ?? 'UNKNOWN').toUpperCase(), predicted, actual, ...optionalFinite(payload?.floor, 'p20'), ...optionalFinite(payload?.median, 'p50'), ...optionalFinite(payload?.ceiling, 'p90') });
     }
     const projectionValidation = summarizeForecasts(forecasts);
     const calibration = buildCashLineCalibration(observations);
@@ -69,7 +70,9 @@ function summarizeForecasts(rows: ForecastOutcome[]) {
   } : { sampleSize: 0, meanAbsoluteError: null, meanBias: null, p20Coverage: null, p50Coverage: null, p90Coverage: null, validationStatus: 'NO_RECORDED_RESULTS' };
   const bySport: Record<string, ReturnType<typeof summarize>> = {};
   for (const sport of new Set(rows.map((row) => row.sport))) bySport[sport] = summarize(rows.filter((row) => row.sport === sport));
-  return { overall: summarize(rows), bySport, note: 'Descriptive historical scores are not a substitute for pre-lock out-of-sample backtesting; fewer than 30 results is insufficient even for a stable descriptive read.' };
+  const bySportFormat: Record<string, ReturnType<typeof summarize>> = {};
+  for (const key of new Set(rows.map((row) => `${row.sport}:${row.format}`))) bySportFormat[key] = summarize(rows.filter((row) => `${row.sport}:${row.format}` === key));
+  return { overall: summarize(rows), bySport, bySportFormat, note: 'Only verified final player actuals and complete official contest outcomes are eligible. Independent slates, not entries, determine validation sample size.' };
 }
 function coverage(rows: ForecastOutcome[], field: 'p20' | 'p50' | 'p90'): number | null { const available = rows.filter((row) => row[field] !== undefined); return available.length ? available.filter((row) => row.actual <= row[field]!).length / available.length : null; }
 function average(values: number[]): number { return values.reduce((sum, value) => sum + value, 0) / values.length; }

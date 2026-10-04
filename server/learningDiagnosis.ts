@@ -6,6 +6,7 @@ export interface LineupDiagnosisInput {
   tenantId: string;
   generationRunId: string;
   generatedLineupId: string;
+  contestKey?: string;
   sport: string;
   lineupPayload: Json;
   actualDkPoints: number | null;
@@ -13,6 +14,9 @@ export interface LineupDiagnosisInput {
   predictedComponents?: Record<string, number>;
   researchVersion: number;
   adjustmentVersion: number;
+  opportunityMiss?: { dimension: string; playerId: string; projected: number; actual: number };
+  lateChange?: { eventType: string; subject: string };
+  scoringMismatch?: boolean;
 }
 
 /**
@@ -37,7 +41,7 @@ export async function diagnoseLineupResult(db: SupabaseClient, input: LineupDiag
   let diagnosisText = 'Actual outcome fell within (or near) the projected range; losing or missing a target alone is not evidence of model failure.';
   let confidence: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
 
-  if (!withinRange) {
+  if (!withinRange || input.scoringMismatch) {
     const playerIds = Array.isArray(input.lineupPayload.playerIds) ? (input.lineupPayload.playerIds as unknown[]).map(String) : [];
     const researchStage = await db.from('engine_stage_runs').select('output_payload').eq('generation_run_id', input.generationRunId).eq('stage', 'RESEARCH').eq('version', input.researchVersion).maybeSingle();
     const researchOutput = researchStage.data?.output_payload as Json | undefined;
@@ -49,17 +53,21 @@ export async function diagnoseLineupResult(db: SupabaseClient, input: LineupDiag
     const adjustments = Array.isArray(adjustmentOutput?.adjustments) ? adjustmentOutput.adjustments as Array<{ playerId?: string; roleCertainty?: string }> : [];
     const lowRoleCertainty = adjustments.some((item) => playerIds.includes(String(item.playerId)) && item.roleCertainty === 'LOW');
 
-    if (unresolvedCritical) { errorStage = 'RESEARCH'; diagnosisText = 'Actual outcome fell outside the projected range for a lineup that had an unresolved CRITICAL research watch item at generation time.'; confidence = 'MEDIUM'; }
+    if (input.scoringMismatch) { errorStage = 'SCORING_INTEGRITY'; diagnosisText = 'The recorded contest score does not reconcile to validated player actuals and saved roster multipliers; this result is excluded from model evaluation.'; confidence = 'HIGH'; }
+    else if (input.lateChange?.eventType === 'WEATHER_CHANGE') { errorStage = 'WEATHER_CONTEXT'; diagnosisText = 'A material pre-lock weather change affected this lineup after its saved forecast; inspect whether the refreshed conditions were represented.'; confidence = 'MEDIUM'; }
+    else if (input.lateChange) { errorStage = 'INJURY_ROLE'; diagnosisText = `A pre-lock ${input.lateChange.eventType.toLowerCase().replaceAll('_',' ')} affected ${input.lateChange.subject}; inspect the availability or role response.`; confidence = 'MEDIUM'; }
+    else if (input.opportunityMiss) { errorStage = 'PLAYING_TIME'; diagnosisText = `${input.opportunityMiss.playerId} had ${input.opportunityMiss.actual.toFixed(1)} ${input.opportunityMiss.dimension} versus ${input.opportunityMiss.projected.toFixed(1)} projected; this miss is attributed to opportunity before point-rate error.`; confidence = 'MEDIUM'; }
+    else if (unresolvedCritical) { errorStage = 'RESEARCH'; diagnosisText = 'Actual outcome fell outside the projected range for a lineup that had an unresolved CRITICAL research watch item at generation time.'; confidence = 'MEDIUM'; }
     else if (lowRoleCertainty) { errorStage = 'SPORT_ADJUSTMENT'; diagnosisText = 'Actual outcome fell outside the projected range for a lineup with LOW role-certainty opportunity adjustments.'; confidence = 'MEDIUM'; }
     else { errorStage = 'PROJECTION'; diagnosisText = 'Actual outcome fell materially outside the projected floor/ceiling range with no unresolved research gap or low-certainty adjustment flagged upstream.'; confidence = 'MEDIUM'; }
   }
 
   const componentErrors = Object.fromEntries(Object.entries(input.actualComponents ?? {}).flatMap(([key, actualComponent]) => { const predictedComponent = input.predictedComponents?.[key]; return Number.isFinite(actualComponent) && typeof predictedComponent === 'number' && Number.isFinite(predictedComponent) ? [[key, { actual: actualComponent, predicted: predictedComponent, error: actualComponent - predictedComponent }]] : []; }));
-  const evidence = { withinRange, floor, median, ceiling, actual, componentErrors, stageAttribution: errorStage };
+  const evidence = { withinRange, floor, median, ceiling, actual, componentErrors, opportunityMiss: input.opportunityMiss ?? null, lateChange: input.lateChange ?? null, scoringMismatch: input.scoringMismatch ?? false, stageAttribution: errorStage };
   const diagnostic = { tenant_id: input.tenantId, generation_run_id: input.generationRunId, subject_type: 'GENERATED_LINEUP', subject_id: input.generatedLineupId, error_stage: errorStage, severity: errorStage === 'VARIANCE' ? 'LOW' : 'MEDIUM', confidence, assumption: `Projected floor ${floor}, median ${median}, ceiling ${ceiling}.`, actual_outcome: actual, evidence, diagnosis: diagnosisText };
   const inserted = await db.from('floyd_dfs_learning_diagnostics').insert(diagnostic).select('*').single();
   if (inserted.error) throw inserted.error;
-  if (errorStage !== 'VARIANCE') await recordLessonCandidate(db, input.tenantId, input.sport, errorStage, diagnosisText, confidence, evidence);
+  if (errorStage !== 'VARIANCE') await recordLessonCandidate(db, input.tenantId, input.sport, errorStage, diagnosisText, confidence, evidence, input.contestKey, input.generatedLineupId);
   return inserted.data as Json;
 }
 
@@ -71,7 +79,12 @@ const LESSON_ACCUMULATION_THRESHOLD = 3;
  * ACCUMULATING once the same sport+stage+observation pattern repeats; only a human/manual
  * review can promote a lesson to VALIDATED, per the design docs.
  */
-export async function recordLessonCandidate(db: SupabaseClient, tenantId: string, sport: string, stage: string, observation: string, confidence: string, evidence: Json): Promise<void> {
+export async function recordLessonCandidate(db: SupabaseClient, tenantId: string, sport: string, stage: string, observation: string, confidence: string, evidence: Json, contestKey?: string, generatedLineupId?: string): Promise<void> {
+  if (contestKey && generatedLineupId) {
+    const seen = await db.from('floyd_dfs_lesson_observations').upsert({ tenant_id: tenantId, contest_key: contestKey, sport, stage, observation, generated_lineup_id: generatedLineupId }, { onConflict: 'tenant_id,contest_key,sport,stage,observation', ignoreDuplicates: true }).select('id');
+    if (seen.error) throw seen.error;
+    if (!seen.data?.length) return;
+  }
   const existing = await db.from('floyd_dfs_lesson_candidates').select('id,sample_count,status').eq('tenant_id', tenantId).eq('sport', sport).eq('stage', stage).eq('observation', observation).limit(1).maybeSingle();
   if (existing.error) throw existing.error;
   if (existing.data) {
