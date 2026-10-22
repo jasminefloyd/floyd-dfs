@@ -51,7 +51,7 @@ export class DraftKingsClient {
     const contentType = response.headers.get('content-type') ?? '';
     const data = await response.text();
     if (!response.ok) throw new DraftKingsApiError(`DraftKings salary CSV request failed with HTTP ${response.status}.`, { url: url.toString(), status: response.status, body: data.slice(0, 500) });
-    if (!/^(text\/csv|text\/plain)(\s*;|$)/i.test(contentType)) throw new DraftKingsApiError(`DraftKings salary feed returned unexpected content type: ${contentType || 'missing'}.`, { url: url.toString(), status: response.status, body: data.slice(0, 200) });
+    if (!/^(text\/csv|application\/csv|text\/plain)(\s*;|$)/i.test(contentType)) throw new DraftKingsApiError(`DraftKings salary feed returned unexpected content type: ${contentType || 'missing'}.`, { url: url.toString(), status: response.status, body: data.slice(0, 200) });
     if (!data.trim() || /^\s*</.test(data)) throw new DraftKingsApiError('DraftKings salary CSV response was empty or looked like an HTML error page.', { url: url.toString(), status: response.status, body: data.slice(0, 200) });
     return { data, url: url.toString(), retrievedAt: new Date().toISOString(), status: response.status };
   }
