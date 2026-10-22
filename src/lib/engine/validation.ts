@@ -84,6 +84,7 @@ export function validateLineupCandidate(candidate: Pick<OptimizerPackage['candid
   }
   for (const [slot, rule] of expectedSlots) if ((observedCounts.get(slot) ?? 0) !== rule.count) errors.push(`lineup has ${(observedCounts.get(slot) ?? 0)} ${slot} slot(s); expected ${rule.count}.`);
   const teamCounts = new Map<string, number>();
+  const hitterCounts = new Map<string, number>();
   for (const [slot, playerId] of slots) {
     const player = players.get(playerId);
     if (!player) { errors.push(`lineup references player ${playerId} outside the slate.`); continue; }
@@ -95,13 +96,17 @@ export function validateLineupCandidate(candidate: Pick<OptimizerPackage['candid
     const salary = salaryForRosterSlot(player, slot, rule);
     if (salary === undefined || !Number.isFinite(salary) || salary < 0) errors.push(`player ${playerId} has no valid salary for slot ${slot}.`);
     else recomputedSalary += salary;
-    if (player.team) teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
+    if (player.team) {
+      teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
+      if (slate.sport === 'MLB' && !['P', 'SP', 'RP'].includes(String(player.position ?? '').toUpperCase())) hitterCounts.set(player.team, (hitterCounts.get(player.team) ?? 0) + 1);
+    }
   }
   if (!Number.isFinite(candidate.salaryUsed) || Math.abs(candidate.salaryUsed - recomputedSalary) > 0.01) errors.push(`reported salary ${candidate.salaryUsed} does not match recomputed salary ${recomputedSalary}.`);
   if (recomputedSalary > slate.salaryCap) errors.push(`recomputed salary ${recomputedSalary} exceeds salary cap ${slate.salaryCap}.`);
   const constraints = slate.rosterRules.teamConstraints;
   if (constraints?.minimumTeams !== undefined && teamCounts.size < constraints.minimumTeams) errors.push('lineup does not satisfy minimum team constraint.');
   if (constraints?.maximumPlayersPerTeam !== undefined && [...teamCounts.values()].some((count) => count > constraints.maximumPlayersPerTeam!)) errors.push('lineup exceeds maximum players per team constraint.');
+  if (constraints?.maximumHittersPerTeam !== undefined && [...hitterCounts.values()].some((count) => count > constraints.maximumHittersPerTeam!)) errors.push('lineup exceeds maximum hitters per team constraint.');
   return errors.map((error) => `candidate ${candidate.playerIds.join(',')} ${error}`);
 }
 

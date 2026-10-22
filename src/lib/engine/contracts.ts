@@ -269,6 +269,7 @@ export interface RosterRules {
   teamConstraints?: {
     minimumTeams?: number;
     maximumPlayersPerTeam?: number;
+    maximumHittersPerTeam?: number;
   };
 }
 

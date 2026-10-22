@@ -248,6 +248,15 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
     const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
     if (minimumTeams && teams.size < minimumTeams) return;
+    const maxHittersPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumHittersPerTeam;
+    if (maxHittersPerTeam && input.validatedSlate.sport === 'MLB') {
+      const hittersByTeam = new Map<string, number>();
+      for (const playerId of Object.values(rosterSlots)) {
+        const player = input.validatedSlate.playerPool.find((candidate) => candidate.playerId === playerId);
+        if (player?.team && !['P', 'SP', 'RP'].includes(String(player.position ?? '').toUpperCase())) hittersByTeam.set(player.team, (hittersByTeam.get(player.team) ?? 0) + 1);
+      }
+      if ([...hittersByTeam.values()].some((count) => count > maxHittersPerTeam)) return;
+    }
     if (minSalaryUsed && salaryUsed < minSalaryUsed) return;
     control.candidatesEvaluated += 1;
     const canonical = canonicalRosterSlots(rosterSlots);
@@ -287,6 +296,11 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     if (salary === undefined || salaryUsed + salary + remainingMinCost > input.validatedSlate.salaryCap) continue;
     const maxPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
     if (maxPerTeam && player.team && Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)?.team).filter((team) => team === player.team).length >= maxPerTeam) continue;
+    const maxHittersPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumHittersPerTeam;
+    if (maxHittersPerTeam && input.validatedSlate.sport === 'MLB' && player.team && !['P', 'SP', 'RP'].includes(String(player.position ?? '').toUpperCase())) {
+      const existingHitters = Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)).filter((candidate) => candidate !== undefined && candidate.team === player.team && !['P', 'SP', 'RP'].includes(String(candidate.position ?? '').toUpperCase())).length;
+      if (existingHitters >= maxHittersPerTeam) continue;
+    }
     if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);

@@ -202,22 +202,26 @@ export function extractGameGroups(payload: unknown, sport: Sport, format: Contes
 }
 export function extractContestReference(payload: unknown, contestId: string): DraftKingsContestReference { const root = asRecord(payload); const contest = root ? asRecord(root.contest) ?? asRecord(root.Contest) ?? asRecord(root.contestDetail) ?? asRecord(root.ContestDetail) ?? root : undefined; if (!contest) throw new DraftKingsApiError('DraftKings contest response was not a JSON object.', { url: 'contest', body: payload }); return { contestId, draftGroupId: readRequiredString(contest, ['draftGroupId', 'draftGroupID', 'draftGroup', 'dg'], 'draftGroupId'), gameTypeId: readRequiredString(contest, ['gameTypeId', 'gameTypeID', 'gameType', 'gt'], 'gameTypeId') }; }
 function fallbackRules(sport: Sport, format: ContestFormat): Record<string, unknown> {
-  // Only standard NBA and NFL formats have an approved published fallback. The caller must
+  // Each listed profile is sport/format-scoped. The caller must
   // still bind the contest, sport, format, and draft group from the live DK lobby;
   // that exact group's CSV supplies player IDs, salaries, and eligible slots.
-  const reviewedSportProfile = sport === 'NBA' || sport === 'NFL';
+  const reviewedSportProfile = ['NBA', 'NFL', 'MLB', 'WNBA', 'CFB', 'GOLF'].includes(sport);
   const profile = { sourceFallback: true, profileVerified: reviewedSportProfile, ruleProfileVersion: reviewedSportProfile ? `DK_${sport}_${format}_PUBLISHED_2026-10-22.1` : 'UNVERIFIED_DISCOVERY_TEMPLATE', salaryCap: { maxValue: 50_000 } };
-  if (format === 'SHOWDOWN' && sport !== 'GOLF') return { ...profile, rosterRules: { rosterSize: 6, captainMultiplier: 1.5, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } } };
+  if (format === 'SHOWDOWN' && sport !== 'GOLF') return { ...profile, rosterRules: { rosterSize: 6, captainMultiplier: 1.5, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2, ...(sport === 'MLB' ? { maximumHittersPerTeam: 4 } : {}) } } };
   const slots: Record<Sport, Record<string, number>> = {
     MLB: { P: 2, C: 1, '1B': 1, '2B': 1, '3B': 1, SS: 1, OF: 3 },
     NFL: { QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1, DST: 1 },
     CFB: { QB: 1, RB: 2, WR: 3, FLEX: 1, SFLEX: 1 },
     NBA: { PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1, UTIL: 1 },
-    WNBA: { PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1, UTIL: 1 },
+    WNBA: { G: 2, F: 3, UTIL: 1 },
     GOLF: { G: 6 },
   };
   if (sport === 'GOLF' && format === 'SHOWDOWN') return { ...profile, rosterRules: { rosterSize: 6, slots: { G: { count: 6 } }, uniquePlayersRequired: true } };
-  return { ...profile, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true, ...(reviewedSportProfile ? { teamConstraints: { minimumTeams: 2 } } : {}) } };
+  const teamConstraints = sport === 'MLB' ? { minimumTeams: 2, maximumPlayersPerTeam: 5 }
+    : sport === 'CFB' ? { minimumTeams: 3 }
+    : ['NBA', 'NFL', 'WNBA'].includes(sport) ? { minimumTeams: 2 }
+    : undefined;
+  return { ...profile, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true, ...(teamConstraints ? { teamConstraints } : {}) } };
 }
 function mapAvailablePlayersCsv(csv: string, sport: Sport, format: ContestFormat): Array<Record<string, unknown>> {
   const [header = [], ...rows] = parseCsvRecords(csv.replace(/^\uFEFF/, ''));

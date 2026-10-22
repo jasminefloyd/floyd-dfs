@@ -54,7 +54,8 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   const validationErrors = validateSlate(slate);
   if (bundle.contestIdentityVerified !== true) validationErrors.push('Contest ID, sport, format, draft group, lock time, and lobby metadata were not authoritatively bound; this slate is discovery-only and cannot generate lineups.');
   validationErrors.push(...validateAuthoritativeRosterRules(rules, context.contestFormat, rosterRules, context.sport));
-  if (fallbackUsed && !profileVerified) validationErrors.push('Authoritative DraftKings contest rules were unavailable and no reviewed rule profile matches this sport and format.');
+  if (fallbackUsed && rules.profileVerified !== true) validationErrors.push(`No reviewed DraftKings roster profile is configured for ${context.sport} ${context.contestFormat}.`);
+  if (fallbackUsed && rules.profileVerified === true && bundle.contestIdentityVerified !== true) validationErrors.push(`The reviewed ${context.sport} ${context.contestFormat} rules could not be applied because the exact DraftKings contest identity was not verified.`);
   if (!scoringVerified) validationErrors.push('Authoritative DraftKings scoring values are unavailable; provisional scoring templates cannot be used to generate an entry-ready lineup.');
   if (missingScoringRules.length) validationErrors.push(`DraftKings scoring rules are incomplete for this model: ${missingScoringRules.join(', ')}.`);
   if (scoringConflicts.length) validationErrors.push(`DraftKings scoring values conflict with the reviewed official scoring profile: ${scoringConflicts.join(', ')}.`);
@@ -322,9 +323,11 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
 }
 
 function ruleProfileUrl(sport: Sport, format: ContestFormat): string {
-  if (format === 'SHOWDOWN') return 'https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694';
+  if (format === 'SHOWDOWN') return sport === 'MLB' ? 'https://dknetwork.draftkings.com/2020/05/29/beginner-mlb-dfs-game-types/' : 'https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694';
   if (sport === 'NBA') return 'https://dknetwork.draftkings.com/2025/10/17/nba-daily-fantasy-101-how-to-play-dfs-on-draftkings/';
   if (sport === 'NFL') return 'https://dknetwork.draftkings.com/2025/08/29/which-draftkings-nfl-dfs-contest-is-right-for-you/';
+  if (sport === 'MLB') return 'https://dknetwork.draftkings.com/2020/05/29/beginner-mlb-dfs-game-types/';
+  if (sport === 'GOLF') return 'https://dknetwork.draftkings.com/2024/03/07/how-to-play-golf-dfs-tips-beginners-guide-to-daily-fantasy-golf-on-draftkings/';
   const page: Record<Sport, string> = { MLB: 'fantasy-baseball', NFL: 'fantasy-football', CFB: 'fantasy-college-football', WNBA: 'fantasy-basketball', NBA: 'fantasy-basketball', GOLF: 'fantasy-golf' };
   return `https://www.draftkings.com/${page[sport]}`;
 }
