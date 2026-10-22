@@ -69,6 +69,28 @@ export class ResearchAgent {
         // gate below still marks the research package incomplete.
       }
     }
+    // The forecast cutoff is the time the complete evidence snapshot is assembled,
+    // not the time provider requests begin. Providers can publish/fetch an item while
+    // this bounded research pass is in flight; using the earlier plan timestamp made
+    // those otherwise available items look like future leakage and failed RESEARCH
+    // contract validation. Keep genuinely future-dated or badly skewed records out of
+    // the package entirely so they cannot reach fact resolution or downstream stages.
+    const cutoff = this.now();
+    const lateFindings = findings.filter((finding) => {
+      const publishedAt = finding.publishedAt ? Date.parse(finding.publishedAt) : Number.NaN;
+      const retrievedAt = finding.retrievedAt ? Date.parse(finding.retrievedAt) : Number.NaN;
+      return (Number.isFinite(publishedAt) && publishedAt > cutoff.getTime())
+        || (Number.isFinite(retrievedAt) && retrievedAt > cutoff.getTime() + 5 * 60_000);
+    });
+    if (lateFindings.length) {
+      const lateIds = new Set(lateFindings.map((finding) => finding.id));
+      findings = findings.filter((finding) => !lateIds.has(finding.id));
+      unknowns.push({
+        question: 'Refresh source records with timestamps later than the research snapshot.',
+        importance: 'MEDIUM',
+        reason: `${lateFindings.length} future-dated or clock-skewed research record(s) were excluded from this snapshot and cannot support downstream decisions.`,
+      });
+    }
     if (!findings.length) unknowns.push({ question: `Retrieve evidence for the ${input.validatedSlate.sport} slate.`, importance: 'HIGH', reason: 'No research evidence matched the selected slate; downstream decisions must treat the research layer as incomplete.' });
     // Only re-raise a prior gap if it is still unresolved after this pass — a gap tied to a
     // specific player is resolved once that player has an AVAILABILITY finding; an untargeted
@@ -97,7 +119,7 @@ export class ResearchAgent {
     // feeds) must not downgrade an otherwise complete research package.
     const blockingUnknowns = uniqueUnknowns.some((unknown) => unknown.importance === 'CRITICAL' || unknown.importance === 'HIGH');
     const status = blockingUnknowns || conflicts.some((conflict) => !conflict.resolved) ? 'PARTIAL' : 'COMPLETE';
-    return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, now, this.version, this.options.freshness, this.options.experimentalContextEffectsEnabled ?? false);
+    return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, cutoff, this.version, this.options.freshness, this.options.experimentalContextEffectsEnabled ?? false);
   }
 }
 
