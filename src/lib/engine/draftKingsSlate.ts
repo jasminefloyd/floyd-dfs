@@ -281,6 +281,14 @@ interface OfficialScoringProfile { rules: Record<string, { value: number }>; sou
 
 function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
   if (sport === 'GOLF' && format === 'SHOWDOWN') return officialGolfShowdownScoringProfile(rules, eventContext);
+  if (sport === 'NBA') return {
+    rules: Object.fromEntries(Object.entries(DK_SCORING.nba).map(([key, value]) => [key, { value }])),
+    source: 'DRAFTKINGS_PUBLISHED_NBA_DFS_SCORING',
+    sourceUrl: 'https://dknetwork.draftkings.com/2025/10/17/nba-daily-fantasy-101-how-to-play-dfs-on-draftkings/',
+    version: `DK_NBA_FANTASY_SCORING_${format}_2026-10-22.1`,
+    reviewedAt: '2026-10-22T00:00:00.000Z',
+    verified: true,
+  };
   // DraftKings' WNBA rules endpoint omits scoring values on some game types. The official
   // DraftKings WNBA Fantasy Points table publishes the same base fantasy-point categories
   // used by this Classic/Showdown scorer. Captain scoring remains a separately verified
@@ -307,6 +315,7 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
 
 function ruleProfileUrl(sport: Sport, format: ContestFormat): string {
   if (format === 'SHOWDOWN') return 'https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694';
+  if (sport === 'NBA') return 'https://dknetwork.draftkings.com/2025/10/17/nba-daily-fantasy-101-how-to-play-dfs-on-draftkings/';
   const page: Record<Sport, string> = { MLB: 'fantasy-baseball', NFL: 'fantasy-football', CFB: 'fantasy-college-football', WNBA: 'fantasy-basketball', NBA: 'fantasy-basketball', GOLF: 'fantasy-golf' };
   return `https://www.draftkings.com/${page[sport]}`;
 }

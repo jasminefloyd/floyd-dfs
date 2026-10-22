@@ -202,11 +202,12 @@ export function extractGameGroups(payload: unknown, sport: Sport, format: Contes
 }
 export function extractContestReference(payload: unknown, contestId: string): DraftKingsContestReference { const root = asRecord(payload); const contest = root ? asRecord(root.contest) ?? asRecord(root.Contest) ?? asRecord(root.contestDetail) ?? asRecord(root.ContestDetail) ?? root : undefined; if (!contest) throw new DraftKingsApiError('DraftKings contest response was not a JSON object.', { url: 'contest', body: payload }); return { contestId, draftGroupId: readRequiredString(contest, ['draftGroupId', 'draftGroupID', 'draftGroup', 'dg'], 'draftGroupId'), gameTypeId: readRequiredString(contest, ['gameTypeId', 'gameTypeID', 'gameType', 'gt'], 'gameTypeId') }; }
 function fallbackRules(sport: Sport, format: ContestFormat): Record<string, unknown> {
-  // DraftKings documents the generic cap and Showdown structure, but the per-sport
-  // Classic roster templates are contest-specific. Until those are read from DK's
-  // response they are discovery hints only and must never be labeled verified.
-  const unverified = { sourceFallback: true, profileVerified: false, ruleProfileVersion: 'UNVERIFIED_DISCOVERY_TEMPLATE', salaryCap: { maxValue: 50_000 } };
-  if (format === 'SHOWDOWN' && sport !== 'GOLF') return { ...unverified, rosterRules: { rosterSize: 6, captainMultiplier: 1.5, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } } };
+  // Only standard NBA formats have an approved published fallback. The caller must
+  // still bind the contest, sport, format, and draft group from the live DK lobby;
+  // that exact group's CSV supplies player IDs, salaries, and eligible slots.
+  const reviewedNbaProfile = sport === 'NBA';
+  const profile = { sourceFallback: true, profileVerified: reviewedNbaProfile, ruleProfileVersion: reviewedNbaProfile ? `DK_NBA_${format}_PUBLISHED_2026-10-22.1` : 'UNVERIFIED_DISCOVERY_TEMPLATE', salaryCap: { maxValue: 50_000 } };
+  if (format === 'SHOWDOWN' && sport !== 'GOLF') return { ...profile, rosterRules: { rosterSize: 6, captainMultiplier: 1.5, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } } };
   const slots: Record<Sport, Record<string, number>> = {
     MLB: { P: 2, C: 1, '1B': 1, '2B': 1, '3B': 1, SS: 1, OF: 3 },
     NFL: { QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1, DST: 1 },
@@ -215,8 +216,8 @@ function fallbackRules(sport: Sport, format: ContestFormat): Record<string, unkn
     WNBA: { PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1, UTIL: 1 },
     GOLF: { G: 6 },
   };
-  if (sport === 'GOLF' && format === 'SHOWDOWN') return { ...unverified, rosterRules: { rosterSize: 6, slots: { G: { count: 6 } }, uniquePlayersRequired: true } };
-  return { ...unverified, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true } };
+  if (sport === 'GOLF' && format === 'SHOWDOWN') return { ...profile, rosterRules: { rosterSize: 6, slots: { G: { count: 6 } }, uniquePlayersRequired: true } };
+  return { ...profile, rosterRules: { rosterSize: Object.values(slots[sport]).reduce((sum, count) => sum + count, 0), slots: Object.fromEntries(Object.entries(slots[sport]).map(([name, count]) => [name, { count }])), uniquePlayersRequired: true, ...(reviewedNbaProfile ? { teamConstraints: { minimumTeams: 2 } } : {}) } };
 }
 function mapAvailablePlayersCsv(csv: string, sport: Sport, format: ContestFormat): Array<Record<string, unknown>> {
   const [header = [], ...rows] = parseCsvRecords(csv.replace(/^\uFEFF/, ''));

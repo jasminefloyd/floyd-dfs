@@ -6,12 +6,14 @@
 
 DraftKings' official late-swap help states that late swap is unavailable in some contests, eligible players have an unlocked padlock, and a replacement lineup still must satisfy the contest's overall requirements. The endpoint-level implementation therefore treats late swap as enabled only when the exact DraftKings contest response contains a consistent explicit boolean. Missing or conflicting values mean unknown and block actionable swap plans; a general help page or sport/format guess cannot enable a specific contest.
 
-For a lineup, use the exact contest/draft-group player pool and roster rules returned by the DraftKings adapter. Player IDs, eligibility, salary, and slot-specific identifiers must stay bound to that draft group. Eligibility may not be synthesized from a broad position label when the provider omitted its eligible-slot data. The documented universal golf roster slot is the only special case supported by the existing verified provider fixture/evidence. A public lobby or salary-CSV fallback that lacks verified rules is discovery-only and cannot produce an entry-ready lineup.
+For a lineup, use the exact contest/draft-group player pool and roster rules returned by the DraftKings adapter. Player IDs, eligibility, salary, and slot-specific identifiers must stay bound to that draft group. Eligibility may not be synthesized from a broad position label when the provider omitted its eligible-slot data. When detailed endpoints are blocked, only standard NBA Classic and Showdown profiles may use published rule fallbacks, and only after live lobby identity binding plus exact draft-group CSV validation. Other sports and unsupported variants remain discovery-only without authoritative rules. The documented universal golf roster slot remains a separately reviewed exception.
 
 Official references:
 
 - [DraftKings: How do I late swap a player?](https://support.draftkings.com/dk/en-us/how-do-i-late-swap-a-player?id=kb_article_view&sysparm_article=KB0010830) — late swap is contest-dependent; player locks are game-specific; replacement lineups must meet overall requirements.
 - [DraftKings: How to play Daily Fantasy Sports](https://www.draftkings.com/how-to-play) — salary-cap lineups use eligible players from the Player Pool and sport-specific roster positions.
+- [DraftKings Network: NBA Daily Fantasy 101](https://dknetwork.draftkings.com/2025/10/17/nba-daily-fantasy-101-how-to-play-dfs-on-draftkings/) — published NBA Classic lineup slots and NBA fantasy scoring categories and values.
+- [DraftKings: Showdown game style](https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694) — six-player Showdown lineups, one Captain with 1.5x salary and points, a $50,000 cap, and at least one player from both teams.
 
 ## Upload template contract
 
