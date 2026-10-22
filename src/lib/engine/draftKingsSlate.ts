@@ -281,6 +281,14 @@ interface OfficialScoringProfile { rules: Record<string, { value: number }>; sou
 
 function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
   if (sport === 'GOLF' && format === 'SHOWDOWN') return officialGolfShowdownScoringProfile(rules, eventContext);
+  if (sport === 'NFL') return {
+    rules: standardScoringRules(sport, format),
+    source: 'DRAFTKINGS_PUBLISHED_NFL_SCORING',
+    sourceUrl: 'https://dknetwork.draftkings.com/2025/08/27/nfl-dfs-beginners-guide-draftkings/',
+    version: `DK_NFL_FANTASY_SCORING_${format}_2026-10-22.1`,
+    reviewedAt: '2026-10-22T00:00:00.000Z',
+    verified: true,
+  };
   if (sport === 'NBA') return {
     rules: Object.fromEntries(Object.entries(DK_SCORING.nba).map(([key, value]) => [key, { value }])),
     source: 'DRAFTKINGS_PUBLISHED_NBA_DFS_SCORING',
@@ -296,7 +304,7 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
   // for NBA or another league, and any overlapping API value must match exactly.
   if (sport === 'GOLF') return { rules: standardScoringRules(sport, format), source: 'DRAFTKINGS_PUBLISHED_GOLF_CLASSIC_SCORING', sourceUrl: 'https://dknetwork.draftkings.com/2024/03/07/how-to-play-golf-dfs-tips-beginners-guide-to-daily-fantasy-golf-on-draftkings/', version: 'DK_GOLF_CLASSIC_SCORING_2026-10-01.1', reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
   if (sport === 'MLB') return { rules: standardScoringRules(sport, format), source: 'DRAFTKINGS_PUBLISHED_MLB_SCORING', sourceUrl: 'https://dknetwork.draftkings.com/2020/05/29/beginner-mlb-dfs-scoring/', version: 'DK_MLB_SCORING_2026-10-01.1', reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
-  if (sport === 'NFL' || sport === 'CFB') return { rules: standardScoringRules(sport, format), source: sport === 'NFL' ? 'DRAFTKINGS_PUBLISHED_NFL_SCORING' : 'DRAFTKINGS_PUBLISHED_CFB_SCORING', sourceUrl: sport === 'NFL' ? 'https://dknetwork.draftkings.com/2025/08/27/nfl-dfs-beginners-guide-draftkings/' : 'https://pick6.draftkings.com/pick6-rules-and-scoring-cfb', version: `DK_${sport}_SCORING_2026-10-01.1`, reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
+  if (sport === 'CFB') return { rules: standardScoringRules(sport, format), source: 'DRAFTKINGS_PUBLISHED_CFB_SCORING', sourceUrl: 'https://pick6.draftkings.com/pick6-rules-and-scoring-cfb', version: 'DK_CFB_SCORING_2026-10-01.1', reviewedAt: '2026-10-01T00:00:00.000Z', verified: true };
   if (sport !== 'WNBA') return undefined;
   const score = DK_SCORING.wnba;
   return {
@@ -316,6 +324,7 @@ function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Reco
 function ruleProfileUrl(sport: Sport, format: ContestFormat): string {
   if (format === 'SHOWDOWN') return 'https://support.draftkings.com/dk/en-us/game-style-showdowns-overview?id=kb_article_view&sysparm_article=KB0010694';
   if (sport === 'NBA') return 'https://dknetwork.draftkings.com/2025/10/17/nba-daily-fantasy-101-how-to-play-dfs-on-draftkings/';
+  if (sport === 'NFL') return 'https://dknetwork.draftkings.com/2025/08/29/which-draftkings-nfl-dfs-contest-is-right-for-you/';
   const page: Record<Sport, string> = { MLB: 'fantasy-baseball', NFL: 'fantasy-football', CFB: 'fantasy-college-football', WNBA: 'fantasy-basketball', NBA: 'fantasy-basketball', GOLF: 'fantasy-golf' };
   return `https://www.draftkings.com/${page[sport]}`;
 }
