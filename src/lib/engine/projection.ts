@@ -4,6 +4,7 @@ import { isPitcher, isQuarterback } from './projectionInputs.js';
 
 const MODEL_VERSION = 'projection.deterministic.v3';
 const SIMULATION_RUNS = 256;
+type ProjectionEffectOutcome = Omit<NonNullable<ProjectionPackage['effectOutcomes']>[number], 'playerId'>;
 
 const REQUIRED_BASKETBALL = ['expectedMinutes', 'pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute'];
 const REQUIRED_NFL_SKILL = ['snaps', 'routes', 'targets', 'carries', 'catchRate', 'yardsPerTarget', 'yardsPerCarry', 'touchdownProbability'];
@@ -29,27 +30,52 @@ export function requiredProjectionFields(sport: Sport, player: SlatePlayer, form
 }
 
 export function projectionReadiness(sport: Sport, player: SlatePlayer, format?: ValidatedSlate['contest']['format']): { ready: boolean; missing: string[] } {
-  const missing = requiredProjectionFields(sport, player, format).filter((key) => !player.projectionInputs || !Number.isFinite(player.projectionInputs[key]));
+  const missing = [...new Set([
+    ...requiredProjectionFields(sport, player, format).filter((key) => !player.projectionInputs || !validProjectionInput(key, player.projectionInputs[key], sport)),
+    ...Object.entries(player.projectionInputs ?? {}).filter(([key, value]) => !validProjectionInput(key, value, sport)).map(([key]) => key),
+  ])];
   return { ready: missing.length === 0 || Number.isFinite(player.providerFppg), missing };
+}
+
+function validProjectionInput(key: string, value: number | undefined, sport: Sport): boolean {
+  if (value === undefined) return false;
+  if (!Number.isFinite(value) || value < 0) return false;
+  if (/^(catchRate|completionRate|interceptionRate|passingTouchdownRate|winProbability|limitedMinutesRisk|passRate|targetShare|carryShare)$/i.test(key) && value > 1) return false;
+  const maximum = key === 'expectedMinutes' ? (sport === 'WNBA' ? 60 : 70)
+    : key === 'expectedInnings' ? 15
+      : key === 'expectedPA' ? 15
+        : key === 'roundsRemaining' ? 4
+          : key === 'passAttempts' ? 110
+            : key === 'expectedPlays' ? 180
+              : key === 'snaps' || key === 'routes' ? 150
+                : undefined;
+  return maximum === undefined || value <= maximum;
 }
 
 export function projectSlate(slate: ValidatedSlate, adjustmentPackage: AdjustmentPackage, now = new Date()): ProjectionPackage {
   let players: ProjectionPackage['players'] = [];
   const gaps: ProjectionPackage['gaps'] = [];
-  const prepared: Array<{ player: SlatePlayer; values: Record<string, number>; adjustment?: PlayerAdjustment }> = [];
+  const prepared: Array<{ player: SlatePlayer; baselineValues: Record<string, number>; values: Record<string, number>; adjustment?: PlayerAdjustment }> = [];
+  const effectOutcomes: NonNullable<ProjectionPackage['effectOutcomes']> = [];
   let golfFallbackCount = 0;
   const golfMissing: Array<{ name: string; fields: string[] }> = [];
   for (const player of slate.playerPool) {
     const values = player.projectionInputs;
-    const missing = requiredProjectionFields(slate.sport, player, slate.contest.format).filter((key) => !values || !Number.isFinite(values[key]));
-    if (missing.length && !Number.isFinite(player.providerFppg)) {
+    const invalidContext = sportContextIssues(slate.sport, player);
+    if (invalidContext.length) gaps.push({ reason: `${player.playerName} structured sport context was ignored because values were outside supported units/ranges: ${invalidContext.join(', ')}.` });
+    const missing = requiredProjectionFields(slate.sport, player, slate.contest.format).filter((key) => !values || !validProjectionInput(key, values[key], slate.sport));
+    const invalid = Object.entries(values ?? {}).filter(([key, value]) => !validProjectionInput(key, value, slate.sport)).map(([key]) => key);
+    if ((missing.length || invalid.length) && !Number.isFinite(player.providerFppg)) {
       if (slate.sport === 'GOLF') golfMissing.push({ name: player.playerName, fields: missing });
-      else gaps.push({ reason: `Missing required quantitative inputs for ${player.playerName}: ${missing.join(', ')}.` });
+      else gaps.push({ reason: `${player.playerName} has missing or invalid quantitative inputs: ${[...new Set([...missing, ...invalid])].join(', ')}.` });
       continue;
     }
     const adjustment = adjustmentPackage.adjustments.find((item) => item.playerId === player.playerId);
-    if (values && !missing.length) {
-      let adjustedValues = applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
+    if (values && !missing.length && !invalid.length) {
+      const contextBaseline = applySportContext(slate, player, values);
+      const typed = applyTypedAdjustments(contextBaseline, adjustment);
+      let adjustedValues = typed.values;
+      effectOutcomes.push(...typed.outcomes.map((outcome) => ({ ...outcome, playerId: player.playerId })));
       // A DraftKings RP slot is not a starter workload. Keep the model from turning a bad
       // provider role match into a five-inning projection; long-relief scenarios still need
       // explicit, event-specific evidence before they can exceed this conservative bound.
@@ -57,23 +83,41 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
         gaps.push({ reason: `${player.playerName} is listed as a reliever but had ${adjustedValues.expectedInnings.toFixed(1)} expected innings; workload was capped at 3.0 pending verified long-relief/opening-role evidence.` });
         adjustedValues = { ...adjustedValues, expectedInnings: 3 };
       }
-      prepared.push({ player, values: adjustedValues, adjustment });
+      prepared.push({ player, baselineValues: contextBaseline, values: adjustedValues, adjustment });
     }
-    else { players.push(projectFromProviderFppg(player, adjustment)); if (slate.sport === 'GOLF') golfFallbackCount += 1; }
+    else {
+      if (invalid.length) gaps.push({ reason: `${player.playerName} used the aggregate FPPG fallback because structured inputs were outside valid units or plausible non-negative ranges: ${invalid.join(', ')}.` });
+      effectOutcomes.push(...(adjustment?.adjustments ?? []).filter((item) => item.magnitude !== 'NONE').map((item) => ({ playerId: player.playerId, adjustmentType: item.adjustmentType ?? 'UNKNOWN', state: 'CONTEXT_ONLY' as const, requestedEffect: (item.direction === 'DOWN' ? -1 : item.direction === 'UP' ? 1 : 0) * (item.magnitude === 'MAJOR' ? 0.3 : item.magnitude === 'MATERIAL' ? 0.15 : item.magnitude === 'MODERATE' ? 0.08 : item.magnitude === 'SMALL' ? 0.03 : 0), acceptedEffect: 0, evidenceFindingIds: item.evidenceFindingIds ?? [], reason: 'Structured opportunity inputs are missing; no percentage change was applied to the aggregate FPPG fallback.' })));
+      players.push(projectFromProviderFppg(player, adjustment)); if (slate.sport === 'GOLF') golfFallbackCount += 1;
+    }
   }
   if (golfMissing.length) {
     const sample = golfMissing.slice(0, 5).map(({ name }) => name).join(', ');
     const fields = [...new Set(golfMissing.flatMap(({ fields: missing }) => missing))].join(', ');
     gaps.push({ reason: `Golf structured projections are missing required inputs for ${golfMissing.length}/${slate.playerPool.length} golfers (${fields}). Sample: ${sample}${golfMissing.length > 5 ? ', and others' : ''}. Check SportsDataIO Golf tournament lookup, feed access, and golfer-name matching; lineups remain blocked until inputs are available.` });
   }
-  if (slate.sport === 'NBA' || slate.sport === 'WNBA') reconcileBasketballOpportunities(prepared, slate, gaps);
-  players.push(...prepared.map(({ player, values, adjustment }) => projectPlayer(slate, player, values, adjustment, true)));
+  if (slate.sport === 'NBA' || slate.sport === 'WNBA') {
+    reconcileBasketballOpportunities(prepared, slate, gaps);
+    for (const outcome of effectOutcomes) {
+      if (outcome.dimension !== 'expectedMinutes' || outcome.state !== 'APPLIED') continue;
+      const player = prepared.find((item) => item.player.playerId === outcome.playerId);
+      if (!player) continue;
+      const baseline = player.baselineValues.expectedMinutes;
+      const finalValue = player.values.expectedMinutes;
+      if (Number.isFinite(finalValue)) {
+        outcome.finalValue = finalValue;
+        outcome.acceptedEffect = Number.isFinite(baseline) && baseline !== 0 ? finalValue / baseline - 1 : 0;
+        if (Math.abs(outcome.acceptedEffect - outcome.requestedEffect) > 1e-9) outcome.reason += ' Team opportunity reconciliation changed the final minutes effect; final value reflects that constraint.';
+      }
+    }
+  }
+  players.push(...prepared.map(({ player, baselineValues, values, adjustment }) => projectPlayer(slate, player, values, adjustment, true, baselineValues)));
   if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); any candidate uses DraftKings provider FPPG only and is provisional. Verified skill, course, weather, and finish/cut inputs are still required before entry.` });
   // DK's own FPPG is enough to produce a clearly provisional research candidate, but not an
   // entry-ready Golf projection. Keep the candidate path available for QA and comparison while
   // the run trust gate continues to require model validation and complete sport context.
   const status = players.length === 0 ? 'BLOCKED' : gaps.length || adjustmentPackage.status !== 'COMPLETE' || golfFallbackCount > 0 ? 'PARTIAL' : 'COMPLETE';
-  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, gaps, status };
+  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, effectOutcomes, gaps, status };
 }
 
 // No projectionInputs are available for this player (either the sport has no rate-stat
@@ -83,7 +127,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
 // seeded-noise machinery used for the granular model, so floor/ceiling remain real quantiles
 // of a (coarser) distribution rather than a flat +-15% guess.
 function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
-  const factor = adjustmentFactor(adjustment);
+  const factor = 1;
   const rawMedian = (player.providerFppg ?? 0) * factor;
   // FPPG fallback samples are non-negative by construction (the simulated fantasy-point
   // component is clamped at zero). Derive the reported median from that same distribution so a
@@ -97,12 +141,12 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const floor = quantile(orderedSamples, 0.2);
   const ceiling = quantile(orderedSamples, 0.9);
   const confidence = adjustment?.roleCertainty ?? 'LOW';
-  const uncertaintyFactors = ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`, ...(rawMedian < 0 ? ['Provider FPPG was negative and was clamped to zero for the non-negative fallback distribution.'] : [])];
+  const uncertaintyFactors = ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', 'Research adjustments are context only on this fallback path; no unsupported percentage change was applied.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`, ...(rawMedian < 0 ? ['Provider FPPG was negative and was clamped to zero for the non-negative fallback distribution.'] : [])];
   return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
 }
 
-function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined, valuesArePrepared = false): ProjectionPackage['players'][number] {
-  const adjusted = valuesArePrepared ? values : applySportContext(slate, player, applyTypedAdjustments(values, adjustment));
+function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined, valuesArePrepared = false, baselineValues: Record<string, number> = values): ProjectionPackage['players'][number] {
+  const adjusted = valuesArePrepared ? values : applyTypedAdjustments(applySportContext(slate, player, values), adjustment).values;
   const components = componentsFor(slate, player, adjusted);
   const rules = scoringRulesFor(slate, components);
   const analyticalMedian = scoreComponents(components, rules);
@@ -116,12 +160,13 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const median = quantile(orderedSamples, 0.5);
   const ceiling = quantile(orderedSamples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
+  if (slate.sport === 'NBA' || slate.sport === 'WNBA') uncertaintyFactors.push(Number.isFinite(adjusted.overtimeProbability) ? `Overtime scenario uses supplied probability ${(adjusted.overtimeProbability * 100).toFixed(1)}% and ${adjusted.expectedOvertimePeriods ?? 1} period(s).` : 'Overtime likelihood was not supplied; the outcome sampler includes regulation only.');
   if (slate.sport === 'WNBA' && (adjusted.expectedMinutes ?? 99) <= 8 && player.availability?.roleStatus !== 'CONFIRMED_STARTER') uncertaintyFactors.push('Low-minute WNBA role is not confirmed; the current event distribution does not model a separate DNP probability.');
   if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
-  const opportunityDelta = Object.fromEntries(Object.keys(values).map((key) => [key, (adjusted[key] ?? 0) - (values[key] ?? 0)]));
-  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: values, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
+  const opportunityDelta = Object.fromEntries(Object.keys({ ...baselineValues, ...adjusted }).map((key) => [key, (adjusted[key] ?? 0) - (baselineValues[key] ?? 0)]));
+  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: baselineValues, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
 }
 
 function componentsFor(slate: ValidatedSlate, player: SlatePlayer, v: Record<string, number>): Record<string, number> {
@@ -182,13 +227,13 @@ function simulateSportScores(sport: Sport | 'FPPG', player: SlatePlayer, compone
   for (let i = 0; i < SIMULATION_RUNS; i += 1) {
     environmentSeed = next(environmentSeed); const gameNoise = (environmentSeed / 4294967296 - 0.5) * sportEnvironmentWidth(sport);
     const random = () => { seed = next(seed); return seed / 4294967296; };
-    const sampled = sport === 'FPPG' ? sampleAggregate(components, random, noiseWidth) : sport === 'MLB' ? sampleMlb(player, inputs, random) : sport === 'NFL' || sport === 'CFB' ? sampleFootball(player, inputs, rules, random, gameNoise) : sport === 'GOLF' ? sampleGolf(components, random) : sampleBasketball(player, components, inputs, rules, random, gameNoise);
+    const sampled = sport === 'FPPG' ? sampleAggregate(components, random, noiseWidth) : sport === 'MLB' ? sampleMlb(player, inputs, random) : sport === 'NFL' || sport === 'CFB' ? sampleFootball(player, inputs, rules, random, gameNoise) : sport === 'GOLF' ? sampleGolf(components, random) : sampleBasketball(sport, player, components, inputs, rules, random, gameNoise);
     scores.push(scoreComponents(sampled, rules));
   }
   return scores;
 }
 function sampleAggregate(components: Record<string, number>, random: () => number, width: number): Record<string, number> { return Object.fromEntries(Object.entries(components).map(([key, value]) => [key, Math.max(0, value * (1 + (random() - 0.5) * width))])); }
-function sampleBasketball(player: SlatePlayer, components: Record<string, number>, inputs: Record<string, number>, rules: Record<string, { value: number }>, random: () => number, gameNoise: number): Record<string, number> {
+function sampleBasketball(sport: Sport, player: SlatePlayer, components: Record<string, number>, inputs: Record<string, number>, rules: Record<string, { value: number }>, random: () => number, gameNoise: number): Record<string, number> {
   const minutesMean = inputs.expectedMinutes ?? 0;
   const sourcedP10 = inputs.minutesP10;
   const sourcedP90 = inputs.minutesP90;
@@ -201,9 +246,16 @@ function sampleBasketball(player: SlatePlayer, components: Record<string, number
   // Historical low-minute outcomes are sampled as a separate tail event so a player with
   // recurring restricted appearances does not get represented by a deceptively tight mean.
   const limitedRisk = clampRate(inputs.limitedMinutesRisk ?? 0);
-  const minutes = random() < limitedRisk
+  let minutes = random() < limitedRisk
     ? (sourcedMinutesBand ? Math.max(0, sourcedP10!) : Math.max(0, minutesMean * 0.25))
     : positiveNormal(minutesMean, minutesDeviation, random);
+  const overtimeProbability = clampRate(inputs.overtimeProbability ?? 0);
+  const overtimePeriods = Math.max(0, Math.min(3, Math.floor(inputs.expectedOvertimePeriods ?? 1)));
+  if (overtimePeriods > 0 && random() < overtimeProbability) {
+    const regulationTeamMinutes = sport === 'WNBA' ? 200 : 240;
+    const teamPlayerMinutesPerOvertime = sport === 'WNBA' ? 20 : 25;
+    minutes += minutesMean / regulationTeamMinutes * teamPlayerMinutesPerOvertime * overtimePeriods;
+  }
   const minuteRatio = inputs.expectedMinutes ? minutes / inputs.expectedMinutes : 1;
   const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => {
     const environment = 1 + gameNoise * 0.35;
@@ -262,55 +314,120 @@ function hash(value: string): number { return [...value].reduce((sum, character)
 function next(seed: number): number { return (1664525 * seed + 1013904223) >>> 0; }
 function gameGroup(player: SlatePlayer): string { return [player.team ?? 'UNKNOWN', player.opponent ?? 'UNKNOWN'].sort().join(':'); }
 function quantile(values: number[], q: number): number { return values[Math.min(values.length - 1, Math.max(0, Math.floor((values.length - 1) * q)))]; }
-function adjustmentFactor(adjustment: PlayerAdjustment | undefined): number { return (adjustment?.adjustments ?? []).some((item) => item.adjustmentType === 'AVAILABILITY' && item.direction === 'DOWN') ? 1 + Math.max(-0.4, Math.min(0.4, adjustment?.netSignedMagnitude ?? 0)) : 1; }
-
-function applyTypedAdjustments(values: Record<string, number>, adjustment: PlayerAdjustment | undefined): Record<string, number> {
+function applyTypedAdjustments(values: Record<string, number>, adjustment: PlayerAdjustment | undefined): { values: Record<string, number>; outcomes: ProjectionEffectOutcome[] } {
   const adjusted = { ...values };
+  const groups = new Map<string, { field: string; item: NonNullable<PlayerAdjustment['adjustments'][number]>; effect: number }>();
+  const outcomes: ProjectionEffectOutcome[] = [];
   for (const item of adjustment?.adjustments ?? []) {
-    const factor = 1 + (item.direction === 'UP' ? 1 : item.direction === 'DOWN' ? -1 : 0) * (item.magnitude === 'MAJOR' ? 0.3 : item.magnitude === 'MATERIAL' ? 0.15 : item.magnitude === 'MODERATE' ? 0.08 : item.magnitude === 'SMALL' ? 0.03 : 0);
-    const fields = adjustmentFields(item.adjustmentType);
-    for (const field of fields) if (Number.isFinite(adjusted[field])) adjusted[field] *= factor;
+    const field = adjustmentField(item.adjustmentType);
+    const direction = item.direction === 'UP' ? 1 : item.direction === 'DOWN' ? -1 : 0;
+    const magnitude = item.magnitude === 'MAJOR' ? 0.3 : item.magnitude === 'MATERIAL' ? 0.15 : item.magnitude === 'MODERATE' ? 0.08 : item.magnitude === 'SMALL' ? 0.03 : 0;
+    const requestedEffect = direction * magnitude;
+    const evidenceFindingIds = item.evidenceFindingIds ?? [];
+    if (!field || !direction || !magnitude) {
+      outcomes.push({ adjustmentType: item.adjustmentType ?? 'UNKNOWN', state: 'CONTEXT_ONLY', requestedEffect, acceptedEffect: 0, evidenceFindingIds, reason: `${item.adjustmentType ?? 'Unclassified'} has no supported numeric coefficient or opportunity input in this model.` });
+      continue;
+    }
+    if (!Number.isFinite(adjusted[field])) {
+      outcomes.push({ adjustmentType: item.adjustmentType ?? 'UNKNOWN', state: 'REJECTED', requestedEffect, acceptedEffect: 0, dimension: field, unit: 'relative_fraction', evidenceFindingIds, reason: `Required structured input ${field} is unavailable; effect was not applied to an aggregate FPPG fallback.` });
+      continue;
+    }
+    const factKey = item.canonicalFactKey ?? evidenceFindingIds.slice().sort().join('|') ?? `${item.adjustmentType}`;
+    groups.set(`${field}:${factKey}`, { field, item, effect: requestedEffect });
   }
-  return adjusted;
+  const byField = new Map<string, Array<{ item: NonNullable<PlayerAdjustment['adjustments'][number]>; effect: number }>>();
+  for (const group of groups.values()) byField.set(group.field, [...(byField.get(group.field) ?? []), { item: group.item, effect: group.effect }]);
+  for (const [field, entries] of byField) {
+    const requested = entries.reduce((sum, entry) => sum + entry.effect, 0);
+    const accepted = Math.max(-0.4, Math.min(0.4, requested));
+    const before = adjusted[field];
+    const unit = relativeUnitFor(field);
+    adjusted[field] = Math.max(0, before * (1 + accepted));
+    const actualFraction = before === 0 ? 0 : adjusted[field] / before - 1;
+    const evidenceFindingIds = [...new Set(entries.flatMap((entry) => entry.item.evidenceFindingIds ?? []))];
+    outcomes.push({ adjustmentType: entries.map((entry) => entry.item.adjustmentType ?? 'UNKNOWN').join('+'), state: 'APPLIED', requestedEffect: requested, acceptedEffect: actualFraction, ...(Math.abs(requested - accepted) > 1e-12 ? { capApplied: 0.4 } : {}), finalValue: adjusted[field], dimension: field, unit, evidenceFindingIds, reason: Math.abs(requested - accepted) > 1e-12 ? `Unique effects were summed once and capped at ±40% for ${field}.` : `Unique effects were summed once for ${field}.` });
+  }
+  return { values: adjusted, outcomes };
+}
+
+function relativeUnitFor(field: string): string { return field === 'expectedMinutes' ? 'minutes' : field === 'expectedPA' ? 'plate_appearances' : field === 'targets' ? 'targets' : field === 'carries' ? 'carries' : 'rate_per_opportunity'; }
+
+function isUnitInterval(value: number | undefined): value is number { return Number.isFinite(value) && value! >= 0 && value! <= 1; }
+function isValidMultiplier(value: number | undefined): value is number { return Number.isFinite(value) && value! >= 0.5 && value! <= 1.5; }
+function isValidMinutes(value: number | undefined, sport: Sport): value is number { return Number.isFinite(value) && value! >= 0 && value! <= (sport === 'WNBA' ? 60 : 70); }
+function sportContextIssues(sport: Sport, player: SlatePlayer): string[] {
+  const issues: string[] = [];
+  const nba = player.sportContext?.nba;
+  if (sport === 'NBA' || sport === 'WNBA') {
+    for (const [key, value] of Object.entries({ minutesP10: nba?.minutesP10, minutesP50: nba?.minutesP50, minutesP90: nba?.minutesP90 })) if (value !== undefined && !isValidMinutes(value, sport)) issues.push(key);
+    if (nba?.limitedMinutesRisk !== undefined && !isUnitInterval(nba.limitedMinutesRisk)) issues.push('limitedMinutesRisk');
+    if (nba?.paceMultiplier !== undefined && !isValidMultiplier(nba.paceMultiplier)) issues.push('paceMultiplier');
+    if (nba?.usageMultiplier !== undefined && !isValidMultiplier(nba.usageMultiplier)) issues.push('usageMultiplier');
+    if (nba?.overtimeProbability !== undefined && !isUnitInterval(nba.overtimeProbability)) issues.push('overtimeProbability');
+    if (nba?.expectedOvertimePeriods !== undefined && (!Number.isInteger(nba.expectedOvertimePeriods) || nba.expectedOvertimePeriods < 1 || nba.expectedOvertimePeriods > 3)) issues.push('expectedOvertimePeriods');
+    if (nba?.minutesP10 !== undefined && nba.minutesP50 !== undefined && nba.minutesP10 > nba.minutesP50) issues.push('minutesP10>minutesP50');
+    if (nba?.minutesP50 !== undefined && nba.minutesP90 !== undefined && nba.minutesP50 > nba.minutesP90) issues.push('minutesP50>minutesP90');
+  }
+  const mlb = player.sportContext?.mlb;
+  if (sport === 'MLB') {
+    if (mlb?.expectedPA !== undefined && (!Number.isFinite(mlb.expectedPA) || mlb.expectedPA < 0 || mlb.expectedPA > 15)) issues.push('expectedPA');
+    for (const [key, value] of Object.entries({ platoonMultiplier: mlb?.platoonMultiplier, parkRunMultiplier: mlb?.parkRunMultiplier, weatherRunMultiplier: mlb?.weatherRunMultiplier })) if (value !== undefined && !isValidMultiplier(value)) issues.push(key);
+  }
+  const football = sport === 'CFB' ? player.sportContext?.cfb : player.sportContext?.nfl;
+  if (sport === 'NFL' || sport === 'CFB') {
+    if (football?.expectedPlays !== undefined && (!Number.isFinite(football.expectedPlays) || football.expectedPlays < 0 || football.expectedPlays > 180)) issues.push('expectedPlays');
+    for (const [key, value] of Object.entries({ passRate: football?.passRate, targetShare: football?.targetShare, carryShare: football?.carryShare })) if (value !== undefined && !isUnitInterval(value)) issues.push(key);
+    if (football?.touchdownRateMultiplier !== undefined && !isValidMultiplier(football.touchdownRateMultiplier)) issues.push('touchdownRateMultiplier');
+  }
+  return [...new Set(issues)];
 }
 
 function applySportContext(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>): Record<string, number> {
   const adjusted = { ...values };
   if (slate.sport === 'NBA' || slate.sport === 'WNBA') {
     const context = player.sportContext?.nba;
-    if (context?.minutesP50 !== undefined && Number.isFinite(context.minutesP50)) adjusted.expectedMinutes = context.minutesP50;
-    if (context?.minutesP10 !== undefined && Number.isFinite(context.minutesP10)) adjusted.minutesP10 = context.minutesP10;
-    if (context?.minutesP90 !== undefined && Number.isFinite(context.minutesP90)) adjusted.minutesP90 = context.minutesP90;
-    if (context?.limitedMinutesRisk !== undefined && Number.isFinite(context.limitedMinutesRisk)) adjusted.limitedMinutesRisk = context.limitedMinutesRisk;
-    if (context?.paceMultiplier !== undefined) for (const field of ['pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute']) if (Number.isFinite(adjusted[field])) adjusted[field] *= context.paceMultiplier;
-    if (context?.usageMultiplier !== undefined && Number.isFinite(adjusted.pointsPerMinute)) adjusted.pointsPerMinute *= context.usageMultiplier;
+    if (isValidMinutes(context?.minutesP50, slate.sport)) adjusted.expectedMinutes = context!.minutesP50!;
+    if (isValidMinutes(context?.minutesP10, slate.sport)) adjusted.minutesP10 = context!.minutesP10!;
+    if (isValidMinutes(context?.minutesP90, slate.sport)) adjusted.minutesP90 = context!.minutesP90!;
+    if (isUnitInterval(context?.limitedMinutesRisk)) adjusted.limitedMinutesRisk = context!.limitedMinutesRisk!;
+    if (isUnitInterval(context?.overtimeProbability)) adjusted.overtimeProbability = context!.overtimeProbability!;
+    if (Number.isInteger(context?.expectedOvertimePeriods) && context!.expectedOvertimePeriods! >= 1 && context!.expectedOvertimePeriods! <= 3) adjusted.expectedOvertimePeriods = context!.expectedOvertimePeriods!;
+    if (isValidMultiplier(context?.paceMultiplier)) for (const field of ['pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute']) if (Number.isFinite(adjusted[field])) adjusted[field] *= context!.paceMultiplier!;
+    if (isValidMultiplier(context?.usageMultiplier) && Number.isFinite(adjusted.pointsPerMinute)) adjusted.pointsPerMinute *= context!.usageMultiplier!;
   }
   if (slate.sport === 'MLB') {
     const context = player.sportContext?.mlb;
-    if (context?.expectedPA !== undefined && Number.isFinite(context.expectedPA)) adjusted.expectedPA = context.expectedPA;
-    const environment = [context?.platoonMultiplier, context?.parkRunMultiplier, context?.weatherRunMultiplier].filter((value): value is number => value !== undefined && Number.isFinite(value)).reduce((product, value) => product * value, 1);
+    if (Number.isFinite(context?.expectedPA) && context!.expectedPA! >= 0 && context!.expectedPA! <= 15) adjusted.expectedPA = context!.expectedPA!;
+    const environment = [context?.platoonMultiplier, context?.parkRunMultiplier, context?.weatherRunMultiplier].filter(isValidMultiplier).reduce((product, value) => product * value, 1);
     for (const field of ['singlesPerPA', 'doublesPerPA', 'triplesPerPA', 'homeRunsPerPA', 'walksPerPA', 'hitByPitchPerPA', 'rbiPerPA', 'runsPerPA', 'stolenBasesPerPA']) if (Number.isFinite(adjusted[field])) adjusted[field] *= environment;
   }
   if (slate.sport === 'NFL' || slate.sport === 'CFB') {
     const context = slate.sport === 'CFB' ? player.sportContext?.cfb : player.sportContext?.nfl;
-    if (context?.expectedPlays !== undefined && Number.isFinite(context.expectedPlays)) { if (isQuarterback(player)) adjusted.passAttempts = context.expectedPlays * (context.passRate ?? 0); else { adjusted.targets = context.expectedPlays * (context.passRate ?? 0) * (context.targetShare ?? 0); adjusted.carries = context.expectedPlays * (1 - (context.passRate ?? 0)) * (context.carryShare ?? 0); } }
-    if (context?.touchdownRateMultiplier !== undefined && Number.isFinite(adjusted.touchdownProbability)) adjusted.touchdownProbability *= context.touchdownRateMultiplier;
+    const validPlayShares = Number.isFinite(context?.expectedPlays) && context!.expectedPlays! >= 0 && context!.expectedPlays! <= 180 && isUnitInterval(context?.passRate);
+    if (validPlayShares) { if (isQuarterback(player)) adjusted.passAttempts = context!.expectedPlays! * context!.passRate!; else if (isUnitInterval(context?.targetShare) && isUnitInterval(context?.carryShare)) { adjusted.targets = context!.expectedPlays! * context!.passRate! * context!.targetShare!; adjusted.carries = context!.expectedPlays! * (1 - context!.passRate!) * context!.carryShare!; } }
+    if (isValidMultiplier(context?.touchdownRateMultiplier) && Number.isFinite(adjusted.touchdownProbability)) adjusted.touchdownProbability *= context!.touchdownRateMultiplier!;
   }
   return adjusted;
 }
 
-function adjustmentFields(type?: string): string[] {
+function adjustmentField(type?: string): string | undefined {
   switch (type) {
-    case 'MINUTES': return ['expectedMinutes'];
-    case 'USAGE': return ['pointsPerMinute'];
-    case 'BALL_HANDLING': return ['assistsPerMinute'];
-    case 'REBOUNDING': return ['reboundsPerMinute'];
-    case 'SNAP_SHARE': return ['snaps', 'routes'];
-    case 'TARGET_SHARE': return ['targets'];
-    case 'CARRY_SHARE': return ['carries'];
+    case 'MINUTES':
+    case 'ROLE_RESTRICTION': return 'expectedMinutes';
+    case 'USAGE': return 'pointsPerMinute';
+    case 'BALL_HANDLING': return 'assistsPerMinute';
+    case 'REBOUNDING': return 'reboundsPerMinute';
+    case 'TARGET_SHARE': return 'targets';
+    case 'CARRY_SHARE': return 'carries';
     case 'BATTING_ORDER':
-    case 'PLATE_APPEARANCES': return ['expectedPA'];
-    default: return [];
+    case 'PLATE_APPEARANCES': return 'expectedPA';
+    // Exhaustive context-only outcomes: there is no validated numerical coefficient
+    // or compatible structured opportunity input for these effects yet.
+    case 'PACE': case 'COMPETITIVE_CONTEXT': case 'AI_SPECIALIST': case 'ROLE_OPPORTUNITY':
+    case 'HANDEDNESS_MATCHUP': case 'BULLPEN': case 'PITCHER_QUALITY': case 'STROKES_GAINED':
+    case 'WEATHER_WAVE': case 'COURSE_FIT': case 'FORM': case 'SNAP_SHARE': case 'PASSING_VOLUME':
+    case 'MATCHUP': case 'WEATHER': case 'CONTEXT': case 'EVIDENCE_STATUS': case 'AVAILABILITY': return undefined;
+    default: return undefined;
   }
 }
 

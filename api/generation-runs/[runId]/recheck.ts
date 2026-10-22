@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { applyAvailabilitySnapshot } from '../../../src/lib/engine/availability.js';
-import { cors, method, providerSet, respondError, tenantContext } from '../../../server/runtime.js';
+import { cors, method, providerSet, requireOwnedRun, respondError, tenantContext } from '../../../server/runtime.js';
 import { computePreLockDecision, diffAvailabilityForChangeEvents } from '../../../server/learningDiagnosis.js';
 
 // Cheap pre-lock recheck: re-runs Research against the already-validated slate and diffs the
@@ -11,11 +11,12 @@ import { computePreLockDecision, diffAvailabilityForChangeEvents } from '../../.
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
   try {
-    const context = await tenantContext();
+    const context = await tenantContext(req);
     const runId = String(req.query.runId ?? '');
     if (!runId) throw new Error('runId is required.');
+    await requireOwnedRun(context, runId);
 
-    const stages = await context.db.from('engine_stage_runs').select('stage,version,output_payload').eq('generation_run_id', runId).in('stage', ['SLATE', 'RESEARCH']).order('version', { ascending: false });
+    const stages = await context.db.from('engine_stage_runs').select('stage,version,output_payload').eq('tenant_id', context.tenantId).eq('generation_run_id', runId).in('stage', ['SLATE', 'RESEARCH']).order('version', { ascending: false });
     if (stages.error) throw stages.error;
     const latestByStage = new Map<string, { version: number; output_payload: unknown }>();
     for (const row of stages.data ?? []) if (!latestByStage.has(row.stage)) latestByStage.set(row.stage, { version: row.version, output_payload: row.output_payload });
@@ -68,10 +69,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       }
     }
 
-    const selectionRuns = await context.db.from('floyd_dfs_selection_runs').select('id').eq('generation_run_id', runId);
+    const selectionRuns = await context.db.from('floyd_dfs_selection_runs').select('id').eq('tenant_id', context.tenantId).eq('generation_run_id', runId);
     if (selectionRuns.error) throw selectionRuns.error;
     const selectionRunIds = (selectionRuns.data ?? []).map((row) => row.id);
-    const runLineups = selectionRunIds.length ? await context.db.from('floyd_dfs_generated_lineups').select('id,status').in('selection_run_id', selectionRunIds) : { data: [], error: null };
+    const runLineups = selectionRunIds.length ? await context.db.from('floyd_dfs_generated_lineups').select('id,status').eq('tenant_id', context.tenantId).in('selection_run_id', selectionRunIds) : { data: [], error: null };
     if (runLineups.error) throw runLineups.error;
     const immutableLineupIds = (runLineups.data ?? []).filter((row) => row.status === 'ENTERED').map((row) => String(row.id));
     const affectedLineupIds = (runLineups.data ?? []).map((row) => String(row.id));

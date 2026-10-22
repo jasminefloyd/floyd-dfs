@@ -2,5 +2,8 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
-  "crons": [{ "path": "/api/learning/weekly-report", "schedule": "0 13 * * 1" }]
+  "crons": [
+    { "path": "/api/learning/weekly-report", "schedule": "0 13 * * 1" },
+    { "path": "/api/maintenance/draftkings-audit", "schedule": "0 14 1 * *" }
+  ]
 }

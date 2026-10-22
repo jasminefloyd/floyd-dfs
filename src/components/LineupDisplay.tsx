@@ -1,6 +1,8 @@
-import { Check, ChevronDown } from 'lucide-react';
-import { useState } from 'react';
+import { ChevronDown } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MIOS_FantasyManifest } from '../lib/MIOS_FantasyAgents';
+import { confirmFloydSwapRecommendation, createFloydSwapPlans, floydRequest, type FloydSwapPlan } from '../lib/floydDfsClient';
+import { ExportLineup } from './ExportLineup';
 
 export interface LineupPlayer {
   id?: string;
@@ -42,6 +44,7 @@ export interface LineupPlayer {
   ownership_projection?: number;
   context_score?: number;
   contextual_projection?: number;
+  expected_points?: number;
   floor_projection?: number;
   ceiling_projection?: number;
   volatility_score?: number;
@@ -71,9 +74,18 @@ export interface Lineup {
   status?: string;
   rank: number;
   players: LineupPlayer[];
-  projected_points: number;
+  projected_points?: number;
   expected_points?: number;
-  salary_used: number;
+  salary_used?: number;
+  salary_cap?: number;
+  decision_trace?: Record<string, unknown>;
+  objective_label?: string;
+  salary_remaining?: number;
+  data_as_of?: string;
+  next_lock_at?: string;
+  validation_status?: string;
+  search_status?: string;
+  latest_revision?: number;
   confidence_score: number | null;
   cash_line_confidence?: 'CALIBRATED' | 'SIMULATED_ESTIMATE' | 'UNAVAILABLE';
   contest_kind?: 'CASH' | 'GPP' | 'UNKNOWN';
@@ -112,14 +124,21 @@ export interface Lineup {
 interface LineupDisplayProps {
   lineups: Lineup[];
   manifest?: MIOS_FantasyManifest | null;
-  onSaveLineup?: (lineup: Lineup) => void | Promise<void>;
+  selectedLineupRank?: number;
+  onSelectLineup?: (rank: number) => void;
+  onSaveLineup?: (lineup: Lineup, entry: { contestId: string; externalEntryId: string }) => void | Promise<void>;
 }
 
-export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplayProps) {
+export function LineupDisplay({ lineups, manifest, selectedLineupRank, onSelectLineup, onSaveLineup }: LineupDisplayProps) {
   const [expandedRanks, setExpandedRanks] = useState<Set<number>>(new Set([1]));
   const [enteredIds, setEnteredIds] = useState<Set<string>>(() => new Set(lineups.filter((lineup) => lineup.status?.toUpperCase() === 'ENTERED').map((lineup) => lineup.id).filter((id): id is string => Boolean(id))));
   const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
+  const [entryDetails, setEntryDetails] = useState<Record<string, { contestId: string; externalEntryId: string }>>({});
+  const [swapPlansByLineup, setSwapPlansByLineup] = useState<Record<string, { plans: FloydSwapPlan[]; message?: string; loading?: boolean; confirming?: string }>>({});
+  const [revisionByLineup, setRevisionByLineup] = useState<Record<string, number>>(() => Object.fromEntries(lineups.flatMap((lineup) => lineup.id ? [[lineup.id, lineup.latest_revision ?? 0] as const] : [])));
+  const [watchedLineupIds, setWatchedLineupIds] = useState<Set<string>>(() => new Set());
+  const swapRequestIds = useRef(new Set<string>());
   const toggleLineup = (rank: number) => {
     setExpandedRanks((current) => {
       const next = new Set(current);
@@ -133,17 +152,62 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
   };
   const markEntered = async (lineup: Lineup) => {
     const id = lineup.id;
-    if (!id || enteredIds.has(id) || savingIds.has(id)) return;
+    if (!id || savingIds.has(id)) return;
+    const entry = entryDetails[id] ?? { contestId: '', externalEntryId: '' };
+    if (!entry.contestId.trim() || !entry.externalEntryId.trim()) {
+      setSaveErrors((current) => ({ ...current, [id]: 'Add the DraftKings contest ID and entry ID from your submitted entry.' }));
+      return;
+    }
     setSavingIds((current) => new Set(current).add(id));
     setSaveErrors((current) => { const next = { ...current }; delete next[id]; return next; });
     try {
       if (!onSaveLineup) throw new Error('Mark as entered is unavailable for this lineup.');
-      await onSaveLineup(lineup);
+      await onSaveLineup(lineup, { contestId: entry.contestId.trim(), externalEntryId: entry.externalEntryId.trim() });
       setEnteredIds((current) => new Set(current).add(id));
     } catch (error) {
       setSaveErrors((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Unable to mark this lineup as entered. Try again.' }));
     } finally {
       setSavingIds((current) => { const next = new Set(current); next.delete(id); return next; });
+    }
+  };
+  const refreshAlternatives = useCallback(async (lineup: Lineup, automatic = false) => {
+    if (!lineup.id || swapRequestIds.current.has(lineup.id) || swapPlansByLineup[lineup.id]?.loading) return;
+    const entryId = entryDetails[lineup.id]?.externalEntryId.trim();
+    if (!entryId) { setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { plans: [], message: 'Add and save the DraftKings entry ID before requesting alternatives.' } })); return; }
+    swapRequestIds.current.add(lineup.id);
+    setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { plans: [], loading: true } }));
+    try {
+      const response = await createFloydSwapPlans({ lineupId: lineup.id, entryId, sourceRevision: revisionByLineup[lineup.id] ?? lineup.latest_revision ?? 0, trigger: automatic ? 'Watched lineup refresh.' : 'User requested fresh swap alternatives.', idempotencyKey: crypto.randomUUID() });
+      setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { plans: response.plans ?? [], message: response.plans?.length ? undefined : response.outcome === 'NO_SOLUTION' ? 'No distinct legal alternatives were found.' : response.submission ?? `Alternatives are unavailable (${response.outcome}).` } }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Alternatives could not be refreshed. Try again.';
+      setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { plans: [], message } }));
+      if (automatic && /no unlocked games remain|not verified|does not permit late swap|unsupported/i.test(message)) setWatchedLineupIds((current) => { const next = new Set(current); next.delete(lineup.id!); return next; });
+    } finally { swapRequestIds.current.delete(lineup.id); }
+  }, [entryDetails, revisionByLineup, swapPlansByLineup]);
+  useEffect(() => {
+    if (!watchedLineupIds.size) return;
+    const poll = () => {
+      if (document.visibilityState !== 'visible') return;
+      for (const id of watchedLineupIds) {
+        const lineup = lineups.find((item) => item.id === id);
+        if (lineup && enteredIds.has(id)) void refreshAlternatives(lineup, true);
+      }
+    };
+    const onVisibility = () => { if (document.visibilityState === 'visible') poll(); };
+    const interval = window.setInterval(poll, 60_000);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => { window.clearInterval(interval); document.removeEventListener('visibilitychange', onVisibility); };
+  }, [watchedLineupIds, enteredIds, lineups, entryDetails, revisionByLineup, refreshAlternatives]);
+  const confirmRecommendation = async (lineup: Lineup, plan: FloydSwapPlan) => {
+    if (!lineup.id || swapPlansByLineup[lineup.id]?.confirming) return;
+    setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { ...current[lineup.id!], confirming: plan.id } }));
+    try {
+      const result = await confirmFloydSwapRecommendation({ lineupId: lineup.id, planId: plan.id, sourceRevision: revisionByLineup[lineup.id] ?? lineup.latest_revision ?? 0 });
+      setRevisionByLineup((current) => ({ ...current, [lineup.id!]: result.revision.revision }));
+      setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { plans: [], message: `Saved as local revision ${result.revision.revision}. DraftKings was not changed; review and enter it manually.` } }));
+    } catch (error) {
+      setSwapPlansByLineup((current) => ({ ...current, [lineup.id!]: { ...current[lineup.id!], message: error instanceof Error ? error.message : 'This recommendation could not be confirmed; refresh alternatives.' } }));
     }
   };
 
@@ -171,7 +235,9 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
               id={summaryId}
               aria-expanded={isExpanded}
               aria-controls={detailsId}
-              onClick={() => toggleLineup(lineup.rank)}
+              aria-current={selectedLineupRank === lineup.rank ? 'true' : undefined}
+              onClick={() => { toggleLineup(lineup.rank); onSelectLineup?.(lineup.rank); }}
+              onFocus={() => onSelectLineup?.(lineup.rank)}
               className="block w-full text-left transition-colors duration-[var(--transition-fast)] hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-cyan-500"
             >
               {/* Header */}
@@ -196,10 +262,10 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                   <div className="flex shrink-0 items-start gap-2 text-right">
                     <div>
                       <div className="text-3xl font-black tracking-tight text-white sm:text-4xl">
-                        {(lineup.expected_points ?? lineup.projected_points).toFixed(1)} {lineup.expected_points !== undefined ? 'mean' : 'median'} pts
+                        {lineup.expected_points !== undefined ? `${lineup.expected_points.toFixed(1)} mean pts` : lineup.projected_points !== undefined ? `${lineup.projected_points.toFixed(1)} median pts` : 'Points unavailable'}
                       </div>
                       <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wide text-cyan-200">
-                        ${(lineup.salary_used / 1000).toFixed(1)}k / $50k
+                        {lineup.salary_used !== undefined ? `$${lineup.salary_used.toLocaleString()} / ${lineup.salary_cap !== undefined ? `$${lineup.salary_cap.toLocaleString()}` : 'cap unavailable'}` : 'Salary unavailable'}
                       </div>
                     </div>
                     <ChevronDown
@@ -215,12 +281,21 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                 </p>
               </div>
 
-              {(lineup.projected_points || lineup.ceiling_score) ? (
+              {(lineup.projected_points !== undefined || lineup.expected_points !== undefined || lineup.ceiling_score !== undefined) ? (
               <div className="grid grid-cols-2 gap-px border-b border-slate-200 bg-slate-200">
-                  <Metric label="Median FPTS" value={lineup.projected_points.toFixed(1)} />
+                  <Metric label="Mean FPTS" value={lineup.expected_points !== undefined ? lineup.expected_points.toFixed(1) : 'Unavailable'} />
+                  <Metric label="Median FPTS" value={lineup.projected_points !== undefined ? lineup.projected_points.toFixed(1) : 'Unavailable'} />
                   <Metric label="P20–P90 range" value={lineup.floor_score !== undefined && lineup.ceiling_score !== undefined ? `${lineup.floor_score.toFixed(1)}–${lineup.ceiling_score.toFixed(1)}` : 'Unavailable'} />
+                  <Metric label="Salary left" value={lineup.salary_remaining !== undefined ? `$${lineup.salary_remaining.toLocaleString()}` : 'Unavailable'} />
                 </div>
               ) : null}
+              <div className="flex flex-wrap gap-x-3 gap-y-1 border-b border-slate-200 px-4 py-2 text-[10px] text-slate-500 sm:px-5">
+                {lineup.objective_label ? <span>Objective · {lineup.objective_label}</span> : null}
+                {lineup.data_as_of ? <span>Data as of {formatLocalTime(lineup.data_as_of)}</span> : null}
+                {lineup.next_lock_at ? <span>Next lock {formatLocalTime(lineup.next_lock_at)}</span> : null}
+                {lineup.validation_status ? <span>Validation {lineup.validation_status}</span> : null}
+                {lineup.search_status ? <span>Search {lineup.search_status}</span> : null}
+              </div>
 
               {/* Narrative */}
               <div className={`border-b border-slate-200 px-4 py-3.5 sm:px-5 ${isExpanded ? '' : 'border-b-0'}`}>
@@ -270,7 +345,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                     const trendSymbol = trend === 'up' ? '↗' : trend === 'down' ? '↘' : '→';
                     return (
                     <div
-                        key={idx}
+                        key={`${player.id ?? player.name ?? idx}:${player.image_url ?? ''}`}
                         className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 sm:flex sm:items-center"
                       >
                         <div className="flex items-center gap-2 sm:contents">
@@ -313,7 +388,7 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
                             <p className="font-black text-emerald-700">{player.contextual_projection?.toFixed(1) ?? '—'} pts</p>
                           </div>
                           <p className="col-span-2 text-[11px] font-medium leading-4 text-slate-500 sm:max-w-[160px]">
-                            {player.contextual_projection?.toFixed(1) ?? '—'} Floyd median
+                            {player.expected_points !== undefined ? `${player.expected_points.toFixed(1)} mean · ` : ''}{player.contextual_projection?.toFixed(1) ?? '—'} Floyd median
                             {player.last_5_stats?.stdev_fantasy_pts ? ` • σ ${player.last_5_stats.stdev_fantasy_pts.toFixed(1)}` : ''}
                             {player.salary_multiplier && player.salary_multiplier > 1
                               ? ` • ${player.salary_multiplier}x from ${formatSalary(player.base_salary)}`
@@ -340,16 +415,27 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
 
                 {/* Action Buttons */}
                 <div className="border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
+                  <div className="mb-3 grid gap-2 sm:grid-cols-2">
+                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">DraftKings contest ID<input value={entryDetails[lineup.id ?? '']?.contestId ?? manifest?.slate?.contest_id ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: event.target.value, externalEntryId: current[lineup.id!]?.externalEntryId ?? '' } }))} placeholder="Contest ID" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
+                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Your DraftKings entry ID<input value={entryDetails[lineup.id ?? '']?.externalEntryId ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: current[lineup.id!]?.contestId ?? manifest?.slate?.contest_id ?? '', externalEntryId: event.target.value } }))} placeholder="Entry ID from DraftKings" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
+                  </div>
                   <button
                     type="button"
-                    disabled={!lineup.id || enteredIds.has(lineup.id) || savingIds.has(lineup.id)}
+                    disabled={!lineup.id || savingIds.has(lineup.id)}
                     onClick={() => void markEntered(lineup)}
                     className="w-full rounded-xl bg-[#0b1f3a] py-3 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:cursor-default disabled:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
-                    {lineup.id && enteredIds.has(lineup.id) ? <><Check className="inline h-4 w-4" aria-hidden="true" /> Entry recorded</> : savingIds.has(lineup.id ?? '') ? 'Saving…' : 'Record external entry'}
+                    {savingIds.has(lineup.id ?? '') ? 'Saving…' : lineup.id && enteredIds.has(lineup.id) ? 'Link / update DraftKings entry ID' : 'Record external entry'}
                   </button>
-                  <p className="mt-2 text-center text-[11px] text-slate-500">This records a lineup you entered on DraftKings; it does not submit the lineup.</p>
+                  <p className="mt-2 text-center text-[11px] text-slate-500">Saves the DraftKings contest and entry IDs so official standings can be matched later. It does not submit the lineup.</p>
                   {lineup.id && saveErrors[lineup.id] ? <p role="alert" className="mt-2 text-sm font-semibold text-red-700">{saveErrors[lineup.id]}</p> : null}
+                  <div className="mt-3 border-t border-slate-200 pt-3">
+                    <button type="button" disabled={!lineup.id || !enteredIds.has(lineup.id) || Boolean(swapPlansByLineup[lineup.id]?.loading)} onClick={() => void refreshAlternatives(lineup)} className="w-full rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-2.5 text-sm font-black text-cyan-950 disabled:cursor-not-allowed disabled:opacity-50">{swapPlansByLineup[lineup.id ?? '']?.loading ? 'Checking contest and game status…' : 'Refresh alternatives'}</button>
+                    {lineup.id && swapPlansByLineup[lineup.id]?.message ? <p role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs leading-5 text-amber-900">{swapPlansByLineup[lineup.id]!.message}</p> : null}
+                    {lineup.id ? swapPlansByLineup[lineup.id]?.plans.map((plan) => <SwapPlanCard key={plan.id} plan={plan} lineup={lineup} confirming={swapPlansByLineup[lineup.id!]?.confirming === plan.id} onConfirm={() => void confirmRecommendation(lineup, plan)} />) : null}
+                    {lineup.id && enteredIds.has(lineup.id) ? <><button type="button" aria-pressed={watchedLineupIds.has(lineup.id)} onClick={() => setWatchedLineupIds((current) => { const next = new Set(current); if (next.has(lineup.id!)) next.delete(lineup.id!); else next.add(lineup.id!); return next; })} className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700">{watchedLineupIds.has(lineup.id) ? 'Stop watching this lineup' : 'Watch for lineup updates'}</button><p className="mt-2 text-[11px] text-slate-500">Watched lineups refresh every 60 seconds while this page is visible. Watching stops when the slate has no verified editable games. Plans can be blocked if DraftKings eligibility or any game lock cannot be verified. A local recommendation is not a DraftKings submission.</p></> : null}
+                  </div>
+                  <div className="mt-3"><ExportLineup lineup={lineup} /></div>
                 </div>
               </div>
             ) : null}
@@ -358,6 +444,11 @@ export function LineupDisplay({ lineups, manifest, onSaveLineup }: LineupDisplay
       })}
     </div>
   );
+}
+
+function SwapPlanCard({ plan, lineup, confirming, onConfirm }: { plan: FloydSwapPlan; lineup: Lineup; confirming: boolean; onConfirm: () => void }) {
+  const players = new Map(lineup.players.map((player) => [String(player.id), player.name ?? player.full_name ?? String(player.id)]));
+  return <article className="mt-3 rounded-xl border border-emerald-200 bg-white p-3" aria-label="Server-validated conditional swap alternative"><p className="text-xs font-black text-emerald-900">Conditional alternative · server-validated</p><ul className="mt-2 space-y-1 text-xs text-slate-700">{Object.entries(plan.replacement_roster).map(([slot, playerId]) => <li key={slot}><span className="font-bold">{slot}:</span> {players.get(playerId) ?? 'Replacement player'}</li>)}</ul><p className="mt-2 text-xs text-slate-600">Salary left ${plan.salary_remaining.toLocaleString()} · mean {deltaLabel(plan.mean_delta)} · median {deltaLabel(plan.median_delta)}</p>{plan.expires_at ? <p className="mt-1 text-[11px] text-amber-800">Expires {formatLocalTime(plan.expires_at)}{plan.next_lock_at ? ` · next lock ${formatLocalTime(plan.next_lock_at)}` : ''}</p> : null}{plan.risk_flags.length ? <p className="mt-1 text-[11px] text-amber-800">Watch: {plan.risk_flags.join(' · ')}</p> : null}<p className="mt-1 text-[11px] text-slate-500">Evidence references: {plan.evidence_ids.length}</p><button type="button" disabled={confirming} onClick={onConfirm} className="mt-3 w-full rounded-lg bg-emerald-800 px-3 py-2 text-xs font-black text-white disabled:opacity-50">{confirming ? 'Revalidating and saving…' : 'Confirm local recommendation'}</button><p className="mt-1 text-center text-[10px] text-slate-500">This does not submit to DraftKings.</p></article>;
 }
 
 function LineupAlerts({ lineup }: { lineup: Lineup }) {
@@ -401,7 +492,12 @@ function formatSalary(salary?: number): string {
   return salary === undefined ? '$—' : `$${salary.toLocaleString()}`;
 }
 
+function formatLocalTime(value: string): string { const timestamp = Date.parse(value); return Number.isFinite(timestamp) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' }).format(new Date(timestamp)) : 'time unavailable'; }
+function deltaLabel(value: number | null): string { return value === null ? 'unavailable' : `${value > 0 ? '+' : ''}${value.toFixed(1)} pts`; }
+
 function PlayerPortrait({ player }: { player: LineupPlayer }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => setImageFailed(false), [player.image_url]);
   const name = player.name || player.full_name || 'Player';
   const initials = name
     .split(' ')
@@ -410,12 +506,19 @@ function PlayerPortrait({ player }: { player: LineupPlayer }) {
     .map((part) => part[0]?.toUpperCase())
     .join('');
 
-  if (player.image_url) {
+  if (player.image_url && !imageFailed) {
     return (
       <img
         src={player.image_url}
         alt=""
         className="h-11 w-11 shrink-0 rounded-md border border-slate-200 object-cover"
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+        onError={() => {
+          setImageFailed(true);
+          if (player.id) void floydRequest(`/api/player-photos/${encodeURIComponent(player.id)}/failed`, { method: 'POST' }).catch(() => undefined);
+        }}
       />
     );
   }

@@ -5,7 +5,7 @@ import { cors, method, respondError, tenantContext } from '../../server/runtime.
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
   try {
-    const context = await tenantContext(); const contestId = String(req.query.contestId ?? '').trim();
+    const context = await tenantContext(req); const contestId = String(req.query.contestId ?? '').trim();
     if (!contestId) throw new Error('contestId is required.');
     const entriesResult = await context.db.from('floyd_dfs_contest_field_entries').select('external_entry_id,sport,contest_format,field_size,entry_fee,paid_positions,finish_position,actual_dk_points,payout,player_ids,finality_status').eq('tenant_id', context.tenantId).eq('contest_id', contestId).in('finality_status', ['FINAL','CORRECTED']);
     if (entriesResult.error) throw entriesResult.error;

@@ -3,19 +3,28 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "vite",
     "dev:full": "vercel dev",
     "build": "tsc -b && vite build",
     "check:server": "tsc -p tsconfig.server.json",
     "test:parity": "node scripts/run-engine-parity.mjs",
+    "test:engine": "npm run test:parity",
+    "test:fixtures": "node scripts/test-replay-fixtures.mjs",
+    "test:actual-sources": "node scripts/test-official-actual-sources.mjs",
     "lint": "oxlint",
     "import:dk": "node scripts/import-draftkings-slate.mjs",
     "backfill:player-actuals": "node scripts/backfill-player-actuals.mjs",
     "backfill:run-evidence": "node scripts/backfill-run-evidence.mjs",
     "import:mlb-actuals": "node scripts/import-mlb-actual-results.mjs",
     "import:results": "node scripts/import-projection-results.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:auth": "node scripts/test-request-auth.mjs",
+    "test:contracts": "node scripts/test-contract-fixtures.mjs",
+    "backup:p02:production": "node scripts/backup-fds-p02-production.mjs"
   },
   "dependencies": {
     "@sentry/react": "^10.65.0",

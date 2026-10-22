@@ -56,11 +56,19 @@ export function isQuarterback(player: { position?: string }): boolean { return /
 // (verified live -- `Games` comes back undefined for every NFL row on this account).
 export function gamesPlayedFromRow(row: Record<string, unknown>): number { return readNumber(row, ['Games', 'Played', 'games']) ?? 0; }
 
+/** Provisional NBA shrinkage schedule: current-season rates gain weight with sample size. */
+export function currentSeasonWeight(sport: Sport, currentGames: number): number {
+  if (sport === 'NBA') return Math.max(0.2, Math.min(0.85, currentGames / (currentGames + 20)));
+  if (sport === 'NFL' || sport === 'CFB') return currentGames >= 4 ? 0.7 : 0.5;
+  return 0.7;
+}
+
 export function findRow(player: SlatePlayer, rows: Record<string, unknown>[], allowTeamMismatch = false): Record<string, unknown> | undefined {
   const providerId = player.identity?.sportsDataIoId;
   if (providerId) {
     const idMatch = rows.find((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId', 'PlayerKey', 'playerKey']) === providerId);
     if (idMatch) return idMatch;
+    return undefined;
   }
   const targetName = normalizeProviderName(player.playerName);
   const targetTeam = normalizeTeamCode(player.team);

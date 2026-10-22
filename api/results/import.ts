@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { diagnoseLineupResult } from '../../server/learningDiagnosis.js';
-import { cors, method, parseBody, respondError, tenantContext } from '../../server/runtime.js';
+import { cors, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
 
-const COLUMNS = ['lineup_id', 'actual_dk_points', 'finish_position', 'cash_line', 'field_size', 'entry_fee', 'payout'];
+const COLUMNS = ['actual_dk_points', 'finish_position', 'cash_line', 'field_size', 'entry_fee', 'payout'];
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   try {
@@ -13,15 +13,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const headers = records.shift()?.map((header) => header.trim().toLowerCase().replace(/\s+/g, '_')) ?? [];
     for (const required of COLUMNS) if (!headers.includes(required)) throw new Error(`CSV is missing required column "${required}".`);
     if (!headers.includes('contest_id') && !headers.includes('contest_name')) throw new Error('CSV must include contest_id or contest_name to identify the contest.');
+    if (!headers.includes('lineup_id') && !(headers.includes('contest_id') && headers.includes('external_entry_id'))) throw new Error('CSV must include lineup_id, or both contest_id and external_entry_id from your linked DraftKings entry.');
     const batchId = crypto.randomUUID();
-    const context = await tenantContext();
+    const context = await tenantContext(req);
     let imported = 0;
     const errors: Array<{ row: number; error: string }> = [];
     for (const [index, values] of records.entries()) {
       const rowNumber = index + 2;
       try {
         const row = Object.fromEntries(headers.map((header, column) => [header, values[column] ?? '']));
-        const lineupId = text(row.lineup_id);
+        const contestId = text(row.contest_id) || null;
+        const contestName = text(row.contest_name) || null;
+        const externalEntryId = text(row.external_entry_id) || null;
+        let lineupId = text(row.lineup_id);
+        if (!lineupId && contestId && externalEntryId) {
+          const entryLink = await context.db.from('floyd_dfs_entry_links').select('generated_lineup_id').eq('tenant_id', context.tenantId).eq('contest_id', contestId).eq('external_entry_id', externalEntryId).maybeSingle();
+          if (entryLink.error) throw entryLink.error;
+          lineupId = String(entryLink.data?.generated_lineup_id ?? '');
+          if (!lineupId) throw new Error('No entered lineup is linked to this contest_id and external_entry_id. Link the entry from the generated lineup first.');
+        }
+        await requireOwnedLineup(context, lineupId);
         const lineup = await context.db.from('floyd_dfs_generated_lineups').select('id,status,lineup_payload,selection_run_id').eq('tenant_id', context.tenantId).eq('id', lineupId).maybeSingle();
         if (lineup.error) throw lineup.error;
         if (!lineup.data || lineup.data.status !== 'ENTERED') throw new Error('lineup_id does not identify an entered lineup in this tenant.');
@@ -33,8 +44,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const entryFee = number(row.entry_fee);
         const fieldSize = integer(row.field_size);
         const paidPositions = integer(row.paid_positions);
-        const contestId = text(row.contest_id) || null;
-        const contestName = text(row.contest_name) || null;
         if (cashLine === null || finishPosition === null || fieldSize === null || entryFee === null || payout === null) throw new Error('Contest outcome requires cash_line, finish_position, field_size, entry_fee, and payout.');
         if (!contestId && !contestName) throw new Error('Contest identity requires contest_id or contest_name.');
         if (cashLine !== null && cashLine <= 0) throw new Error('cash_line must be greater than zero.');
@@ -53,7 +62,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           roi: payout !== null && entryFee !== null && entryFee > 0 ? (payout - entryFee) / entryFee : null,
           contest_id: contestId, contest_name: contestName, sport, contest_format: contestFormat,
           field_size: fieldSize, entry_fee: entryFee, paid_positions: paidPositions,
-          outcome_source: 'DRAFTKINGS_CSV', external_entry_id: text(row.external_entry_id) || null,
+          outcome_source: 'DRAFTKINGS_CSV', external_entry_id: externalEntryId,
           official_outcome: true, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED',
           result_payload: { source: 'DRAFTKINGS_CSV', importBatchId: batchId, csvRow: rowNumber },
         };
@@ -68,11 +77,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       } catch (error) { errors.push({ row: rowNumber, error: error instanceof Error ? error.message : 'Row import failed.' }); }
     }
     cors(req, res);
-    res.status(errors.length ? 207 : 200).json({ batchId, imported, failed: errors.length, errors: errors.slice(0, 100), note: 'DraftKings export rows must include a lineup_id column copied from lineup history so standings can be reconciled to the exact generated lineup.' });
+    res.status(errors.length ? 207 : 200).json({ batchId, imported, failed: errors.length, errors: errors.slice(0, 100), note: 'Match standings by app lineup_id or by contest_id plus the external_entry_id registered when the DraftKings entry was recorded.' });
   } catch (error) { respondError(req, res, error); }
 }
 
-async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof tenantContext>>; resultId: string; lineupId: string; lineupPayload: unknown; selectionRunId: string; enteredScore: number; contestKey: string }): Promise<void> {
+export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof tenantContext>>; resultId: string; lineupId: string; lineupPayload: unknown; selectionRunId: string; enteredScore: number; contestKey: string }): Promise<void> {
   const { context, resultId, lineupId, selectionRunId } = input;
   const payload = record(input.lineupPayload); const playerIds = [...new Set((Array.isArray(payload.playerIds) ? payload.playerIds : []).map(String))];
   const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id,selection_package').eq('tenant_id', context.tenantId).eq('id', selectionRunId).maybeSingle();
@@ -81,7 +90,7 @@ async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof 
   const generation = generationRunId ? await context.db.from('generation_runs').select('request_payload').eq('tenant_id', context.tenantId).eq('id', generationRunId).maybeSingle() : { data: null, error: null };
   if (generation.error) throw generation.error;
   const request = record(generation.data?.request_payload); const runInput = record(request.input); const slate = record(runInput.validatedSlate); const rosterRules = record(slate.rosterRules); const slotRules = record(rosterRules.slots);
-  const actualsResult = generationRunId && playerIds.length ? await context.db.from('floyd_dfs_historical_player_actuals').select('player_id,actual_dk_points,actual_components,source_validation_status,source_validation_reason,finality_status').eq('tenant_id', context.tenantId).eq('generation_run_id', generationRunId).in('player_id', playerIds) : { data: [], error: null };
+  const actualsResult = generationRunId && playerIds.length ? await context.db.from('floyd_dfs_historical_player_actuals').select('player_id,actual_dk_points,actual_components,provider,source_validation_status,source_validation_reason,finality_status').eq('tenant_id', context.tenantId).eq('generation_run_id', generationRunId).in('player_id', playerIds) : { data: [], error: null };
   if (actualsResult.error) throw actualsResult.error;
   const actualRows = actualsResult.data ?? []; const byPlayer = new Map(actualRows.map((row) => [String(row.player_id), row]));
   let status = 'UNAVAILABLE'; let computed: number | null = null; let difference: number | null = null; let eligible = false; const reasons: string[] = [];
@@ -102,11 +111,13 @@ async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof 
   const savedResult = await context.db.from('floyd_dfs_contest_results').select('result_payload').eq('tenant_id', context.tenantId).eq('id', resultId).single();
   if (savedResult.error) throw savedResult.error;
   const previous = record(savedResult.data.result_payload);
-  const reconciliation = { status, computedPlayerActualScore: computed === null ? null : Number(computed.toFixed(4)), recordedActualScore: input.enteredScore, difference, playerCount: playerIds.length, source: 'SPORTSDATAIO_FINAL', scoring: 'provider DraftKings player actuals and saved roster slot multipliers', reasons: [...new Set(reasons)], reconciledAt: new Date().toISOString() };
+  const actualSources = [...new Set(actualRows.filter((row) => playerIds.includes(String(row.player_id))).map((row) => String(row.provider ?? 'UNKNOWN')))];
+  const source = actualSources.length ? actualSources.join(',') : 'PLAYER_ACTUALS_UNAVAILABLE';
+  const reconciliation = { status, computedPlayerActualScore: computed === null ? null : Number(computed.toFixed(4)), recordedActualScore: input.enteredScore, difference, playerCount: playerIds.length, source, scoring: 'verified player actuals and saved roster slot multipliers', reasons: [...new Set(reasons)], reconciledAt: new Date().toISOString() };
   const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, official_outcome: true, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
   if (update.error) throw update.error;
   if ((eligible || status === 'MISMATCH') && selection.data) {
-    const snapshot = await context.db.from('floyd_dfs_lock_snapshots').select('research_version,adjustment_version,lineup_payload').eq('generated_lineup_id', lineupId).order('locked_at', { ascending: false }).limit(1).maybeSingle();
+    const snapshot = await context.db.from('floyd_dfs_lock_snapshots').select('research_version,adjustment_version,lineup_payload').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('locked_at', { ascending: false }).limit(1).maybeSingle();
     if (snapshot.error) throw snapshot.error;
     if (snapshot.data) {
       const packageValue = record(selection.data.selection_package);

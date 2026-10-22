@@ -37,7 +37,7 @@ export function ExportLineup({ lineup }: ExportLineupProps) {
         onClick={() => void navigator.clipboard?.writeText(copyText)}
         className="flex-1 rounded-md border border-slate-300 bg-white py-2 font-bold text-slate-900 transition-colors duration-[var(--transition-fast)] hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
-        Copy
+        Copy lineup details
       </button>
       <button
         onClick={() => {
@@ -45,14 +45,15 @@ export function ExportLineup({ lineup }: ExportLineupProps) {
           const url = URL.createObjectURL(blob);
           const link = document.createElement('a');
           link.href = url;
-          link.download = `fantasy-ai-lineup-${lineup.rank}.csv`;
+          link.download = `fantasy-ai-lineup-details-${lineup.rank}.csv`;
           link.click();
           URL.revokeObjectURL(url);
         }}
         className="flex-1 rounded-xl bg-[#0b1f3a] py-2.5 font-bold text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
       >
-        CSV
+        Download details CSV
       </button>
+      <p className="sr-only">This details file is not a DraftKings upload template.</p>
     </div>
   );
 }

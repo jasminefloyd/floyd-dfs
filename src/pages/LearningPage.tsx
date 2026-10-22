@@ -161,6 +161,12 @@ export default function LearningPage() {
           <p className="mt-4 text-sm text-slate-500">No lesson candidates yet — these accumulate as contest results are recorded in History.</p>
         )}
       </section>
+      <section className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-5">
+        <p className="text-[10px] font-black uppercase tracking-wide text-amber-800">Model change control</p>
+        <h2 className="mt-2 text-lg font-black text-amber-950">Diagnoses are hypotheses; promotions need a fresh holdout.</h2>
+        <p className="mt-2 text-sm leading-6 text-amber-950">Test one sport, role, and model-stage change at a time against the same saved slates. The September 8, 2026 holdout has already been displayed, so it cannot be treated as unseen after tuning. Set a future cutoff before the next experiment; require clean actual-source audits, at least 30 independent slates and 100 player rows per sport, and at least 3% MAE improvement without hiding worse range or role calibration. Contest outcomes and win probabilities require their own complete, held-out standings review.</p>
+        <p className="mt-3 text-xs font-bold text-amber-900">Engineering checklist: <code>docs/model-change-control.md</code>.</p>
+      </section>
     </AppPage>
   );
 }

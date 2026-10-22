@@ -1,26 +1,44 @@
-import type { LineupCandidate, PortfolioConstraints, ResearchPackage, SelectedLineup, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
+import type { LineupCandidate, OptimizerPackage, PortfolioConstraints, ResearchPackage, SelectedLineup, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
 import { calibratedCashLineProbability, CASH_LINE_TARGET_PROBABILITY, type CashLineCalibration } from './cashLineCalibration.js';
+import { validateLineupCandidate } from './validation.js';
 
 export interface SelectionInput {
   validatedSlate: ValidatedSlate;
   researchPackage: ResearchPackage;
-  optimizerPackage: { candidates: LineupCandidate[]; portfolioConstraints?: PortfolioConstraints };
+  optimizerPackage: Pick<OptimizerPackage, 'candidates' | 'portfolioConstraints' | 'searchCompleteness' | 'searchDiagnostics'>;
   cashLineCalibration?: CashLineCalibration;
+  lockedRosterSlots?: Record<string, string>;
 }
 
 export function selectLineups(input: SelectionInput, now = new Date()): SelectionPackage {
-  const candidates = input.optimizerPackage.candidates;
+  const seenCandidateIds = new Set<string>();
+  const rejected = input.optimizerPackage.candidates.map((candidate) => {
+    const errors = validateLineupCandidate(candidate, input.validatedSlate, { lockedSlotAssignments: input.lockedRosterSlots });
+    if (seenCandidateIds.has(candidate.id)) errors.push(`candidate identity ${candidate.id} is duplicated.`);
+    seenCandidateIds.add(candidate.id);
+    return { candidate, errors };
+  }).filter((entry) => entry.errors.length > 0);
+  const candidates = input.optimizerPackage.candidates.filter((candidate) => !rejected.some((entry) => entry.candidate.id === candidate.id));
   if (!candidates.length) return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: [], optimizerGap: 'Optimizer returned no candidates for Selection.', warnings: [], status: 'BLOCKED', engineState: 'MODEL_VALIDATION_REQUIRED' };
   const requested = Math.max(1, input.validatedSlate.contest.userEntryCount);
   const maximum = input.validatedSlate.contest.maxEntriesAllowed ?? requested;
-  const count = Math.min(requested, maximum, candidates.length);
+  const count = Math.min(requested, maximum);
   const isCashGame = input.validatedSlate.contest.contestKind === 'CASH';
   const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
   const { selected, underfilled } = choosePortfolio(ranked, count, isCashGame, input.optimizerPackage.portfolioConstraints);
-  const warnings = underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected from the optimizer's candidate set (remaining candidates were too similar to already-selected lineups, or the candidate set was smaller than requested).`] : [];
+  const warnings = [
+    ...(rejected.length ? [`${rejected.length} optimizer candidate(s) were rejected by the authoritative lineup validator; first reason: ${rejected[0].errors[0]}`] : []),
+    ...(underfilled ? [`Only ${selected.length} of ${count} requested lineup(s) could be selected; remaining candidates were unavailable or violated portfolio exposure/overlap constraints.`] : []),
+    ...(input.optimizerPackage.searchCompleteness === 'BOUNDED' ? [`Optimizer search was bounded after ${input.optimizerPackage.searchDiagnostics?.nodesVisited ?? 'an unknown number of'} nodes; these are the best evaluated candidates, not a proven global optimum.`] : []),
+  ];
   const nearDuplicateCount = selected.filter((candidate) => candidate.strategicSimilarity >= 0.8).length;
   if (nearDuplicateCount) warnings.push(`${nearDuplicateCount} of ${selected.length} selected lineups closely overlap (>=80% shared players) with another selected lineup because the candidate pool didn't contain enough sufficiently distinct high-quality builds.`);
-  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), warnings, status: 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED' };
+  const optimizerGap = input.optimizerPackage.searchCompleteness === 'BOUNDED'
+    ? input.optimizerPackage.searchDiagnostics?.objectiveGap !== undefined
+      ? `Search was bounded; the best evaluated Max FPTS lineup is up to ${input.optimizerPackage.searchDiagnostics.objectiveGap.toFixed(2)} raw objective points below the admissible slot-wise upper bound.`
+      : `Search was bounded after ${input.optimizerPackage.searchDiagnostics?.nodesVisited ?? 'an unknown number of'} nodes; results are the best evaluated candidates, not a proven global optimum.`
+    : undefined;
+  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), selectedLineups: selected.map((candidate, index) => explain(candidate, index + 1, input, isCashGame)), ...(optimizerGap ? { optimizerGap } : {}), warnings, status: 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED' };
 }
 
 // Default to the deterministic tournament composite. The ownership-weighted opponent-field
@@ -64,7 +82,7 @@ function canAddToPortfolio(chosen: LineupCandidate[], candidate: LineupCandidate
   const playerCounts = new Map<string, number>(); const captainCounts = new Map<string, number>();
   for (const lineup of [...chosen, candidate]) {
     for (const playerId of lineup.playerIds) playerCounts.set(playerId, (playerCounts.get(playerId) ?? 0) + 1);
-    const captain = lineup.rosterSlots.CPT; if (captain) captainCounts.set(captain, (captainCounts.get(captain) ?? 0) + 1);
+    const captain = Object.entries(lineup.rosterSlots).find(([slot]) => /(^|_)(CPT|CAPTAIN|MVP)(_|$)/i.test(slot))?.[1]; if (captain) captainCounts.set(captain, (captainCounts.get(captain) ?? 0) + 1);
   }
   return [...playerCounts.values()].every((value) => value <= maxPlayer) && [...captainCounts.values()].every((value) => value <= maxCaptain);
 }

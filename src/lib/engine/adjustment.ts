@@ -33,7 +33,15 @@ export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, no
   const unknowns = research.unknowns ?? [];
   const criticalGaps = unknowns.filter((unknown) => unknown.importance === 'CRITICAL').map((unknown) => ({ question: unknown.question, importance: unknown.importance, reason: unknown.reason, affectedPlayerIds: unknown.subjectId ? [unknown.subjectId] : slate.playerPool.map((player) => player.playerId) }));
   const freshFindings = research.findings.filter((finding) => !finding.expiresAt || Date.parse(finding.expiresAt) > now.getTime());
-  let adjustments = slate.playerPool.map((player) => adjustPlayer(player.playerId, slate.sport, freshFindings.filter((finding) => finding.subjectId === player.playerId)));
+  const unlinkedContext = freshFindings.filter((finding) => (finding.subjectType === 'TEAM' || finding.subjectType === 'EVENT') && finding.bucket !== 'FIELD_SENTIMENT');
+  let adjustments = slate.playerPool.map((player) => {
+    const linkedGame = (finding: ResearchFinding) => finding.subjectType === 'EVENT'
+      ? !player.gameId || finding.subjectId === player.gameId || finding.subjectId === slate.event.eventId
+      : normalizeTeamIdentity(player.team) === normalizeTeamIdentity(finding.subjectId);
+    // Older persisted ResearchPackages omitted subjectType. Treat an exact player-pool
+    // ID match as player-scoped for backward compatibility; never infer by name here.
+    return adjustPlayer(player.playerId, slate.sport, freshFindings.filter((finding) => (finding.subjectType === 'PLAYER' || !finding.subjectType) && finding.subjectId === player.playerId), unlinkedContext.filter(linkedGame));
+  });
   const evidenceGaps = slate.playerPool
     .filter((player) => !freshFindings.some((finding) => finding.subjectId === player.playerId))
     .map((player) => ({ question: `What role, availability, or matchup evidence exists for ${player.playerName}?`, importance: 'HIGH' as const, reason: `No research findings were retrieved for ${player.playerName}; Sport Adjustment cannot assert an opportunity change without evidence.`, affectedPlayerIds: [player.playerId] }));
@@ -53,7 +61,8 @@ export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, no
   // conflict that nets to no signal keeps this stage PARTIAL.
   const unresolvedRequiredUnknown = unknowns.some((unknown) => unknown.importance === 'CRITICAL' || unknown.importance === 'HIGH');
   const status = research.status === 'BLOCKED' ? 'BLOCKED' : researchGaps.length || unresolvedRequiredUnknown || unresolvedUnnettedConflicts.length ? 'PARTIAL' : 'COMPLETE';
-  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), adjustments, researchGaps, status };
+  const warnings = research.experimentalContextEffectsEnabled ? ['FDS_ENABLE_EXPERIMENTAL_CONTEXT_EFFECTS is enabled, but no context-only feature has a validated dimension coefficient; numeric contribution remains zero pending P11 release evidence.'] : undefined;
+  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), adjustments, researchGaps, status, ...(warnings ? { warnings } : {}) };
 }
 
 export function netOpportunityDirectionFrom(adjustments: AdjustmentItem[]): PlayerAdjustment['netOpportunityDirection'] {
@@ -64,12 +73,13 @@ export function netOpportunityDirectionFrom(adjustments: AdjustmentItem[]): Play
   return net > 0 ? 'SLIGHTLY_UP' : 'SLIGHTLY_DOWN';
 }
 
-function adjustPlayer(playerId: string, sport: Sport, findings: ResearchFinding[]): PlayerAdjustment {
+function adjustPlayer(playerId: string, sport: Sport, findings: ResearchFinding[], unlinkedContext: ResearchFinding[] = []): PlayerAdjustment {
   const evidence = findings.filter((finding) => finding.bucket !== 'FIELD_SENTIMENT');
   const interpreter = interpreterForSport(sport);
   const adjustments = dedupeAdjustments(evidence.flatMap((finding) => finding.bucket === 'COMPETITIVE_CONTEXT' ? interpretCompetitiveContext(finding) : interpreter(finding)));
   const neutral: AdjustmentItem = { adjustmentType: 'EVIDENCE_STATUS', direction: 'NEUTRAL', magnitude: 'NONE', rationale: 'No player-specific factual evidence was retrieved; no opportunity change is asserted.', evidenceFindingIds: [], confidence: 'LOW' };
-  const applied = adjustments.length ? adjustments : [neutral];
+  const contextOnly = unlinkedContext.map((finding): AdjustmentItem => ({ ...baseFields(finding), adjustmentType: 'CONTEXT', direction: 'NEUTRAL', magnitude: 'NONE', rationale: `${finding.finding} Not linked to ${playerId}: this team/event claim has no verified player-specific or event-date roster association.` }));
+  const applied = [...(adjustments.length ? adjustments : [neutral]), ...contextOnly];
   const roleCertainty = evidence.length === 0 ? 'LOW' : evidence.length >= 3 ? 'HIGH' : 'MEDIUM';
   return { playerId, baselineContext: { evidenceCount: evidence.length, specialistPriority: SPORT_PRIORITY[sport] }, adjustments: applied, netOpportunityDirection: netOpportunityDirectionFrom(applied), netSignedMagnitude: netSignedMagnitude(applied), roleCertainty, keyDeltas: applied.filter((item) => item.magnitude !== 'NONE').map((item) => item.rationale ?? ''), projectionNotes: ['Adjustment expresses opportunity direction only; it does not calculate fantasy points.'] };
 }
@@ -129,11 +139,12 @@ function dedupeAdjustments(items: AdjustmentItem[]): AdjustmentItem[] {
   const seen = new Map<string, AdjustmentItem>();
   for (const item of items) {
     const evidence = [...(item.evidenceFindingIds ?? [])].sort().join(',');
-    const key = `${evidence}:${item.adjustmentType ?? 'UNKNOWN'}`;
+    const key = `${item.canonicalFactKey ?? evidence}:${item.adjustmentType ?? 'UNKNOWN'}`;
     seen.set(key, item);
   }
   return [...seen.values()];
 }
+function normalizeTeamIdentity(value?: string): string { return String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
 
 function interpreterForSport(sport: Sport): (finding: ResearchFinding) => AdjustmentItem[] {
   if (sport === 'NBA' || sport === 'WNBA') return interpretBasketballFinding;
@@ -144,7 +155,7 @@ function interpreterForSport(sport: Sport): (finding: ResearchFinding) => Adjust
 }
 
 function findingText(finding: ResearchFinding): string { return `${finding.finding} ${finding.sourcePurpose ?? ''}`.toLowerCase(); }
-function baseFields(finding: ResearchFinding) { return { evidenceFindingIds: [finding.id], confidence: finding.confidence }; }
+function baseFields(finding: ResearchFinding) { return { evidenceFindingIds: [finding.id], canonicalFactKey: String(finding.metadata?.canonicalFactKey ?? `${finding.subjectId}:${finding.bucket}:${String(finding.metadata?.canonicalClaim ?? finding.finding).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()}`), confidence: finding.confidence }; }
 function neutralContext(finding: ResearchFinding): AdjustmentItem[] { return [{ ...baseFields(finding), adjustmentType: 'CONTEXT', direction: 'NEUTRAL', magnitude: 'NONE', rationale: `${finding.finding} No explicit opportunity change was established by this evidence.` }]; }
 
 // Availability language overrides every sport's priority ordering — an unavailable or

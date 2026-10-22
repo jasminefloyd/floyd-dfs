@@ -1,6 +1,7 @@
 import type { DraftKingsSlate } from './draftkingsSlateClient';
 import type { FloydPipelineContext, MIOS_FantasyManifest, Player } from './MIOS_FantasyAgents';
 import type { Lineup } from '../components/LineupDisplay';
+import { authenticatedHeaders } from './supabaseClient';
 
 type JsonRecord = Record<string, unknown>;
 const DEFAULT_FLOYD_DFS_API_URL = '';
@@ -9,6 +10,14 @@ export interface FloydGenerationResult {
   manifest: MIOS_FantasyManifest;
   lineups: Lineup[];
   data_warnings: string[];
+}
+
+export interface FloydSwapPlan { id: string; outcome: string; reason: string; replacement_roster: Record<string, string>; affected_slots: string[]; salary_delta: number; salary_remaining: number; mean_delta: number | null; median_delta: number | null; risk_flags: string[]; expires_at: string | null; next_lock_at: string | null; evidence_ids: string[]; }
+export async function createFloydSwapPlans(input: { lineupId: string; entryId: string; sourceRevision: number; trigger: string; idempotencyKey: string }): Promise<{ outcome: string; plans: FloydSwapPlan[]; submission?: string }> {
+  return request(`/api/lineups/${encodeURIComponent(input.lineupId)}/swap-plans`, { method: 'POST', body: JSON.stringify(input) });
+}
+export async function confirmFloydSwapRecommendation(input: { lineupId: string; planId: string; sourceRevision: number }): Promise<{ revision: { revision: number }; alreadyConfirmed: boolean; draftKingsSubmitted: false }> {
+  return request(`/api/lineups/${encodeURIComponent(input.lineupId)}/swap-plans/${encodeURIComponent(input.planId)}/confirm`, { method: 'POST', body: JSON.stringify({ confirmRecommendation: true, sourceRevision: input.sourceRevision }) });
 }
 
 export const SCAN_STAGE_ORDER = ['SLATE', 'RESEARCH', 'SPORT_ADJUSTMENT', 'PROJECTION', 'OPTIMIZE', 'SELECTION'] as const;
@@ -38,7 +47,7 @@ function apiUrl(path: string): string {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
+  const headers = await authenticatedHeaders(init.headers);
   if (init.body) headers.set('Content-Type', 'application/json');
   const response = await fetch(apiUrl(path), { ...init, headers });
   const body = await response.json().catch(() => ({})) as JsonRecord;
@@ -53,7 +62,7 @@ export async function floydRequest<T>(path: string, init: RequestInit = {}): Pro
 export interface FloydGameGroup { draftGroupId: string; matchupLabel: string; gameCount?: number; }
 
 export async function listFloydGameGroups(params: { sport: string; contestType: string }, signal?: AbortSignal): Promise<FloydGameGroup[]> {
-  const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}`), { signal });
+  const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}`), { signal, headers: await authenticatedHeaders() });
   const body = await response.json().catch(() => ({})) as JsonRecord;
   if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
   return Array.isArray(body.groups) ? body.groups.filter(isJsonRecord).map((group) => ({ draftGroupId: String(group.draftGroupId ?? ''), matchupLabel: String(group.matchupLabel ?? 'Game'), gameCount: typeof group.gameCount === 'number' ? group.gameCount : undefined })).filter((group) => group.draftGroupId) : [];
@@ -61,7 +70,7 @@ export async function listFloydGameGroups(params: { sport: string; contestType: 
 
 export async function listFloydContests(params: { sport: string; contestType: string; draftGroupId?: string }, signal?: AbortSignal): Promise<DraftKingsSlate[]> {
   const groupQuery = params.draftGroupId ? `&draftGroupId=${encodeURIComponent(params.draftGroupId)}` : '';
-  const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}${groupQuery}`), { signal });
+  const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}${groupQuery}`), { signal, headers: await authenticatedHeaders() });
   const body = await response.json().catch(() => ({})) as JsonRecord;
   if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
   const contests = flattenSlateResponse(body);
@@ -142,7 +151,7 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
       if (processError) throw processError;
       const completedPayload = await request<JsonRecord>(`/api/generation-runs/${String(run.id)}`);
       const enrichedSlate = enrichedSlateFrom(completedPayload.stages, queued.slate);
-      const lineups = mapLineups(completedPayload.lineups, enrichedSlate, completedPayload.stages, completedPayload.trust);
+      const lineups = mapLineups(completedPayload.lineups, enrichedSlate, completedPayload.stages, completedPayload.trust, completedPayload.decisionTraces);
       if (current.state !== 'ready' && current.state !== 'complete') {
         const runError = (current.error as JsonRecord | undefined)?.message;
         const stageErrors = Array.isArray(completedPayload.stages)
@@ -158,8 +167,8 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
   throw new Error('Floyd DFS lineup generation timed out while waiting for the durable run.');
 }
 
-export async function markFloydLineupEntered(lineupId: string): Promise<void> {
-  await request(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: '{}' });
+export async function markFloydLineupEntered(lineupId: string, entry: { contestId: string; externalEntryId: string; contestName?: string; sport?: string; contestFormat?: string }): Promise<void> {
+  await request(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: JSON.stringify(entry) });
 }
 
 function mapManifest(input: { sport: string; contestType: string; contest: DraftKingsSlate }, slateValue: unknown, payloadValue: unknown): MIOS_FantasyManifest {
@@ -190,7 +199,7 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : 'caution', engine_state: 'MODEL_VALIDATION_REQUIRED', eligible_for_lineups: !blocked && entryEligible, eligible_for_tournament: false, hard_blocks: blocked ? cautions : [], cautions: allCautions }, model_version: 'floyd-dfs', data_warnings: allCautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
 }
 
-function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, trustValue: unknown): Lineup[] {
+function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, trustValue: unknown, traceValue?: unknown): Lineup[] {
   const trustRow = asRecord(trustValue);
   const trust = asRecord(trustRow?.trust_payload);
   const entryEligible = trust?.entryEligible === true;
@@ -208,6 +217,12 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, t
   const researchStage = [...stages].reverse().find((stage) => String(stage.stage) === 'RESEARCH');
   const researchOutput = asRecord(researchStage?.output_payload ?? researchStage?.output);
   const researchFindings = Array.isArray(researchOutput?.findings) ? researchOutput.findings.filter(isJsonRecord) : [];
+  const tracesByCandidate = new Map<string, JsonRecord>();
+  if (Array.isArray(traceValue)) for (const row of traceValue.filter(isJsonRecord)) {
+    const trace = asRecord(row.trace_payload);
+    const candidateId = String(row.lineup_candidate_key ?? trace?.lineupCandidateId ?? '');
+    if (candidateId && trace) tracesByCandidate.set(candidateId, trace);
+  }
   const players = new Map((Array.isArray(slate?.playerPool) ? slate.playerPool : []).map((player) => {
     const mapped = mapPlayer(player, String(slate?.sport ?? ''));
     const projection = projections.get(mapped.id);
@@ -221,6 +236,7 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, t
     return [mapped.id, {
       ...mapped,
       ...(typeof outcomes?.medianP50 === 'number' ? { projected_points: outcomes.medianP50, contextual_projection: outcomes.medianP50, p50_projection: outcomes.medianP50 } : {}),
+      ...(Array.isArray(projection?.simulatedFantasyPointSamples) && projection.simulatedFantasyPointSamples.length > 0 ? { expected_points: projection.simulatedFantasyPointSamples.reduce((sum: number, sample: unknown) => sum + (typeof sample === 'number' && Number.isFinite(sample) ? sample : 0), 0) / projection.simulatedFantasyPointSamples.length } : {}),
       ...(typeof outcomes?.floorP20 === 'number' ? { p20_projection: outcomes.floorP20 } : {}),
       ...(typeof outcomes?.ceilingP90 === 'number' ? { p90_projection: outcomes.ceilingP90 } : {}),
       ...(typeof adjusted?.expectedMinutes === 'number' ? { minutes_projection: adjusted.expectedMinutes } : {}),
@@ -250,7 +266,14 @@ function mapLineups(value: unknown, slateValue: unknown, stagesValue: unknown, t
     const cashLineConfidence: Lineup['cash_line_confidence'] = 'UNAVAILABLE';
     const contestKind = asRecord(slate?.contest)?.contestKind;
     const contest_kind = contestKind === 'CASH' || contestKind === 'GPP' ? contestKind : 'UNKNOWN';
-    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, status: typeof (row as JsonRecord).status === 'string' ? String((row as JsonRecord).status) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, projected_points: Number(payload.median ?? 0), expected_points: typeof payload.expectedPoints === 'number' ? payload.expectedPoints : undefined, salary_used: Number(payload.salaryUsed ?? 0), confidence_score: cashLineProbability ?? null, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], floor_score: typeof payload.floor === 'number' ? payload.floor : undefined, ceiling_score: typeof payload.ceiling === 'number' ? payload.ceiling : undefined, narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], readiness_status: !entryEligible ? 'PROVISIONAL' : payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
+    const trace = tracesByCandidate.get(String(payload.candidateId ?? ''));
+    const traceRoster = asRecord(trace?.roster);
+    const traceObjective = asRecord(trace?.objective);
+    const timestamps = asRecord(trace?.dataTimestamps);
+    const traceSearch = asRecord(trace?.search);
+    const firstLock = typeof timestamps?.firstRelevantLock === 'string' ? timestamps.firstRelevantLock : undefined;
+    const dataAsOf = typeof timestamps?.projectionsGeneratedAt === 'string' ? timestamps.projectionsGeneratedAt : undefined;
+    return { id: typeof (row as JsonRecord).id === 'string' ? String((row as JsonRecord).id) : undefined, status: typeof (row as JsonRecord).status === 'string' ? String((row as JsonRecord).status) : undefined, rank: Number(payload.bulletNumber ?? index + 1), players: lineupPlayers, ...(typeof payload.median === 'number' ? { projected_points: payload.median } : {}), expected_points: typeof payload.expectedPoints === 'number' ? payload.expectedPoints : undefined, ...(typeof payload.salaryUsed === 'number' ? { salary_used: payload.salaryUsed } : {}), ...(typeof payload.salaryRemaining === 'number' ? { salary_remaining: payload.salaryRemaining } : {}), ...(typeof traceRoster?.salaryCap === 'number' ? { salary_cap: traceRoster.salaryCap } : {}), objective_label: typeof traceObjective?.name === 'string' ? traceObjective.name : undefined, data_as_of: dataAsOf, next_lock_at: firstLock, validation_status: typeof trust?.recommendationStatus === 'string' ? trust.recommendationStatus : undefined, search_status: typeof traceSearch?.completeness === 'string' ? traceSearch.completeness : undefined, confidence_score: cashLineProbability ?? null, cash_line_confidence: cashLineConfidence as Lineup['cash_line_confidence'], contest_kind: contest_kind as Lineup['contest_kind'], floor_score: typeof payload.floor === 'number' ? payload.floor : undefined, ceiling_score: typeof payload.ceiling === 'number' ? payload.ceiling : undefined, narrative: String(payload.explanation ?? 'Selected from the optimizer candidate set.'), evidence_summary: Array.isArray(payload.rationale) ? payload.rationale.map(String) : [], strategy_notes: Array.isArray(payload.newsContext) ? payload.newsContext.map(String) : [], watch_items: Array.isArray(payload.watchItems) ? payload.watchItems.map(String) : [], decision_trace: trace, readiness_status: !entryEligible ? 'PROVISIONAL' : payload.readinessStatus === 'READY_WITH_WATCH' ? 'READY_WITH_WATCH' : 'READY', lineup_type: 'optimizer_ranked' };
   });
 }
 

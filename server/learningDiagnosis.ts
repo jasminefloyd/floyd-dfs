@@ -43,12 +43,12 @@ export async function diagnoseLineupResult(db: SupabaseClient, input: LineupDiag
 
   if (!withinRange || input.scoringMismatch) {
     const playerIds = Array.isArray(input.lineupPayload.playerIds) ? (input.lineupPayload.playerIds as unknown[]).map(String) : [];
-    const researchStage = await db.from('engine_stage_runs').select('output_payload').eq('generation_run_id', input.generationRunId).eq('stage', 'RESEARCH').eq('version', input.researchVersion).maybeSingle();
+    const researchStage = await db.from('engine_stage_runs').select('output_payload').eq('tenant_id', input.tenantId).eq('generation_run_id', input.generationRunId).eq('stage', 'RESEARCH').eq('version', input.researchVersion).maybeSingle();
     const researchOutput = researchStage.data?.output_payload as Json | undefined;
     const watchItems = Array.isArray(researchOutput?.watchItems) ? researchOutput.watchItems as Array<{ importance?: string; subjectId?: string }> : [];
     const unresolvedCritical = watchItems.some((item) => item.importance === 'CRITICAL' && (!item.subjectId || playerIds.includes(item.subjectId)));
 
-    const adjustmentStage = await db.from('engine_stage_runs').select('output_payload').eq('generation_run_id', input.generationRunId).eq('stage', 'SPORT_ADJUSTMENT').eq('version', input.adjustmentVersion).maybeSingle();
+    const adjustmentStage = await db.from('engine_stage_runs').select('output_payload').eq('tenant_id', input.tenantId).eq('generation_run_id', input.generationRunId).eq('stage', 'SPORT_ADJUSTMENT').eq('version', input.adjustmentVersion).maybeSingle();
     const adjustmentOutput = adjustmentStage.data?.output_payload as Json | undefined;
     const adjustments = Array.isArray(adjustmentOutput?.adjustments) ? adjustmentOutput.adjustments as Array<{ playerId?: string; roleCertainty?: string }> : [];
     const lowRoleCertainty = adjustments.some((item) => playerIds.includes(String(item.playerId)) && item.roleCertainty === 'LOW');
@@ -90,7 +90,7 @@ export async function recordLessonCandidate(db: SupabaseClient, tenantId: string
   if (existing.data) {
     const sampleCount = Number(existing.data.sample_count ?? 1) + 1;
     const status = existing.data.status === 'OBSERVED' && sampleCount >= LESSON_ACCUMULATION_THRESHOLD ? 'ACCUMULATING' : existing.data.status;
-    const updated = await db.from('floyd_dfs_lesson_candidates').update({ sample_count: sampleCount, status }).eq('id', existing.data.id);
+    const updated = await db.from('floyd_dfs_lesson_candidates').update({ sample_count: sampleCount, status }).eq('tenant_id', tenantId).eq('id', existing.data.id);
     if (updated.error) throw updated.error;
     return;
   }

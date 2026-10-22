@@ -1,28 +1,61 @@
 import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, SourceTier, Sport, ValidatedSlate } from './contracts.js';
 import { normalizeProviderName, normalizeTeamCode, parseAvailabilityRecords, type AvailabilityRecord, type AvailabilitySnapshot } from './availability.js';
 
-export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; }
+export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; timeoutMs?: number; maxAttempts?: number; }
 export interface GolfProjectionRefresh { rows: Record<string, unknown>[]; tournamentName?: string; warning?: string; }
 export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; homeProbablePitcherId?: string; awayProbablePitcherId?: string; homeProbablePitcher?: string; awayProbablePitcher?: string; homeOpener?: boolean; awayOpener?: boolean; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
 export interface WnbaRecentPlayerMinutes { playerId?: string; name?: string; team?: string; minutes: number[]; }
+export interface NbaRecentPlayerGame { playerId?: string; name?: string; team?: string; gameId?: string; date?: string; minutes: number; started?: boolean; }
 
 export class SportsDataIoClient {
   private readonly fetcher: typeof fetch;
   private readonly baseUrl: string;
   private readonly options: SportsDataIoClientOptions;
-  constructor(options: SportsDataIoClientOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; this.baseUrl = (options.baseUrl ?? 'https://api.sportsdata.io/v3').replace(/\/+$/, ''); if (!options.apiKey) throw new Error('SportsDataIO API key is required.'); }
+  private readonly timeoutMs: number;
+  private readonly maxAttempts: number;
+  constructor(options: SportsDataIoClientOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; this.baseUrl = (options.baseUrl ?? 'https://api.sportsdata.io/v3').replace(/\/+$/, ''); this.timeoutMs = options.timeoutMs ?? 12_000; this.maxAttempts = options.maxAttempts ?? 3; if (!options.apiKey) throw new Error('SportsDataIO API key is required.'); }
   async get<T>(sport: Sport, feed: string, resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
     const path = [this.baseUrl, sport.toLowerCase(), feed, 'json', resource, parameter].filter(Boolean).join('/');
-    const response = await this.fetcher(path, { signal, headers: { accept: 'application/json', 'Ocp-Apim-Subscription-Key': this.options.apiKey } });
-    if (!response.ok) { const detail = await response.text().catch(() => ''); if (response.status === 401 || response.status === 403) throw new Error(`SportsDataIO access denied for ${sport} ${feed}/${resource} (HTTP ${response.status}). Check subscription feed permissions.`); throw new Error(`SportsDataIO ${sport} ${feed}/${resource} returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}.`); }
-    return await response.json() as T;
+    return await this.fetchJson<T>(path, `SportsDataIO ${sport} ${feed}/${resource}`, signal);
   }
   private async getGolf<T>(resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
     const golfBaseUrl = this.baseUrl.replace(/\/v3$/, '');
     const path = [golfBaseUrl, 'golf', 'v2', 'json', resource, parameter].filter(Boolean).join('/');
-    const response = await this.fetcher(path, { signal, headers: { accept: 'application/json', 'Ocp-Apim-Subscription-Key': this.options.apiKey } });
-    if (!response.ok) { const detail = await response.text().catch(() => ''); if (response.status === 401 || response.status === 403) throw new Error(`SportsDataIO access denied for GOLF v2/${resource} (HTTP ${response.status}). Check subscription feed permissions.`); throw new Error(`SportsDataIO GOLF v2/${resource} returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}.`); }
-    return await response.json() as T;
+    return await this.fetchJson<T>(path, `SportsDataIO GOLF v2/${resource}`, signal);
+  }
+  private async fetchJson<T>(path: string, label: string, signal?: AbortSignal): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const abortFromCaller = () => controller.abort(signal?.reason);
+      signal?.addEventListener('abort', abortFromCaller, { once: true });
+      const timeout = setTimeout(() => controller.abort(new Error(`${label} request timed out.`)), this.timeoutMs);
+      let response: Response | undefined;
+      try { response = await this.fetcher(path, { signal: controller.signal, headers: { accept: 'application/json', 'Ocp-Apim-Subscription-Key': this.options.apiKey } }); }
+      catch (error) { lastError = error; }
+      finally { clearTimeout(timeout); signal?.removeEventListener('abort', abortFromCaller); }
+      if (response) {
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          if (response.status === 401 || response.status === 403) throw new Error(`${label} access denied (HTTP ${response.status}). Check subscription feed permissions.`);
+          lastError = new Error(`${label} returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}.`);
+          if (response.status < 500 && response.status !== 408 && response.status !== 429) throw lastError;
+          if (attempt < this.maxAttempts) {
+            const retryAfter = response.headers.get('retry-after');
+            const retryMs = retryAfter && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : 200 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 150);
+            await new Promise((resolve) => setTimeout(resolve, Math.min(5_000, retryMs)));
+          }
+          continue;
+        }
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!/^application\/(json|[a-z0-9.+-]+\+json)(\s*;|$)/i.test(contentType)) throw new Error(`${label} returned non-JSON content type: ${contentType || 'missing'}.`);
+        try { return await response.json() as T; }
+        catch (error) { throw new Error(`${label} returned malformed JSON: ${error instanceof Error ? error.message : 'parse failed'}.`); }
+      }
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error(`${label} request was aborted.`);
+      if (attempt < this.maxAttempts) await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 200 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 150))));
+    }
+    throw lastError instanceof Error ? lastError : new Error(`${label} request failed.`);
   }
   async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
     const date = sportsDataDate(slate);
@@ -200,6 +233,23 @@ export class SportsDataIoClient {
    * it must be filtered to games before the slate lock before historical projection use. */
   async getMlbPlayerGameLogs(season: string, playerId: string | number, count = 10, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
     return rowsFromPayload(await this.get<unknown>('MLB', 'stats', 'PlayerGameStatsBySeason', `${encodeURIComponent(season)}/${encodeURIComponent(String(playerId))}/${Math.max(1, Math.min(25, Math.floor(count)))}`, signal)).flatMap((value) => { const row = asRecord(value); return row ? [row] : []; });
+  }
+  /** NBA's documented season/player game-log feed supplies minutes and starts per game. */
+  async getNbaRecentPlayerGameLogs(season: string, playerId: string | number, count = 10, signal?: AbortSignal): Promise<NbaRecentPlayerGame[]> {
+    const boundedCount = Math.max(1, Math.min(25, Math.floor(count)));
+    const rows = rowsFromPayload(await this.get<unknown>('NBA', 'stats', 'PlayerGameStatsBySeason', `${encodeURIComponent(season)}/${encodeURIComponent(String(playerId))}/${boundedCount}`, signal));
+    return rows.flatMap((value) => {
+      const row = asRecord(value); if (!row) return [];
+      const minutes = readNumber(row, ['Minutes', 'minutes']);
+      const id = readIdentifier(row, ['PlayerID', 'PlayerId', 'playerId']);
+      const name = readString(row, ['Name', 'PlayerName', 'FullName', 'name']);
+      const team = readString(row, ['Team', 'TeamName', 'TeamAbbr', 'TeamKey']);
+      const date = readString(row, ['DateTime', 'Day', 'Date']);
+      if (minutes === undefined || minutes < 0 || (!id && !name)) return [];
+      const startedValue = readBoolean(row, ['Started', 'IsStarter']);
+      const starts = readNumber(row, ['GamesStarted', 'PitchingGamesStarted']);
+      return [{ ...(id ? { playerId: id } : {}), ...(name ? { name } : {}), ...(team ? { team } : {}), ...(readIdentifier(row, ['GameID', 'GameId']) ? { gameId: readIdentifier(row, ['GameID', 'GameId']) } : {}), ...(date ? { date } : {}), minutes, ...(startedValue !== undefined || starts !== undefined ? { started: startedValue ?? starts! > 0 } : {}) }];
+    });
   }
   /** SportsDataIO MLB schedule rows include forecast temperature, wind and conditions. */
   async getMlbGameWeather(date: string, signal?: AbortSignal): Promise<SportsDataIoGameWeather[]> {

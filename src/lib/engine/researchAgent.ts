@@ -1,9 +1,9 @@
 import type { ResearchPlan, ResearchSourceProvider, ResearchFinding, ResearchPackage, ValidatedSlate } from './contracts.js';
 import type { ResearchSynthesizerInput } from './openAiTypes.js';
 import { createResearchPlan } from './researchPlan.js';
-import { explainArticleRejection, filterArticlesForSlate, findConflicts, findingsFromAvailability, linkConflicts, normalizeArticles } from './researchEvidence.js';
+import { explainArticleRejection, filterArticlesForSlate, findConflicts, findingsFromAvailability, linkConflicts, normalizeArticles, resolveResearchEvidence } from './researchEvidence.js';
 
-export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]>; lastDiagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'FAILED'; error?: string }> }; now?: () => Date; version?: number; }
+export interface ResearchAgentOptions { providers: ResearchSourceProvider[]; synthesizer?: { synthesize(input: ResearchSynthesizerInput): Promise<ResearchFinding[]>; lastDiagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'FAILED'; error?: string }> }; freshness?: { availabilityMinutes?: number; contextMinutes?: number }; experimentalContextEffectsEnabled?: boolean; now?: () => Date; version?: number; }
 export interface ResearchAgentInput { validatedSlate: ValidatedSlate; researchGaps?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>; }
 
 const PROVIDER_TIMEOUT_MS = 8_000;
@@ -35,7 +35,7 @@ export class ResearchAgent {
         const contentArticles = fetched.filter((article) => !article.diagnostic);
         const accepted = filterArticlesForSlate(contentArticles, input.validatedSlate); const rejected = contentArticles.filter((article) => !accepted.includes(article));
         const failed = diagnosticArticles.find((article) => article.diagnostic?.status === 'FAILED');
-        return { fetched: contentArticles, result: { provider: provider.name, tier: provider.tier, status: failed ? 'FAILED' as const : contentArticles.length ? 'SUCCEEDED' as const : 'EMPTY' as const, articleCount: contentArticles.length, acceptedArticleCount: accepted.length, rejectedArticleCount: rejected.length, rejectionSamples: [...new Set(rejected.map((article) => explainArticleRejection(article, input.validatedSlate)))].filter(Boolean).slice(0, 3), error: failed?.diagnostic?.error } };
+        return { fetched: contentArticles, result: { provider: provider.name, tier: provider.tier, status: failed ? 'FAILED' as const : contentArticles.length ? 'SUCCEEDED' as const : 'EMPTY' as const, articleCount: contentArticles.length, acceptedArticleCount: accepted.length, rejectedArticleCount: rejected.length, rejectionSamples: [...new Set(rejected.map((article) => explainArticleRejection(article, input.validatedSlate)))].filter(Boolean).slice(0, 3), error: failed?.diagnostic?.error, coverageDiagnostics: diagnosticArticles.map((article) => article.diagnostic?.coverage).filter((value): value is string => Boolean(value)) } };
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Provider failed.';
         return { fetched: [], result: { provider: provider.name, tier: provider.tier, status: 'FAILED' as const, articleCount: 0, error: reason } };
@@ -97,7 +97,7 @@ export class ResearchAgent {
     // feeds) must not downgrade an otherwise complete research package.
     const blockingUnknowns = uniqueUnknowns.some((unknown) => unknown.importance === 'CRITICAL' || unknown.importance === 'HIGH');
     const status = blockingUnknowns || conflicts.some((conflict) => !conflict.resolved) ? 'PARTIAL' : 'COMPLETE';
-    return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, now, this.version);
+    return buildResearchPackage(input.validatedSlate, linked, conflicts, uniqueUnknowns, providerResults, status, now, this.version, this.options.freshness, this.options.experimentalContextEffectsEnabled ?? false);
   }
 }
 
@@ -108,10 +108,10 @@ async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, ti
   finally { clearTimeout(timer); }
 }
 
-function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[], conflicts: ReturnType<typeof findConflicts>, unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>, providerResults: NonNullable<ResearchPackage['providerResults']>, status: 'COMPLETE' | 'PARTIAL', now: Date, version: number): ResearchPackage {
+function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[], conflicts: ReturnType<typeof findConflicts>, unknowns: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>, providerResults: NonNullable<ResearchPackage['providerResults']>, status: 'COMPLETE' | 'PARTIAL', now: Date, version: number, freshness: ResearchAgentOptions['freshness'] = {}, experimentalContextEffectsEnabled = false): ResearchPackage {
   const lockTime = Date.parse(slate.contest.lockTime);
+  const ttlMinutes: Record<ResearchFinding['bucket'], number> = { AVAILABILITY: boundedFreshness(freshness.availabilityMinutes, 5), RECENT_ROLE_FORM: boundedFreshness(freshness.contextMinutes, 24 * 60), MATCHUP_ENVIRONMENT: boundedFreshness(freshness.contextMinutes, 24 * 60), MARKET_SIGNALS: boundedFreshness(freshness.contextMinutes, 24 * 60), NEWS_EXTERNAL_CONTEXT: boundedFreshness(freshness.contextMinutes, 24 * 60), FIELD_SENTIMENT: boundedFreshness(freshness.contextMinutes, 24 * 60), COMPETITIVE_CONTEXT: boundedFreshness(freshness.contextMinutes, 24 * 60) };
   const expiringFindings = findings.map((finding) => {
-    const ttlMinutes: Record<ResearchFinding['bucket'], number> = { AVAILABILITY: 60, RECENT_ROLE_FORM: 12 * 60, MATCHUP_ENVIRONMENT: 6 * 60, MARKET_SIGNALS: 3 * 60, NEWS_EXTERNAL_CONTEXT: 12 * 60, FIELD_SENTIMENT: 24 * 60, COMPETITIVE_CONTEXT: 7 * 24 * 60 };
     // Publication time governs news/role claims; direct structured observations use
     // retrieval time. Undated evidence is due for immediate refresh, never three hours.
     const directObservation = /directly fetched/i.test(finding.sourcePurpose ?? '');
@@ -127,13 +127,17 @@ function buildResearchPackage(slate: ValidatedSlate, findings: ResearchFinding[]
   const availability = slate.playerPool.map((player) => { const evidence = findings.filter((finding) => finding.subjectId === player.playerId && finding.bucket === 'AVAILABILITY'); const text = evidence.map((finding) => finding.finding).join(' ').toLowerCase(); return { playerId: player.playerId, status: /out|inactive|ruled out|scratched/.test(text) ? 'OUT' as const : /questionable|limited|game-time/.test(text) ? 'QUESTIONABLE' as const : /starter role remains unconfirmed|starting role was not confirmed/.test(text) ? 'UNKNOWN' as const : evidence.length ? 'AVAILABLE' as const : 'UNKNOWN' as const, evidenceFindingIds: evidence.map((finding) => finding.id) }; });
   const roleFindings = findings.filter((finding) => finding.bucket === 'RECENT_ROLE_FORM');
   const summary = (bucket: string) => { const selected = findings.filter((finding) => finding.bucket === bucket); return { summary: selected.map((finding) => finding.finding).join(' ') || 'No evidence retrieved.', evidenceFindingIds: selected.map((finding) => finding.id) }; };
+  const evidence = resolveResearchEvidence(slate, expiringFindings, now, { availability: ttlMinutes.AVAILABILITY, context: freshness.contextMinutes ?? 24 * 60 });
   return {
     slateId: slate.slateId, tenantId: slate.tenantId, version, generatedAt: now.toISOString(), freshThrough: new Date(freshThrough).toISOString(), findings: expiringFindings,
+    observations: evidence.observations, resolvedFacts: evidence.facts, experimentalContextEffectsEnabled,
     availability, recentRoleForm: slate.playerPool.map((player) => { const evidence = roleFindings.filter((finding) => finding.subjectId === player.playerId); return { playerId: player.playerId, summary: evidence.map((finding) => finding.finding).join(' ') || 'No role/form evidence retrieved.', evidenceFindingIds: evidence.map((finding) => finding.id) }; }),
     matchupEnvironment: summary('MATCHUP_ENVIRONMENT'), marketSignals: summary('MARKET_SIGNALS'), newsExternalContext: findings.filter((finding) => finding.bucket === 'NEWS_EXTERNAL_CONTEXT'), fieldSentiment: findings.filter((finding) => finding.bucket === 'FIELD_SENTIMENT').map((finding) => ({ subjectId: finding.subjectId, summary: finding.finding, evidenceFindingIds: [finding.id] })), competitiveContext: [{ summary: findings.filter((finding) => finding.bucket === 'COMPETITIVE_CONTEXT').map((finding) => finding.finding).join(' ') || 'No competitive context evidence retrieved.', evidenceFindingIds: findings.filter((finding) => finding.bucket === 'COMPETITIVE_CONTEXT').map((finding) => finding.id) }],
     playerEvidence: slate.playerPool.map((player) => ({ playerId: player.playerId, findingIds: findings.filter((finding) => finding.subjectId === player.playerId).map((finding) => finding.id), unresolved: false })), conflicts, unknowns: [...unknowns, ...freshnessUnknowns], providerResults, watchItems: [...unknowns, ...freshnessUnknowns].map((unknown) => ({ subjectId: unknown.subjectId, importance: unknown.importance, reason: unknown.reason, expectedChangeBeforeLock: true })), status,
   } as ResearchPackage;
 }
+
+function boundedFreshness(value: number | undefined, fallback: number): number { return Number.isFinite(value) ? Math.max(1, Math.min(525_600, Math.floor(value!))) : fallback; }
 
 function blockedPackage(slate: ValidatedSlate, plan: ResearchPlan, now: Date, reason: string): ResearchPackage {
   const unknowns = [{ question: plan.questions[0]?.question ?? 'Research slate', importance: 'CRITICAL' as const, reason }];

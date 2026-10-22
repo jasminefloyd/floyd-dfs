@@ -1,4 +1,5 @@
-import type { ResearchArticle, ResearchBucket, ResearchFinding, ResearchConflict, ValidatedSlate } from './contracts.js';
+import type { ResearchArticle, ResearchBucket, ResearchFinding, ResearchConflict, ResolvedFact, SourceObservation, ValidatedSlate } from './contracts.js';
+import { resolveObservations } from './factResolution.js';
 
 export function filterArticlesForSlate(articles: ResearchArticle[], slate: ValidatedSlate): ResearchArticle[] {
   return articles.filter((article) => articleSlateMatch(article, slate).accepted);
@@ -34,37 +35,115 @@ function teamAliases(team: string | undefined): string[] {
 }
 
 export function normalizeArticles(articles: ResearchArticle[], slate: ValidatedSlate, now = new Date()): ResearchFinding[] {
-  return articles.flatMap((article, index) => {
-    const sourceText = [article.title, article.summary, article.content].filter(Boolean).join(' ');
+  const normalized = articles.flatMap((article) => {
+    const sourceText = [article.summary, article.content].filter(Boolean).join(' ') || article.title;
     const sentences = sourceText.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
     const contexts = sentences.length ? sentences : [sourceText];
     const publishedAt = article.publishedAt;
     const ageMinutes = publishedAt ? Math.max(0, Math.floor((now.getTime() - Date.parse(publishedAt)) / 60_000)) : undefined;
     return contexts.flatMap((context, sentenceIndex) => {
       const text = context.toLowerCase();
-      const subjects = slate.playerPool.filter((candidate) => termMatchesText(candidate.playerName, context));
+      const nameMatches = slate.playerPool.filter((candidate) => termMatchesText(candidate.playerName, context));
+      const duplicateNames = new Set(nameMatches.map((candidate) => candidate.playerName.trim().toLowerCase())).size < nameMatches.length;
+      const specificallyScoped = duplicateNames ? nameMatches.filter((candidate) => termMatchesText(String(candidate.team ?? ''), context) || teamAliases(candidate.team).some((alias) => termMatchesText(alias, context))) : nameMatches;
+      const subjects = duplicateNames && specificallyScoped.length !== nameMatches.length ? (specificallyScoped.length === 1 ? specificallyScoped : []) : specificallyScoped;
       const keywordBucket: ResearchBucket = /injur|\bout\b|questionable|available|scratched|inactive|ruled out/.test(text) ? 'AVAILABILITY' : /role|minutes|snap|usage|starter|starting|starts|form|recent|routes|batting order/.test(text) ? 'RECENT_ROLE_FORM' : /odds|line|spread|total|market/.test(text) ? 'MARKET_SIGNALS' : /sentiment|chalk|ownership|popular/.test(text) ? 'FIELD_SENTIMENT' : /weather|wind|pace|matchup|defense|course|venue/.test(text) ? 'MATCHUP_ENVIRONMENT' : /playoff|seed|eliminat|qualif|advanc|rest|standings/.test(text) ? 'COMPETITIVE_CONTEXT' : 'NEWS_EXTERNAL_CONTEXT';
       // Tier 4 (Reddit/social/unverified) sources may only ever populate FIELD_SENTIMENT — never a factual bucket.
       const bucket: ResearchBucket = article.sourceTier === 4 ? 'FIELD_SENTIMENT' : keywordBucket;
       const targets = subjects.length ? subjects : [undefined];
       return targets.map((player) => ({
-        id: stableId(`${slate.slateId}:${article.url ?? article.title}:${index}:${sentenceIndex}:${player?.playerId ?? 'event'}`),
+        id: stableId(`${slate.tenantId}:${slate.slateId}:${article.sourceName}:${normalizeSourceUrl(article.url)}:${normalizeClaim(context)}:${player?.playerId ?? 'event'}`),
         bucket,
         subjectType: player ? 'PLAYER' as const : 'EVENT' as const,
         subjectId: player?.playerId ?? slate.event.eventId,
         finding: context,
-        sourceUrl: article.url,
+        sourceUrl: normalizeSourceUrl(article.url) || undefined,
         sourceName: article.sourceName,
         sourceTier: article.sourceTier,
         sourcePurpose: bucket === 'FIELD_SENTIMENT' ? 'Field sentiment only; not factual player evidence.' : 'External context for the exact player/entity sentence.',
         publishedAt,
         retrievedAt: now.toISOString(),
         confidence: article.sourceTier <= 2 ? 'HIGH' as const : article.sourceTier === 3 ? 'MEDIUM' as const : 'LOW' as const,
-        metadata: { title: article.title, context, sentenceIndex, tags: article.tags ?? [], ageMinutes },
+        metadata: { title: article.title, context, sentenceIndex, tags: article.tags ?? [], ageMinutes, ...(nameMatches.length > 1 && !player ? { identityAmbiguous: true } : {}), canonicalSourceUrl: normalizeSourceUrl(article.url), canonicalClaim: normalizeClaim(context), duplicateClusterId: stableId(`${normalizeSourceUrl(article.url)}:${normalizeClaim(context)}`), canonicalFactKey: `${slate.tenantId}:${slate.slateId}:${player?.playerId ?? slate.event.eventId}:${classifyFactType({ id: '', bucket, subjectType: player ? 'PLAYER' : 'EVENT', subjectId: player?.playerId ?? slate.event.eventId, sourceName: article.sourceName, finding: context, confidence: article.sourceTier <= 2 ? 'HIGH' : 'MEDIUM' }, context.toLowerCase())}`, effectiveAt: inferEffectiveAt(context, now) },
       }));
     });
   });
+  return [...new Map(normalized.map((finding) => [finding.id, finding])).values()];
 }
+
+/** Normalize only known tracking parameters. Content and provider-significant query values remain intact. */
+export function normalizeSourceUrl(value?: string): string {
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) if (/^(utm_.+|fbclid|gclid|mc_cid|mc_eid|ref_src|source)$/i.test(key)) url.searchParams.delete(key);
+    url.searchParams.sort();
+    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/$/, '')}${url.search}`;
+  } catch { return value.trim(); }
+}
+
+/** Build the immutable observation and resolution artifacts before adjustment/projection. */
+export function resolveResearchEvidence(slate: ValidatedSlate, findings: ResearchFinding[], now = new Date(), freshnessMinutes: { availability?: number; context?: number } = {}): { observations: SourceObservation[]; facts: ResolvedFact[] } {
+  const observations = findings.map((finding): SourceObservation => {
+    const player = finding.subjectType === 'PLAYER' ? slate.playerPool.find((candidate) => candidate.playerId === finding.subjectId) : undefined;
+    const matchingGames = (slate.games ?? []).filter((game) => game.teamIds.includes(finding.subjectId));
+    const text = finding.finding.toLowerCase();
+    const factType = classifyFactType(finding, text);
+    const retrievedAt = validIso(finding.retrievedAt) ?? now.toISOString();
+    const publishedAt = validIso(finding.publishedAt);
+    const effectiveAt = validIso(finding.metadata?.effectiveAt) ?? inferEffectiveAt(finding.finding, now);
+    const ttl = factType === 'availability.status' ? (freshnessMinutes.availability ?? 5) : (freshnessMinutes.context ?? 1440);
+    const expiresAt = validIso(finding.expiresAt) ?? new Date(Math.min(Date.parse(retrievedAt) + ttl * 60_000, Date.parse(slate.contest.lockTime) || Infinity)).toISOString();
+    const status: SourceObservation['status'] = /directly fetched|confirmed lineup|confirmed starter/i.test(finding.sourcePurpose ?? '') && (finding.confidence === 'HIGH' || /confirmed as a starter|ruled out|inactive/.test(text)) ? 'CONFIRMED' : finding.sourceTier === 1 && finding.confidence === 'HIGH' ? 'PROJECTED' : publishedAt ? 'REPORTED' : 'UNVERIFIED';
+    const claim = normalizeClaim(finding.finding);
+    const value = extractFactValue(factType, finding.finding);
+    return {
+      id: stableId(`${slate.tenantId}:${slate.slateId}:${finding.id}:${retrievedAt}`), tenantId: slate.tenantId, slateId: slate.slateId, sport: slate.sport,
+      eventId: slate.event.eventId, gameId: player?.gameId ?? (finding.subjectType === 'EVENT' ? finding.subjectId : matchingGames.length === 1 ? matchingGames[0].gameId : undefined), source: finding.sourceName,
+      sourceRecordId: finding.id, sourceUrl: normalizeSourceUrl(finding.sourceUrl) || undefined,
+      subject: { kind: finding.subjectType === 'LEAGUE' ? 'EVENT' : finding.subjectType ?? 'EVENT', id: finding.subjectId },
+      factType, value, valueUnit: factType === 'availability.status' ? 'status' : factType.startsWith('claim.') ? 'text' : 'structured',
+      publishedAt, effectiveAt, observedAt: validIso(finding.metadata?.observedAt) ?? publishedAt ?? retrievedAt, observedTimeBasis: validIso(finding.metadata?.observedAt) ? 'SOURCE_TIMESTAMP' : publishedAt ? 'PUBLISHED_AT_PROXY' : 'RETRIEVAL_FALLBACK', retrievedAt, expiresAt, status,
+      identityConfidence: player?.identity?.confidence === 'EXACT' ? 'EXACT' : player?.identity?.confidence === 'HIGH' ? 'HIGH' : finding.subjectType === 'EVENT' || finding.subjectType === 'TEAM' ? 'HIGH' : 'LOW',
+      rawPayloadRef: `research-finding:${finding.id}`, duplicateClusterId: String(finding.metadata?.duplicateClusterId ?? stableId(`${normalizeSourceUrl(finding.sourceUrl)}:${claim}`)),
+    };
+  });
+  return { observations, facts: resolveObservations(observations, now) };
+}
+
+function classifyFactType(finding: ResearchFinding, text: string): string {
+  if (finding.bucket === 'AVAILABILITY' && finding.subjectType === 'PLAYER') return 'availability.status';
+  if (/minutes restriction|limited minutes|minutes limit|workload restriction|return restriction/.test(text)) return 'role.minutes_restriction';
+  if (/rest days?|back.to.back|three games in four|schedule density/.test(text)) return 'team.rest_days';
+  if (/travel|travelled|traveling|road trip|time zone/.test(text)) return 'team.travel';
+  if (/ceremony|ring night|honor(ed|ing)|tribute/.test(text)) return 'event.ceremony';
+  if (/former team|old team|faces? .* former|against .* ex-teammates/.test(text)) return 'player.former_team_matchup';
+  if (/contract year|free agent after|expires? (in|after)|contract expiration/.test(text)) return 'contract.expiration_season';
+  if (/spread|over\/under|game total|implied team total/.test(text)) return 'market.game_line';
+  if (/starter|starting lineup|starting five|starting role|batting order|depth chart/.test(text)) return 'role.starting_status';
+  if (/minutes|rotation|snap share|routes|targets|carries|plate appearances/.test(text)) return 'role.opportunity';
+  return `claim.${finding.bucket.toLowerCase()}.${stableId(normalizeClaim(finding.finding)).slice(0, 12)}`;
+}
+
+function extractFactValue(factType: string, claim: string): unknown {
+  if (factType === 'availability.status') {
+    const lower = claim.toLowerCase();
+    const status = /confirmed as a starter|confirmed starter/.test(lower) ? 'CONFIRMED_STARTER' : /ruled out|\bout\b|inactive|scratched/.test(lower) ? 'OUT' : /questionable|limited|restriction/.test(lower) ? 'LIMITED' : /active|available|will play/.test(lower) ? 'ACTIVE' : 'UNKNOWN';
+    return { status, claim };
+  }
+  const number = claim.match(/\b(\d+(?:\.\d+)?)\s*(minutes?|days?|games?|percent|%)\b/i);
+  return number ? { claim, value: Number(number[1]), unit: number[2].toLowerCase() } : { claim };
+}
+
+function inferEffectiveAt(text: string, now: Date): string | undefined {
+  const match = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (!match) return undefined;
+  const time = Date.parse(`${match[1]}T00:00:00.000Z`);
+  return Number.isFinite(time) && time <= now.getTime() + 5 * 60_000 ? new Date(time).toISOString() : undefined;
+}
+function validIso(value: unknown): string | undefined { if (typeof value !== 'string') return undefined; const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toISOString() : undefined; }
+function normalizeClaim(value: string): string { return value.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' '); }
 
 const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
   CONFIRMED_STARTER: 'confirmed as a starter',
@@ -82,13 +161,13 @@ const AVAILABILITY_STATUS_TEXT: Record<string, string> = {
 // for a player we've already confirmed. Skips ambiguous provider matches (UNMAPPED) and
 // players with no real signal (UNKNOWN) rather than fabricating a finding from nothing.
 export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding[] {
-  return slate.playerPool.flatMap((player, index) => {
+  return slate.playerPool.flatMap((player) => {
     const availability = player.availability;
     if (!availability || availability.mappedBy === 'UNMAPPED' || availability.status === 'NOT_IN_PROVIDER_ROSTER') return [];
     const statusText = AVAILABILITY_STATUS_TEXT[availability.status] ?? availability.status.toLowerCase();
     const finding = `${player.playerName} is ${statusText} per ${availability.source}${availability.note ? ` (${availability.note})` : ''}.`;
     return [{
-      id: stableId(`${slate.slateId}:availability-seed:${player.playerId}:${index}`),
+      id: stableId(`${slate.tenantId}:${slate.slateId}:availability-seed:${player.playerId}:${availability.retrievedAt}:${availability.status}`),
       bucket: 'AVAILABILITY' as ResearchBucket,
       subjectType: 'PLAYER' as const,
       subjectId: player.playerId,
@@ -103,7 +182,7 @@ export function findingsFromAvailability(slate: ValidatedSlate): ResearchFinding
       publishedAt: availability.retrievedAt,
       retrievedAt: availability.retrievedAt,
       confidence: availability.confirmed ? 'HIGH' as const : 'MEDIUM' as const,
-      metadata: { mappedBy: availability.mappedBy },
+      metadata: { mappedBy: availability.mappedBy, observedAt: availability.retrievedAt, canonicalFactKey: `${slate.tenantId}:${slate.slateId}:${player.playerId}:availability.status` },
     }];
   });
 }

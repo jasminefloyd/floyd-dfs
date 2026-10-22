@@ -1,5 +1,6 @@
+import { cacheSlatePlayerPhotos } from '../../../server/playerPhotoCache.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { asFormat, asSport, createRun, cors, draftKingsClient, method, respondError, requestId, tenantContext } from '../../../server/runtime.js';
+import { asFormat, asSport, createRun, cors, draftKingsClient, method, respondError, requestId, requireOwnedRun, tenantContext } from '../../../server/runtime.js';
 import { buildValidatedSlateFromBundle } from '../../../src/lib/engine/draftKingsSlate.js';
 import type { ContestObjective } from '../../../src/lib/engine/contracts.js';
 
@@ -7,8 +8,9 @@ import type { ContestObjective } from '../../../src/lib/engine/contracts.js';
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   try {
-    const context = await tenantContext(); const runId = String(req.query.runId ?? '');
-    const original = await context.db.from('generation_runs').select('request_payload').eq('tenant_id', context.tenantId).eq('id', runId).single();
+    const context = await tenantContext(req); const runId = String(req.query.runId ?? '');
+    await requireOwnedRun(context, runId);
+    const original = await context.db.from('generation_runs').select('request_payload').eq('tenant_id', context.tenantId).eq('user_id', context.userId).eq('id', runId).single();
     if (original.error) throw original.error;
     const payload = record(original.data.request_payload); const input = record(payload.input);
     const savedSlate = record(input.validatedSlate); const savedContest = record(savedSlate.contest);
@@ -22,7 +24,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const dk = draftKingsClient();
     const bundle = await dk.getSlateBundleForDraftGroup({ contestId, draftGroupId, sport, format, contestName: String(savedContest.name ?? ''), contestLockTime: String(savedContest.lockTime), contestSize: Number(savedContest.contestSize) || undefined });
     const id = requestId();
-    const refreshedSlate = buildValidatedSlateFromBundle(bundle, { tenantId: context.tenantId, userId: context.userId, requestId: id, sport, league: sport, contestId, contestFormat: format, userEntryCount: Math.max(1, Number(savedContest.userEntryCount ?? payload.entries ?? 1)), contestName: String(savedContest.name ?? ''), contestLockTime: String(savedContest.lockTime), contestSizeOverride: Number(savedContest.contestSize) || undefined, objective });
+    let refreshedSlate = buildValidatedSlateFromBundle(bundle, { tenantId: context.tenantId, userId: context.userId, requestId: id, sport, league: sport, contestId, contestFormat: format, userEntryCount: Math.max(1, Number(savedContest.userEntryCount ?? payload.entries ?? 1)), allowedPhotoHosts: (process.env.FDS_PLAYER_PHOTO_ALLOWED_HOSTS ?? '').split(','), contestName: String(savedContest.name ?? ''), contestLockTime: String(savedContest.lockTime), contestSizeOverride: Number(savedContest.contestSize) || undefined, objective });
+    refreshedSlate = await cacheSlatePlayerPhotos(context.db, refreshedSlate, (process.env.FDS_PLAYER_PHOTO_ALLOWED_HOSTS ?? '').split(','), Number(process.env.FDS_PLAYER_PHOTO_CACHE_TTL_DAYS ?? 7));
     if (refreshedSlate.validation.status === 'BLOCKED') throw new Error(refreshedSlate.validation.errors.join(' '));
     const run = await createRun(context.db, { tenantId: context.tenantId, userId: context.userId, requestId: id, entries: refreshedSlate.contest.userEntryCount, payload: { ...input, refreshedFromRunId: runId, refreshRequestedAt: new Date().toISOString(), validatedSlate: refreshedSlate } });
     const job = await context.db.from('engine_jobs').insert({ tenant_id: context.tenantId, generation_run_id: run.id, stage: 'SLATE', status: 'queued', input_payload: { slate: refreshedSlate } }).select('*').single();

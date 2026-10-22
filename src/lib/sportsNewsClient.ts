@@ -23,7 +23,7 @@ const DEFAULT_FLOYD_DFS_API_URL = '';
 
 export async function listSportsNews(signal?: AbortSignal): Promise<SportsNewsItem[]> {
   const baseUrl = import.meta.env.VITE_FLOYD_DFS_API_URL?.replace(/\/$/, '') ?? DEFAULT_FLOYD_DFS_API_URL;
-  const response = await fetch(`${baseUrl}/api/news`, { method: 'GET', signal });
+  const response = await fetch(`${baseUrl}/api/news`, { method: 'GET', signal, headers: await authenticatedHeaders() });
 
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
@@ -37,3 +37,4 @@ export async function listSportsNews(signal?: AbortSignal): Promise<SportsNewsIt
 
   return 'items' in data ? data.items : [];
 }
+import { authenticatedHeaders } from './supabaseClient';

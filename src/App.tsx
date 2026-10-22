@@ -12,6 +12,7 @@ import { ToastProvider } from './components/ToastProvider'
 import { useEnterTransition } from './hooks/useEnterTransition'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { AdminGuard } from './components/AdminGuard'
+import { SignInGate } from './components/SignInGate'
 
 function RouteFade({ children }: { children: React.ReactNode }) {
   const location = useLocation()
@@ -30,7 +31,7 @@ function RouteFade({ children }: { children: React.ReactNode }) {
 
 function App() {
   return (
-    <BrowserRouter>
+    <SignInGate><BrowserRouter>
       <ToastProvider>
         <ErrorBoundary>
           <SportsNewsTicker />
@@ -56,7 +57,7 @@ function App() {
           </RouteFade>
         </ErrorBoundary>
       </ToastProvider>
-    </BrowserRouter>
+    </BrowserRouter></SignInGate>
   )
 }
 

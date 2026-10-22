@@ -17,6 +17,8 @@ export interface CashLineObservation {
   beatCashLine: boolean;
   /** A DraftKings contest is the independent validation unit, not a lineup entry. */
   contestId?: string;
+  /** All contests from one slate share news, players, and game outcomes; count one independent unit. */
+  independenceKey?: string;
 }
 
 export interface CashLineCalibrationBin {
@@ -53,7 +55,7 @@ export function buildCashLineCalibration(observations: CashLineObservation[]): C
   // making duplicate import order affect the result.
   const byContest = new Map<string, CashLineObservation>();
   for (const item of validRows) {
-    const key = item.contestId!.trim();
+    const key = item.independenceKey?.trim() || item.contestId!.trim();
     const prior = byContest.get(key);
     if (!prior || item.rawProbability < prior.rawProbability) byContest.set(key, item);
   }

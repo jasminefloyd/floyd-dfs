@@ -5,7 +5,7 @@ import { buildValidatedSlateFromScreenshot, type DraftKingsScreenshotExtraction 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   try {
-    const context = await tenantContext(); const body = parseBody(req); const image = String(body.imageDataUrl ?? '');
+    const context = await tenantContext(req); const body = parseBody(req); const image = String(body.imageDataUrl ?? '');
     if (!image.startsWith('data:image/')) throw new Error('imageDataUrl must be a data:image/* URL.');
     const assetId = crypto.randomUUID(); const path = `${context.tenantId}/draftkings/${context.userId}/${assetId}.png`; const comma = image.indexOf(','); const encoded = comma >= 0 ? image.slice(comma + 1) : image; const uploaded = await context.db.storage.from('draftkings').upload(path, Buffer.from(encoded, 'base64'), { contentType: image.slice(5, image.indexOf(';')), upsert: false }); if (uploaded.error) throw uploaded.error;
     const apiKey = process.env.OPENAI_API_KEY?.trim(); if (!apiKey) throw new Error('OPENAI_API_KEY is required for screenshot ingestion.');

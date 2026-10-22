@@ -26,8 +26,29 @@ export type GenerationRunState =
 
 /** Versioned boundary for artifacts exchanged between stages. Bump only when an artifact's
  * meaning or required fields change; the numeric `version` remains the run-local revision. */
-export const ENGINE_CONTRACT_VERSION = '2026-09-10.1';
+export const ENGINE_CONTRACT_VERSION = '2026-10-21.1';
+export const FDS_TRANSPORT_CONTRACT_VERSION = 'fds.transport.v1';
 export type EngineRunMode = 'PRE_LOCK' | 'LIVE';
+
+/** Stable tenant-scoped IDs are strings even when an upstream provider uses numeric IDs. */
+export interface CanonicalIdentity {
+  tenantId: string;
+  sport: Sport;
+  leagueId: string;
+  seasonId: string;
+  eventId: string;
+  gameId: string;
+  teamId: string;
+  playerId: string;
+  contestId: string;
+  draftGroupId: string;
+  gameType: ContestFormat;
+  lineupId: string;
+  entryId: string;
+  generationRunId: string;
+  revision: number;
+  providerIds: Record<string, string>;
+}
 
 export interface LiveGameState {
   observedAt: string;
@@ -65,6 +86,11 @@ export interface SourceObservation {
   status: 'CONFIRMED' | 'PROJECTED' | 'REPORTED' | 'UNVERIFIED';
   identityConfidence: 'EXACT' | 'HIGH' | 'LOW' | 'CONFLICT';
   rawPayloadRef: string;
+  gameId?: string;
+  valueUnit?: string;
+  publishedAt?: string;
+  observedTimeBasis?: 'SOURCE_TIMESTAMP' | 'PUBLISHED_AT_PROXY' | 'RETRIEVAL_FALLBACK';
+  duplicateClusterId?: string;
 }
 
 export interface ResolvedFact {
@@ -80,6 +106,10 @@ export interface ResolvedFact {
   resolvedAt: string;
   ruleVersion: string;
   rationale: string;
+  canonicalFactKey?: string;
+  supportingObservationIds?: string[];
+  rejectedObservationIds?: string[];
+  decisionAt?: string;
 }
 
 export interface QuantitativeAdjustment {
@@ -94,6 +124,121 @@ export interface QuantitativeAdjustment {
   scenarioId?: string;
   modelVersion: string;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+/** Transport/domain boundary additions. Database row mappings live in server/schemaManifest.ts. */
+export interface SlateGame {
+  gameId: string;
+  providerIds: Record<string, string>;
+  homeTeamId?: string;
+  awayTeamId?: string;
+  teamIds: string[];
+  scheduledStart: string;
+  lockTime?: string;
+  status: 'SCHEDULED' | 'LIVE' | 'FINAL' | 'POSTPONED' | 'CANCELLED' | 'UNKNOWN';
+}
+
+export interface QuantitativeEffect {
+  id: string;
+  tenantId: string;
+  slateId: string;
+  playerId: string;
+  gameId?: string;
+  targetDimension: string;
+  baseline: number;
+  operation: 'ADD' | 'MULTIPLY';
+  amount: number;
+  unit: string;
+  finalValue: number;
+  evidenceIds: string[];
+  factIds: string[];
+  scenarioId?: string;
+  capApplied?: { minimum?: number; maximum?: number; reason: string };
+  modelVersion: string;
+  outcome: 'APPLIED' | 'CONTEXT_ONLY' | 'REJECTED' | 'SUPERSEDED';
+  reason: string;
+}
+
+export interface PlayerPhotoMetadata {
+  tenantId: string;
+  playerId: string;
+  providerId?: string;
+  source: string;
+  url: string | null;
+  retrievedAt?: string;
+  verifiedAt?: string;
+  expiresAt?: string;
+}
+
+export interface LineupExplanation {
+  tenantId: string;
+  lineupId: string;
+  revision: number;
+  objective: string;
+  search: { completeness: 'EXHAUSTIVE' | 'GAP_BOUNDED' | 'HEURISTIC'; algorithm: string; version: string; snapshotHash: string };
+  playerReasons: Array<{ playerId: string; reason: string; factIds: string[]; effectIds: string[] }>;
+  candidateTradeoffs: string[];
+  risks: string[];
+  missingInputs: string[];
+  dataTimestamps: Record<string, string>;
+  unsupportedOrUnusedContext: string[];
+}
+
+export interface LockState {
+  tenantId: string;
+  contestId: string;
+  lateSwapAllowed: boolean | null;
+  verification: 'VERIFIED' | 'UNKNOWN' | 'UNSUPPORTED';
+  verifiedAt?: string;
+  slots: Array<{ slotId: string; lockTime: string | null; lockSource: string | null; locked: boolean | null; playerId?: string }>;
+}
+
+export interface SwapPlan {
+  tenantId: string;
+  id: string;
+  sourceLineupId: string;
+  sourceRevision: number;
+  entryId: string;
+  trigger: string;
+  constraintHash: string;
+  snapshotHash: string;
+  affectedSlots: string[];
+  replacementRoster: Record<string, string>;
+  salaryDelta: number;
+  pointDelta: number;
+  reason: string;
+  expiresAt?: string;
+  nextLockAt?: string;
+  evidenceIds: string[];
+  outcome: 'PENDING' | 'READY' | 'NO_SOLUTION' | 'STALE' | 'LOCKED' | 'UNKNOWN_LOCK_STATE';
+}
+
+export interface ProviderHealthResult {
+  tenantId: string;
+  endpointKey: string;
+  endpointVersion: string;
+  environment: string;
+  sport?: Sport;
+  format?: ContestFormat;
+  resolvedRoute: string;
+  startedAt: string;
+  finishedAt: string;
+  status: 'HEALTHY' | 'EMPTY' | 'UNAVAILABLE' | 'INVALID_SCHEMA' | 'IDENTITY_MISMATCH' | 'STALE' | 'RATE_LIMITED' | 'AUTH_BLOCKED';
+  schemaVersion?: string;
+  freshnessCheck: 'PASS' | 'FAIL' | 'UNKNOWN';
+  identityCheck: 'PASS' | 'FAIL' | 'UNKNOWN';
+  failureDetail?: string;
+  retryCount: number;
+  lastSuccessfulCompatibleCheck?: string;
+}
+
+export interface FdsApiError {
+  code: 'EMPTY_PLAYER_POOL' | 'NO_LEGAL_LINEUP' | 'PROVIDER_UNAVAILABLE' | 'STALE_DATA' | 'BOUNDED_SEARCH' | 'UNAUTHORIZED' | 'TENANT_MISMATCH' | 'CONFLICT' | 'VALIDATION_FAILED' | 'INTERNAL_ERROR';
+  safeMessage: string;
+  requestId: string;
+  retriable: boolean;
+  stage?: EngineStage;
+  reasons: Array<{ code: string; message: string; details?: Record<string, string | number | boolean | null> }>;
 }
 
 export interface RunTrust {
@@ -136,6 +281,8 @@ export interface PortfolioConstraints {
 export interface SlatePlayer {
   playerId: string;
   playerName: string;
+  gameId?: string;
+  photo?: PlayerPhotoMetadata;
   identity?: {
     draftKingsId?: string;
     espnId?: string;
@@ -143,6 +290,8 @@ export interface SlatePlayer {
     confidence: 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW';
     matchedBy: 'DRAFTKINGS' | 'PROVIDER_ID' | 'NAME_AND_TEAM' | 'NAME_ONLY' | 'UNMAPPED';
   };
+  /** Provider's slot-specific IDs are distinct in some CSV exports (for example, Showdown CPT/UTIL). */
+  draftKingsSlotIds?: Record<string, string>;
   team?: string;
   opponent?: string;
   position?: string;
@@ -172,7 +321,8 @@ export interface SlatePlayer {
   marketContext?: { impliedTeamTotal: number; spread: number; gameTotal: number };
   /** Optional provider-derived context. Missing fields are unknown, never inferred. */
   sportContext?: {
-    nba?: { activeRotation?: boolean; starter?: boolean; minutesP10?: number; minutesP50?: number; minutesP90?: number; limitedMinutesRisk?: number; minutesSampleCount?: number; minutesRetrievedAt?: string; paceMultiplier?: number; usageMultiplier?: number };
+    /** Usage/target/carry shares and overtime probability are fractions from 0 to 1. */
+    nba?: { activeRotation?: boolean; starter?: boolean; minutesP10?: number; minutesP50?: number; minutesP90?: number; limitedMinutesRisk?: number; minutesSampleCount?: number; minutesRetrievedAt?: string; paceMultiplier?: number; usageMultiplier?: number; overtimeProbability?: number; expectedOvertimePeriods?: number };
     mlb?: { battingOrder?: number; expectedPA?: number; pitcherRole?: 'STARTER' | 'RELIEVER' | 'OPENER' | 'UNKNOWN'; probableStarter?: boolean; probablePitcherId?: string; expectedInningsP10?: number; expectedInningsP50?: number; expectedInningsP90?: number; expectedPitchesP50?: number; recentPitchesLast3Days?: number; workloadSampleCount?: number; workloadRetrievedAt?: string; workloadWarning?: string; bullpenAvailability?: 'UNKNOWN' | 'RECENT_USAGE_OBSERVED'; platoonMultiplier?: number; parkRunMultiplier?: number; opposingStarterQuality?: number; bullpenQuality?: number; weatherRunMultiplier?: number; gameWeather?: { temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; retrievedAt: string } };
     nfl?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
     cfb?: { expectedPlays?: number; passRate?: number; targetShare?: number; carryShare?: number; redZoneShare?: number; touchdownRateMultiplier?: number };
@@ -189,6 +339,8 @@ export interface ValidatedSlate {
   requestId: string;
   receivedAt: string;
   contractVersion?: string;
+  transportContractVersion?: string;
+  games?: SlateGame[];
   runMode?: EngineRunMode;
   liveGameState?: LiveGameState;
   createdAt: string;
@@ -310,6 +462,7 @@ export interface ProjectionPackage {
   modelVersion: string;
   simulationRuns: number;
   players: PlayerProjection[];
+  effectOutcomes?: Array<{ playerId: string; adjustmentType: string; state: 'APPLIED' | 'CONTEXT_ONLY' | 'REJECTED'; requestedEffect: number; acceptedEffect: number; capApplied?: number; finalValue?: number; dimension?: string; unit?: string; evidenceFindingIds: string[]; reason: string }>;
   gaps: Array<{ reason: string }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
 }
@@ -323,6 +476,7 @@ export interface ObjectiveProfile {
   medianWeight: number;
   ceilingWeight: number;
   leverageWeight: number;
+  /** Heuristic construction-score points subtracted per 1.0 of the 0–1 ownership proxy. */
   duplicationPenalty: number;
   correlationWeight: number;
 }
@@ -353,8 +507,6 @@ export interface LineupCandidate {
   /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
   optimalLineupFrequency?: number;
   /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
-  topOnePercentFrequency?: number;
-  /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
   ownershipEstimate?: number;
   /** @deprecated Compatibility for pre-Gate-0 fixtures/persisted records; never emit in new output. */
   leverageScore?: number;
@@ -371,10 +523,22 @@ export interface LineupCandidate {
   /** Contest metrics computed from explicit joint field simulations. */
   simulatedScoreSamples?: number[];
   variance?: number;
+  /** Event frequency for rank 1. */
   winFrequency?: number;
+  /** Fractional share of first-place ties. */
+  fractionalWinCredit?: number;
+  winFrequencyStandardError?: number;
+  /** Event frequency for finishing in the top 1% by official rank. */
+  topOnePercentFrequency?: number;
+  /** Event frequency for finishing in an official paid rank. */
   cashFrequency?: number;
+  cashFrequencyStandardError?: number;
+  /** Event frequency for receiving a positive contest payout. */
+  positivePayoutFrequency?: number;
   expectedDuplicates?: number;
   expectedPayout?: number;
+  expectedPayoutStandardError?: number;
+  expectedProfit?: number;
   roi?: number;
   contestMetricProvenance?: 'JOINT_FIELD_SIMULATION' | 'UNAVAILABLE';
   cashLineProbability?: number;
@@ -395,15 +559,31 @@ export interface OptimizerPackage {
   engineState: 'MODEL_VALIDATION_REQUIRED';
   searchCompleteness?: 'EXHAUSTIVE' | 'BOUNDED';
   optimalityGap?: number;
+  searchDiagnostics?: {
+    algorithm: 'DETERMINISTIC_BRANCH_AND_BOUND' | 'DETERMINISTIC_VALUE_ORDERED_DFS';
+    terminationReason: 'SEARCH_SPACE_EXHAUSTED' | 'OBJECTIVE_BOUND_PROVEN' | 'NODE_BUDGET';
+    nodesVisited: number;
+    elapsedMilliseconds: number;
+    candidatesEvaluated: number;
+    uniqueLineups: number;
+    bestIncumbentObjective?: number;
+    validUpperBound?: number;
+    /** Raw objective-score units, not a normalized percentage gap. */
+    objectiveGap?: number;
+  };
   portfolioConstraints?: PortfolioConstraints;
   cashLineEstimate?: { value: number; source: 'MANUAL' | 'SIMULATED' };
   contestSimulation?: {
-    status: 'COMPLETE' | 'UNAVAILABLE';
+    status: 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE';
     simulations: number;
     fieldEntries?: number;
     fieldModel: 'PROJECTED_OWNERSHIP' | 'UNAVAILABLE';
     payoutModel: 'CONTEST_PAYOUT_STRUCTURE' | 'UNAVAILABLE';
     reason?: string;
+    seed?: string;
+    ownershipProvenance?: 'PROVIDER_SLOT_OWNERSHIP';
+    dependenceModel?: 'INDEPENDENT_PLAYER_SAMPLES';
+    rulesVersion?: string;
   };
 }
 
@@ -454,7 +634,7 @@ export interface ResearchArticle {
   summary?: string;
   content?: string;
   tags?: string[];
-  diagnostic?: { status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number };
+  diagnostic?: { status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number; coverage?: string };
 }
 
 export interface ResearchSourceProvider {
@@ -471,8 +651,11 @@ export interface ResearchPackage {
   contractVersion?: string;
   freshThrough: string;
   findings: ResearchFinding[];
+  observations?: SourceObservation[];
+  resolvedFacts?: ResolvedFact[];
+  experimentalContextEffectsEnabled?: boolean;
   unknowns?: Array<{ question: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; subjectId?: string }>;
-  providerResults?: Array<{ provider: string; tier?: SourceTier; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; articleCount: number; acceptedArticleCount?: number; rejectedArticleCount?: number; rejectionSamples?: string[]; error?: string; attempted?: boolean; fallbackUsed?: boolean; httpStatus?: number; responseHeaders?: Record<string, string> }>;
+  providerResults?: Array<{ provider: string; tier?: SourceTier; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; articleCount: number; acceptedArticleCount?: number; rejectedArticleCount?: number; rejectionSamples?: string[]; error?: string; coverageDiagnostics?: string[]; attempted?: boolean; fallbackUsed?: boolean; httpStatus?: number; responseHeaders?: Record<string, string> }>;
   conflicts?: ResearchConflict[];
   watchItems?: Array<{ subjectId?: string; importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'; reason: string; expectedChangeBeforeLock: boolean }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
@@ -488,7 +671,7 @@ export interface ResearchConflict {
 export interface PlayerAdjustment {
   playerId: string;
   baselineContext: Record<string, unknown>;
-  adjustments: Array<{ adjustmentType?: string; direction?: 'UP' | 'DOWN' | 'NEUTRAL'; magnitude: 'NONE' | 'SMALL' | 'MODERATE' | 'MATERIAL' | 'MAJOR'; rationale?: string; evidenceFindingIds?: string[]; confidence: 'LOW' | 'MEDIUM' | 'HIGH' }>;
+  adjustments: Array<{ adjustmentType?: string; direction?: 'UP' | 'DOWN' | 'NEUTRAL'; magnitude: 'NONE' | 'SMALL' | 'MODERATE' | 'MATERIAL' | 'MAJOR'; rationale?: string; evidenceFindingIds?: string[]; canonicalFactKey?: string; confidence: 'LOW' | 'MEDIUM' | 'HIGH' }>;
   netOpportunityDirection: 'MATERIALLY_UP' | 'SLIGHTLY_UP' | 'NEUTRAL' | 'SLIGHTLY_DOWN' | 'MATERIALLY_DOWN';
   netSignedMagnitude: number;
   roleCertainty: 'LOW' | 'MEDIUM' | 'HIGH';
@@ -540,6 +723,6 @@ export interface SelectionPackage {
   selectedLineups: SelectedLineup[];
   optimizerGap?: string;
   warnings: string[];
-  status: 'COMPLETE' | 'BLOCKED';
+  status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
   engineState: 'MODEL_VALIDATION_REQUIRED';
 }

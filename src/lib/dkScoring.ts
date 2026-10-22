@@ -4,6 +4,7 @@
 // https://help.draftkings.com/hc/en-us/articles/4405224006931
 // DK basketball rules define double/triple categories as points, rebounds, assists,
 // steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
+import { scoreBasketballStatLine } from './dkBasketballScoring.cjs';
 
 export type DkSport = 'nba' | 'wnba' | 'mlb' | 'nfl' | 'cfb' | 'golf';
 export type DkContestType = 'classic' | 'showdown';
@@ -124,49 +125,8 @@ function hasStat(line: StatLine, keys: string[]): boolean {
   return keys.some((key) => key in line && Number.isFinite(Number(line[key])));
 }
 
-function atLeast(value: number, threshold: number): number {
-  return value >= threshold ? 1 : 0;
-}
-
 export function dkBasketballFantasyPoints(statLine: StatLine): number {
-  const points = stat(statLine, ['points', 'pts']);
-  const threes = stat(statLine, [
-    'threePointFieldGoalsMade',
-    'threePointersMade',
-    'threePointers',
-    'three_pointers',
-    'three_pointers_made',
-    'three_point_field_goals_made',
-    'threePointMade',
-    'threesMade',
-    'fg3m',
-    '3pm',
-  ]);
-  const rebounds = stat(statLine, ['totalRebounds', 'rebounds', 'reb', 'total_rebounds']);
-  const assists = stat(statLine, ['assists', 'ast']);
-  const steals = stat(statLine, ['steals', 'stl']);
-  const blocks = stat(statLine, ['blocks', 'blk']);
-  const turnovers = stat(statLine, ['turnovers', 'turnover', 'tov']);
-  const categoriesAtTen = [
-    points,
-    rebounds,
-    assists,
-    steals,
-    blocks,
-  ].reduce((count, value) => count + atLeast(value, 10), 0);
-  // DK awards both bonuses on a triple-double: +1.5 for double-double and +3.0 for triple-double.
-  const doubleDoubleBonus = categoriesAtTen >= 2 ? DK_SCORING.nba.doubleDouble : 0;
-  const tripleDoubleBonus = categoriesAtTen >= 3 ? DK_SCORING.nba.tripleDouble : 0;
-
-  return points
-    + threes * DK_SCORING.nba.threePointersMade
-    + rebounds * DK_SCORING.nba.rebounds
-    + assists * DK_SCORING.nba.assists
-    + steals * DK_SCORING.nba.steals
-    + blocks * DK_SCORING.nba.blocks
-    + turnovers * DK_SCORING.nba.turnovers
-    + doubleDoubleBonus
-    + tripleDoubleBonus;
+  return scoreBasketballStatLine(statLine, DK_SCORING.nba).points;
 }
 
 export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {

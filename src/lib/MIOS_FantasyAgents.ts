@@ -59,6 +59,8 @@ export interface Player {
   injury_note?: string;
   projection_source?: 'draftkings' | 'draftkings_last5_blend' | 'last_5' | 'position_baseline' | 'calibrated' | 'props_blend' | 'opportunity_blend';
   projected_points?: number;
+  /** Arithmetic mean of the model's simulated fantasy point distribution. */
+  expected_points?: number;
   contextual_projection?: number;
   p10_projection?: number;
   p25_projection?: number;

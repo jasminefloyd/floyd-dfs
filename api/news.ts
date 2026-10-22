@@ -2,7 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLeagueNewsProviders } from '../src/lib/engine/rssProvider.js';
 import { createEspnLeagueNewsProvider } from '../src/lib/engine/espnNewsProvider.js';
 import type { ResearchArticle } from '../src/lib/engine/contracts.js';
-import { cors, method, respondError } from '../server/runtime.js';
+import { cors, method, respondError, tenantContext } from '../server/runtime.js';
 
 // SportsNewsTicker (src/components/SportsNewsTicker.tsx) expects `{ items, generated_at,
 // source_status }`, not the raw `{ articles }` the RSS providers return. The ticker uses the
@@ -40,6 +40,7 @@ function stableArticleId(article: ResearchArticle): string {
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
   try {
+    await tenantContext(req);
     const providers = [
       ...createLeagueNewsProviders(),
       ...(['NFL', 'NBA', 'WNBA', 'MLB', 'GOLF', 'CFB'] as const).map((sport) => createEspnLeagueNewsProvider(sport)),

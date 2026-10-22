@@ -1,0 +1,11 @@
+{
+  "contractVersion": "2026-10-21.1",
+  "transportContractVersion": "fds.transport.v1",
+  "tenantId": "tenant-floyd-dfs-test",
+  "slateId": "slate-contract-fixture",
+  "providerIds": { "DRAFTKINGS": "0000123400" },
+  "photo": { "url": null },
+  "salary": 0,
+  "marketContext": null,
+  "optionalUndefinedFieldIsOmitted": true
+}

@@ -31,14 +31,15 @@ export default function HistoryPage() {
     setImporting(true); setFieldImportStatus(null); setError(null);
     try {
       const csvText = await file.text();
-      const result = await floydRequest<{ imported: number; failed: number; errors?: Array<{ row: number; error: string }> }>('/api/results/import-field', { method: 'POST', body: JSON.stringify({ csvText }) });
-      setFieldImportStatus(`Imported ${result.imported} contest field row(s); ${result.failed} row(s) need attention.${result.errors?.[0] ? ` First issue: row ${result.errors[0].row}: ${result.errors[0].error}` : ''}`);
+      const result = await floydRequest<{ imported: number; linkedOutcomes?: number; failed: number; errors?: Array<{ row: number; error: string }> }>('/api/results/import-field', { method: 'POST', body: JSON.stringify({ csvText }) });
+      setFieldImportStatus(`Imported ${result.imported} contest field row(s); matched ${result.linkedOutcomes ?? 0} of your saved entries.${result.failed} row or contest issue(s).${result.errors?.[0] ? ` First issue: ${result.errors[0].row ? `row ${result.errors[0].row}: ` : ''}${result.errors[0].error}` : ''}`);
+      const refreshed = await floydRequest<{ lineups: HistoryRow[] }>('/api/lineups'); setRows(refreshed.lineups ?? []);
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to import DraftKings standings.'); }
     finally { setImporting(false); }
   }
   return <AppPage eyebrow="04 / HISTORY" title="Your lineup history." subtitle="Every generated and entered lineup stays attached to its run lineage.">
     <div className="mb-4 flex flex-wrap gap-2">{['all', 'generated', 'entered'].map((value) => <button key={value} type="button" onClick={() => setStatus(value)} className={`rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${status === value ? 'border-[#0b1f3a] bg-[#0b1f3a] text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{value}</button>)}</div>
-    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import my DraftKings results'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Requires a <code>lineup_id</code> column to match your entry.</span><label className="cursor-pointer rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900">Import full contest standings<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importField(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Field CSV: contest_id, external_entry_id, sport, contest_format, field_size, entry_fee, paid_positions, finish_position, actual_dk_points, payout, player_ids.</span></div>
+    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import my DraftKings results'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Matches by <code>lineup_id</code> or the contest + DraftKings entry ID saved with your lineup.</span><label className="cursor-pointer rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900">Import full contest standings<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importField(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Normalized field CSV: contest_id, external_entry_id, sport, contest_format, field_size, entry_fee, paid_positions, finish_position, actual_dk_points, payout, player_ids. The cash line is derived only when all field entries are present.</span></div>
     {importStatus ? <p className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">{importStatus}</p> : null}
     {fieldImportStatus ? <p className="mb-3 rounded-md border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900">{fieldImportStatus}</p> : null}
     {error ? <ErrorBox message={error} /> : filtered.length ? <div className="grid gap-3 md:grid-cols-2">{filtered.map((row, index) => <HistoryCard key={String(row.id ?? index)} row={row} />)}</div> : <EmptyState text="No persisted lineups match this filter." />}
@@ -74,7 +75,25 @@ function HistoryCard({ row }: { row: HistoryRow }) {
       {generationRunId ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${encodeURIComponent(generationRunId)}`}>View run</Link> : <span className="text-[10px] text-slate-400">Run lineage unavailable</span>}
     </div>
     {isEntered ? <RecordResult lineupId={String(row.id ?? '')} row={row} /> : null}
+    {isEntered ? <LinkDraftKingsEntry lineupId={String(row.id ?? '')} row={row} /> : null}
   </article>;
+}
+
+function LinkDraftKingsEntry({ lineupId, row }: { lineupId: string; row: HistoryRow }) {
+  const [contestId, setContestId] = useState(String(row.contest_id ?? ''));
+  const [externalEntryId, setExternalEntryId] = useState(String(row.external_entry_id ?? ''));
+  const [status, setStatus] = useState('');
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    if (!contestId.trim() || !externalEntryId.trim()) { setStatus('Enter both DraftKings IDs.'); return; }
+    setSaving(true); setStatus('');
+    try {
+      await floydRequest(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: JSON.stringify({ contestId: contestId.trim(), externalEntryId: externalEntryId.trim(), contestName: String(row.contest_name ?? ''), sport: String(row.sport ?? '').toUpperCase(), contestFormat: String(row.contest_format ?? '').toUpperCase() }) });
+      setStatus('DraftKings entry linked. It will match when you import completed standings.');
+    } catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Unable to link this DraftKings entry.'); }
+    finally { setSaving(false); }
+  }
+  return <div className="mt-3 rounded-md border border-cyan-200 bg-cyan-50 p-3"><p className="text-[10px] font-black uppercase tracking-wide text-cyan-900">Link this saved lineup to DraftKings</p><div className="mt-2 grid grid-cols-2 gap-2"><label className="text-[10px] font-bold text-slate-600">Contest ID<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label><label className="text-[10px] font-bold text-slate-600">External entry ID<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label></div><button type="button" onClick={() => void save()} disabled={saving} className="mt-2 rounded-md bg-cyan-900 px-3 py-2 text-[10px] font-black text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save entry link'}</button>{status ? <p className="mt-2 text-[10px] text-cyan-950">{status}</p> : null}</div>;
 }
 
 function historyGenerationRunId(row: HistoryRow): string | undefined {
@@ -98,6 +117,7 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
   const [finishPercentile, setFinishPercentile] = useState(initial('finish_percentile'));
   const [payout, setPayout] = useState(initial('payout'));
   const [contestId, setContestId] = useState(initial('contest_id'));
+  const [externalEntryId, setExternalEntryId] = useState(initial('external_entry_id'));
   const [contestName, setContestName] = useState(initial('contest_name'));
   const [fieldSize, setFieldSize] = useState(initial('field_size'));
   const [entryFee, setEntryFee] = useState(initial('entry_fee'));
@@ -124,7 +144,7 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
       const paidPositionsValue = paidPositions.trim() ? Number(paidPositions) : undefined;
       const response = await floydRequest<{ diagnostic: Diagnostic | null }>(`/api/lineups/${encodeURIComponent(lineupId)}/result`, {
         method: 'POST',
-        body: JSON.stringify({ actualDkPoints: points, cashLine: cashLineValue, finishPosition: finishPositionValue, ...(finishPercentileValue !== undefined ? { finishPercentile: finishPercentileValue } : {}), payout: payoutValue, ...(contestId.trim() ? { contestId: contestId.trim() } : {}), contestName: contestName.trim(), sport: row.sport, contestFormat: row.contest_format, fieldSize: fieldSizeValue, entryFee: entryFeeValue, ...(paidPositionsValue !== undefined ? { paidPositions: paidPositionsValue } : {}) }),
+        body: JSON.stringify({ actualDkPoints: points, cashLine: cashLineValue, finishPosition: finishPositionValue, ...(finishPercentileValue !== undefined ? { finishPercentile: finishPercentileValue } : {}), payout: payoutValue, ...(contestId.trim() ? { contestId: contestId.trim() } : {}), externalEntryId: externalEntryId.trim(), contestName: contestName.trim(), sport: row.sport, contestFormat: row.contest_format, fieldSize: fieldSizeValue, entryFee: entryFeeValue, ...(paidPositionsValue !== undefined ? { paidPositions: paidPositionsValue } : {}) }),
       });
       setSubmitted(true);
       setExpanded(false);
@@ -159,6 +179,7 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
       </label>
       <div className="grid grid-cols-2 gap-2">
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings contest ID<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings entry ID<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Contest name<input value={contestName} onChange={(event) => setContestName(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Field size (required)<input type="number" min="1" value={fieldSize} onChange={(event) => setFieldSize(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Entry fee $ (required)<input type="number" min="0" step="0.01" value={entryFee} onChange={(event) => setEntryFee(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>

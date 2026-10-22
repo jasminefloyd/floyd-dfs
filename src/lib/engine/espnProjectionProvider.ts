@@ -1,8 +1,9 @@
 import type { ValidatedSlate } from './contracts.js';
 import { normalizeTeamCode, type AvailabilityRecord, type AvailabilitySnapshot } from './availability.js';
 import { fetchEspnJson } from './espnApiClient.js';
+import { DK_SCORING } from '../dkScoring.js';
 
-export interface BasketballProjectionRecord { name: string; team: string; providerFppg: number; source: string; }
+export interface BasketballProjectionRecord { name: string; team: string; opponent?: string; gameId?: string; providerFppg: number; source: string; }
 
 const ESPN_AVAILABILITY_SPORT_PATH: Partial<Record<ValidatedSlate['sport'], { sportGroup: string; league: string }>> = {
   NBA: { sportGroup: 'basketball', league: 'nba' },
@@ -23,18 +24,25 @@ export class EspnProjectionClient {
 
   async getBasketballProjectionSnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<BasketballProjectionRecord[]> {
     if (slate.sport !== 'NBA' && slate.sport !== 'WNBA') return [];
-    const league = slate.sport.toLowerCase();
+    const league = slate.sport.toLowerCase() as 'nba' | 'wnba';
     const date = espnDate(slate);
     const scoreboard = await this.getJson(`${this.baseUrl}/sports/basketball/${league}/scoreboard?dates=${date}`, signal);
     const teams = new Set(slate.playerPool.map((player) => normalizeTeamCode(String(player.team ?? ''))).filter(Boolean));
-    const event = listRecords(scoreboard.events).find((candidate) => {
+    const expectedPairs = new Set((slate.games ?? []).map((game) => game.teamIds.map(normalizeTeamCode).filter(Boolean).sort().join(':')).filter((pair) => pair.includes(':')));
+    const events = listRecords(scoreboard.events).filter((candidate) => {
       const competitors = listRecords(listRecords(candidate.competitions)[0]?.competitors);
-      return teams.size > 0 && teams.size === competitors.filter((competitor) => teams.has(teamCode(competitor.team))).length;
+      const eventTeams = new Set(competitors.map((competitor) => teamCode(competitor.team)).filter(Boolean));
+      const pair = [...eventTeams].sort().join(':');
+      return eventTeams.size === 2 && [...eventTeams].every((team) => teams.has(team)) && (!expectedPairs.size || expectedPairs.has(pair));
     });
-    if (!event) return [];
-    const competitors = listRecords(listRecords(event.competitions)[0]?.competitors);
-    const rosterRows = await Promise.all(competitors.filter((competitor) => teams.has(teamCode(competitor.team))).map(async (competitor) => {
+    if (!events.length) return [];
+    const seen = new Set<string>();
+    const rosterRows = await Promise.all(events.flatMap((event) => {
+      const eventId = text(event.id);
+      const competitors = listRecords(listRecords(event.competitions)[0]?.competitors);
+      return competitors.filter((competitor) => teams.has(teamCode(competitor.team))).map(async (competitor) => {
       const team = teamCode(competitor.team);
+      const opponent = competitors.filter((other) => other !== competitor).map((other) => teamCode(other.team)).find(Boolean);
       const teamId = text(asRecord(competitor.team)?.id);
       if (!teamId) return [];
       const roster = await this.getJson(`${this.baseUrl}/sports/basketball/${league}/teams/${teamId}/roster`, signal);
@@ -48,17 +56,29 @@ export class EspnProjectionClient {
           const stats = listRecords(statsSummary?.statistics);
           const values = new Map(stats.map((stat) => [text(stat.name), number(stat.value)]));
           const points = values.get('avgPoints'); const rebounds = values.get('avgRebounds'); const assists = values.get('avgAssists'); const steals = values.get('avgSteals');
-          if (![points, rebounds, assists, steals].every((value) => Number.isFinite(value))) return undefined;
+          const threes = values.get('avgThreePointFieldGoalsMade') ?? values.get('avgThreePointersMade');
+          const blocks = values.get('avgBlocks'); const turnovers = values.get('avgTurnovers');
+          if (![points, rebounds, assists, steals, threes, blocks, turnovers].every((value) => Number.isFinite(value))) return undefined;
           const name = text(athlete.fullName ?? athlete.displayName);
           if (!name) return undefined;
-          return { name, team, providerFppg: points! + rebounds! * 1.25 + assists! * 1.5 + steals! * 2, source: 'ESPN season averages' };
+          // Season means are not actual box scores: score their linear categories only and
+          // never award DD/TD bonuses based on rounded averages.
+          const providerFppg = points! * DK_SCORING[league].points + threes! * DK_SCORING[league].threePointersMade
+            + rebounds! * DK_SCORING[league].rebounds + assists! * DK_SCORING[league].assists
+            + steals! * DK_SCORING[league].steals + blocks! * DK_SCORING[league].blocks
+            + turnovers! * DK_SCORING[league].turnovers;
+          const identity = `${eventId}:${athleteId}`;
+          if (seen.has(identity)) return undefined;
+          seen.add(identity);
+          return { name, team, opponent, gameId: eventId || undefined, providerFppg, source: 'ESPN season averages (linear categories; bonuses excluded)' };
         } catch {
           return undefined;
         }
       }));
-      return projections.filter((value): value is BasketballProjectionRecord => Boolean(value));
+      return projections.filter((value) => Boolean(value)) as BasketballProjectionRecord[];
+      });
     }));
-    return rosterRows.flat();
+    return rosterRows.flat().filter((value) => value !== undefined) as BasketballProjectionRecord[];
   }
 
   // NBA/WNBA/NFL/CFB availability, sourced from ESPN's team roster endpoint (already reachable via

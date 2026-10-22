@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resolveObservations } from '../src/lib/engine/factResolution.js';
 import { buildRunTrust } from '../src/lib/engine/runTrust.js';
+import { buildLineupDecisionTrace } from '../src/lib/engine/decisionTrace.js';
 import type { AdjustmentPackage, OptimizerPackage, ProjectionPackage, ResearchPackage, SelectionPackage, SourceObservation, ValidatedSlate } from '../src/lib/engine/contracts.js';
 
 export async function persistEvidenceLedger(db: SupabaseClient, input: {
@@ -29,7 +30,7 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   const snapshotResult = await db.from('floyd_dfs_run_data_snapshots').upsert(snapshots, { onConflict: 'tenant_id,generation_run_id,snapshot_type,source,content_sha256', ignoreDuplicates: true });
   if (snapshotResult.error) throw snapshotResult.error;
 
-  const observations = research.findings.map((finding): SourceObservation => {
+  const legacyObservations = research.findings.map((finding): SourceObservation => {
     const player = slate.playerPool.find((candidate) => candidate.playerId === finding.subjectId);
     const direct = /directly fetched/i.test(finding.sourcePurpose ?? '');
     const assertion = finding.finding.toLowerCase();
@@ -37,21 +38,23 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
     const observedAt = finding.publishedAt ?? finding.retrievedAt ?? research.generatedAt;
     const observation: SourceObservation = {
       id: deterministicUuid(`${runId}:${finding.id}:${finding.retrievedAt ?? research.generatedAt}`), tenantId, slateId: slate.slateId, sport: slate.sport, eventId: slate.event.eventId,
+      gameId: player?.gameId ?? slate.event.eventId,
       source: finding.sourceName, sourceRecordId: finding.id, sourceUrl: finding.sourceUrl,
       // Until predicate/entity extraction is implemented, keep unrelated prose claims in
       // distinct fact groups. Grouping all NEWS or AVAILABILITY sentences by bucket would
       // incorrectly report ordinary multi-claim articles as contradictions.
-      subject: { kind: finding.subjectType === 'LEAGUE' ? 'EVENT' : finding.subjectType ?? 'EVENT', id: finding.subjectId }, factType: `research.${finding.bucket}.${digest(finding.finding.trim().toLowerCase()).slice(0, 16)}`, value: finding.finding,
-      effectiveAt: finding.publishedAt, observedAt, retrievedAt: finding.retrievedAt ?? research.generatedAt, expiresAt: finding.expiresAt,
+      subject: { kind: finding.subjectType === 'LEAGUE' ? 'EVENT' : finding.subjectType ?? 'EVENT', id: finding.subjectId }, factType: `research.${finding.bucket}.${digest(finding.finding.trim().toLowerCase()).slice(0, 16)}`, value: { claim: finding.finding }, valueUnit: 'text',
+      publishedAt: finding.publishedAt, effectiveAt: finding.publishedAt, observedAt, retrievedAt: finding.retrievedAt ?? research.generatedAt, expiresAt: finding.expiresAt,
       status, identityConfidence: player?.identity?.confidence === 'EXACT' ? 'EXACT' : player?.identity?.confidence === 'HIGH' ? 'HIGH' : finding.subjectType === 'EVENT' ? 'HIGH' : 'LOW',
-      rawPayloadRef: `research-finding:${finding.id}`,
+      rawPayloadRef: `research-finding:${finding.id}`, duplicateClusterId: finding.sourceUrl ? digest(`${finding.sourceName}:${finding.sourceUrl}`).slice(0, 32) : undefined,
     };
     return observation;
   });
+  const observations = research.observations?.length ? [...research.observations] : legacyObservations;
   // Preserve normalized structured availability separately from editorial prose. This gives
   // the resolver a stable player/status key, so contradictory direct status records can be
   // compared instead of being split into unrelated sentence-hash fact types.
-  for (const player of slate.playerPool) {
+  for (const player of research.observations?.length ? [] : slate.playerPool) {
     const availability = player.availability;
     if (!availability || availability.mappedBy === 'UNMAPPED' || availability.status === 'NOT_IN_PROVIDER_ROSTER') continue;
     const retrievedAt = availability.retrievedAt;
@@ -65,10 +68,10 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
       : availability.status === 'PROJECTED' || availability.status === 'ACTIVE' ? 'PROJECTED' as const : 'UNVERIFIED' as const;
     observations.push({
       id: deterministicUuid(`${runId}:availability:${player.playerId}:${retrievedAt}:${availability.status}`),
-      tenantId, slateId: slate.slateId, sport: slate.sport, eventId: slate.event.eventId,
+      tenantId, slateId: slate.slateId, sport: slate.sport, eventId: slate.event.eventId, gameId: player.gameId ?? slate.event.eventId,
       source: availability.source, sourceRecordId: availability.providerPlayerId,
       subject: { kind: 'PLAYER', id: player.playerId }, factType: 'availability.status',
-      value: { status: availability.status, roleStatus: availability.roleStatus, confirmed: availability.confirmed, note: availability.note },
+      value: { status: availability.status, roleStatus: availability.roleStatus, confirmed: availability.confirmed, note: availability.note }, valueUnit: 'status',
       observedAt: retrievedAt, retrievedAt, expiresAt, status,
       identityConfidence: availability.mappedBy === 'PROVIDER_ID' ? 'EXACT' : player.identity?.confidence === 'EXACT' ? 'EXACT' : player.identity?.confidence === 'HIGH' ? 'HIGH' : 'LOW',
       rawPayloadRef: `availability:${availability.source}:${player.playerId}:${retrievedAt}`,
@@ -76,54 +79,49 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   }
   if (observations.length) {
     const observationRows = observations.map((item) => ({
-      id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId,
+      id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId, game_id: item.gameId ?? null,
       source: item.source, source_record_id: item.sourceRecordId ?? null, source_url: item.sourceUrl ?? null,
-      subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value,
+      subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value, value_unit: item.valueUnit ?? null,
+      published_at: item.publishedAt ?? null, duplicate_cluster_id: item.duplicateClusterId ?? null,
       effective_at: item.effectiveAt ?? null, observed_at: item.observedAt, retrieved_at: item.retrievedAt, expires_at: item.expiresAt ?? null,
       observation_status: item.status, identity_confidence: item.identityConfidence, raw_payload_ref: item.rawPayloadRef,
-      raw_payload: { normalized_claim: item.value }, content_sha256: digest(item),
+      raw_payload: { normalized_claim: item.value, observed_time_basis: item.observedTimeBasis ?? 'SOURCE_TIMESTAMP', effective_at: item.effectiveAt ?? null }, content_sha256: digest(item),
     }));
     const inserted = await db.from('floyd_dfs_source_observations').upsert(observationRows, { onConflict: 'tenant_id,generation_run_id,content_sha256', ignoreDuplicates: true });
     if (inserted.error) throw inserted.error;
-    const facts = resolveObservations(observations, new Date(research.generatedAt));
-    const factRows = facts.map((fact) => ({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, event_id: fact.eventId, subject_id: fact.subjectId, fact_type: fact.factType, fact_value: fact.value ?? null, resolution_state: fact.state, observation_ids: fact.observationIds, resolved_at: fact.resolvedAt, rule_version: fact.ruleVersion, rationale: fact.rationale, content_sha256: digest(fact) }));
+    const facts = research.resolvedFacts?.length ? research.resolvedFacts : resolveObservations(observations, new Date(research.generatedAt));
+    const factRows = facts.map((fact) => ({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, event_id: fact.eventId, subject_id: fact.subjectId, fact_type: fact.factType, fact_value: fact.value ?? null, resolution_state: fact.state, observation_ids: fact.observationIds, supporting_observation_ids: fact.supportingObservationIds ?? [], rejected_observation_ids: fact.rejectedObservationIds ?? [], canonical_fact_key: fact.canonicalFactKey ?? null, decision_at: fact.decisionAt ?? fact.resolvedAt, resolved_at: fact.resolvedAt, rule_version: fact.ruleVersion, rationale: fact.rationale, content_sha256: digest(fact) }));
     const resolved = await db.from('floyd_dfs_resolved_facts').upsert(factRows, { onConflict: 'tenant_id,generation_run_id,event_id,subject_id,fact_type,content_sha256', ignoreDuplicates: true });
     if (resolved.error) throw resolved.error;
   }
 
   const adjustmentByPlayer = new Map(adjustment.adjustments.map((item) => [item.playerId, item]));
-  const numericAdjustments = projection.players.flatMap((player) => Object.entries(player.opportunityDelta).flatMap(([dimension, delta]) => {
-    const before = player.baselineOpportunity[dimension]; const after = player.adjustedOpportunity[dimension];
-    if (!Number.isFinite(before) || !Number.isFinite(after) || !Number.isFinite(delta) || Math.abs(delta) < 1e-9) return [];
-    const playerAdjustment = adjustmentByPlayer.get(player.playerId);
-    const row = { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, sport: slate.sport, player_id: player.playerId, dimension, before_value: before, delta_value: delta, after_value: after, unit: unitFor(dimension), evidence_ids: [...new Set((playerAdjustment?.adjustments ?? []).flatMap((item) => item.evidenceFindingIds ?? []))], model_version: projection.modelVersion, confidence: playerAdjustment?.roleCertainty ?? player.confidence };
+  const factsByEvidenceId = new Map<string, string[]>();
+  for (const fact of research.resolvedFacts ?? []) for (const observationId of fact.supportingObservationIds ?? []) {
+    const findingId = research.observations?.find((observation) => observation.id === observationId)?.sourceRecordId;
+    if (findingId) factsByEvidenceId.set(findingId, [...(factsByEvidenceId.get(findingId) ?? []), fact.id]);
+  }
+  const numericAdjustments = (projection.effectOutcomes ?? []).flatMap((effect) => {
+    if (effect.state !== 'APPLIED' || !effect.dimension || !Number.isFinite(effect.finalValue)) return [];
+    const projectionPlayer = projection.players.find((player) => player.playerId === effect.playerId);
+    const playerAdjustment = adjustmentByPlayer.get(effect.playerId);
+    const playerData = slate.playerPool.find((item) => item.playerId === effect.playerId);
+    const before = projectionPlayer?.baselineOpportunity[effect.dimension];
+    const after = projectionPlayer?.adjustedOpportunity[effect.dimension];
+    if (!Number.isFinite(before) || !Number.isFinite(after)) return [];
+    const delta = after! - before!;
+    const evidenceIds = [...new Set(effect.evidenceFindingIds)];
+    const factIds = [...new Set(evidenceIds.flatMap((id) => factsByEvidenceId.get(id) ?? []))];
+    const row = { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, sport: slate.sport, player_id: effect.playerId, game_id: playerData?.gameId ?? null, dimension: effect.dimension, before_value: before, delta_value: delta, after_value: after, operation: 'MULTIPLY', amount_value: effect.acceptedEffect, final_value: after, fact_ids: factIds, cap_applied: effect.capApplied === undefined ? null : { maxRelativeFraction: effect.capApplied, requestedEffect: effect.requestedEffect, acceptedEffect: effect.acceptedEffect }, outcome: 'APPLIED', outcome_reason: effect.reason, unit: effect.unit ?? unitFor(effect.dimension), evidence_ids: evidenceIds, model_version: projection.modelVersion, confidence: playerAdjustment?.roleCertainty ?? projectionPlayer?.confidence ?? 'LOW' };
     return [{ ...row, content_sha256: digest(row) }];
-  }));
+  });
   if (numericAdjustments.length) {
     const saved = await db.from('floyd_dfs_quantitative_adjustments').upsert(numericAdjustments, { onConflict: 'tenant_id,generation_run_id,player_id,dimension,content_sha256', ignoreDuplicates: true });
     if (saved.error) throw saved.error;
   }
 
-  const candidates = new Map(optimizer.candidates.map((candidate) => [candidate.id, candidate]));
-  const traces = selection.selectedLineups.map((lineup) => {
-    const candidate = candidates.get(lineup.candidateId);
-    const lineupFindings = research.findings.filter((finding) => lineup.playerIds.includes(finding.subjectId));
-    const recommendationEvidence = lineupFindings.map((finding) => ({
-      playerId: finding.subjectId, source: finding.sourceName, url: finding.sourceUrl,
-      retrievedAt: finding.retrievedAt, publishedAt: finding.publishedAt, expiresAt: finding.expiresAt,
-      confidence: finding.confidence, finding: finding.finding,
-      projectionEffect: adjustment.adjustments.find((item) => item.playerId === finding.subjectId)?.adjustments
-        .filter((item) => (item.evidenceFindingIds ?? []).includes(finding.id))
-        .map((item) => ({ type: item.adjustmentType, direction: item.direction, magnitude: item.magnitude, rationale: item.rationale })) ?? [],
-      uncertainty: finding.confidence === 'LOW' || finding.confidence === 'MEDIUM' ? 'Evidence strength is limited; do not treat this as a confirmed role or availability fact.' : undefined,
-    }));
-    const unresolvedPlayerInputs = lineup.playerIds.flatMap((playerId) => {
-      const player = slate.playerPool.find((item) => item.playerId === playerId);
-      if (!player) return [];
-      const missing = [!player.availability || Date.now() - Date.parse(player.availability.retrievedAt) > 12 * 60 * 60 * 1000 ? 'availability evidence missing or stale' : '', player.sportContext?.mlb?.workloadWarning ?? ''].filter(Boolean);
-      return missing.length ? [{ playerId, issues: missing }] : [];
-    });
-    const tracePayload = { lineup, candidate, objective: optimizer.objectiveProfile, searchCompleteness: optimizer.searchCompleteness, engineState: optimizer.engineState, researchFreshThrough: research.freshThrough, missingFacts: research.unknowns ?? [], projectionGaps: projection.gaps, sourceFindingIds: lineupFindings.map((finding) => finding.id), recommendationEvidence, unresolvedPlayerInputs };
+  const traces = selection.selectedLineups.map((lineup, index) => {
+    const tracePayload = buildLineupDecisionTrace({ slate, research, adjustment, projection, optimizer, selection: lineup, selectedRank: index + 1 });
     const row = { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, lineup_candidate_key: lineup.candidateId, trace_payload: tracePayload };
     return { ...row, content_sha256: digest(row.trace_payload) };
   });
