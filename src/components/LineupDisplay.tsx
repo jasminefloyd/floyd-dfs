@@ -492,7 +492,16 @@ function formatSalary(salary?: number): string {
   return salary === undefined ? '$—' : `$${salary.toLocaleString()}`;
 }
 
-function formatLocalTime(value: string): string { const timestamp = Date.parse(value); return Number.isFinite(timestamp) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' }).format(new Date(timestamp)) : 'time unavailable'; }
+function formatLocalTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return 'time unavailable';
+  // `timeZoneName` cannot be combined with `dateStyle`/`timeStyle` in
+  // Intl.DateTimeFormat. Spell out the fields so dates render across browsers.
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  }).format(new Date(timestamp));
+}
 function deltaLabel(value: number | null): string { return value === null ? 'unavailable' : `${value > 0 ? '+' : ''}${value.toFixed(1)} pts`; }
 
 function PlayerPortrait({ player }: { player: LineupPlayer }) {
