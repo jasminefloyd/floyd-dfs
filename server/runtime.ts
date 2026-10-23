@@ -26,6 +26,7 @@ import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/e
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
 import { currentSeasonWeight, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs.js';
+import { fetchOfficialMlbSeasonRows } from '../src/lib/engine/officialMlbStatsProvider.js';
 import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
 import { parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
 import { persistEvidenceLedger } from './evidenceLedger.js';
@@ -481,6 +482,40 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       } catch (error) { stages.nbaMinutesWarning = `Recent NBA minutes lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`; }
     } else if (workingSlate.sport === 'NBA') stages.nbaMinutesWarning = 'NBA recent-game minutes were not applied because the SportsDataIO deployment is not configured as PRODUCTION_VERIFIED; endpoint entitlement and data integrity must be confirmed first.';
   }
+  if (workingSlate.sport === 'MLB') {
+      try {
+      const eventCutoff = new Date(workingSlate.event.eventDate);
+      if (!Number.isFinite(eventCutoff.getTime()) || eventCutoff.getTime() <= Date.now()) throw new Error('Official MLB season stats were not applied because the slate cutoff is not in the future; this prevents post-cutoff season totals from leaking into a historical forecast.');
+      const season = eventCutoff.getUTCFullYear();
+      const [current, prior] = await Promise.all([fetchOfficialMlbSeasonRows(season), fetchOfficialMlbSeasonRows(season - 1)]);
+      const matched: string[] = [];
+      const missing: string[] = [];
+      const players = workingSlate.playerPool.map((player) => {
+        // StatsAPI uses MLB person IDs, which are not DraftKings/SportsDataIO IDs.
+        // Match only an unambiguous normalized name + exact current team row.
+        const statsPlayer = { ...player, identity: player.identity ? { ...player.identity, sportsDataIoId: undefined } : undefined };
+        const pitcher = /^(SP|RP|P)$/i.test(String(player.position ?? ''));
+        const currentRows = pitcher ? current.pitching : current.hitting;
+        const priorRows = pitcher ? prior.pitching : prior.hitting;
+        const currentRow = findRow(statsPlayer, currentRows);
+        const priorRow = findRow(statsPlayer, priorRows);
+        const currentGames = currentRow ? gamesPlayedFromRow(currentRow) : 0;
+        if ((!currentRow || currentGames <= 0) && !priorRow) { missing.push(player.playerName); return player; }
+        const weighted = deriveWeightedSeasonInputs('MLB', statsPlayer, currentRows, priorRows, currentSeasonWeight('MLB', currentGames));
+        if (!weighted.inputs) { missing.push(player.playerName); return player; }
+        matched.push(player.playerName);
+        return { ...player, projectionInputs: player.projectionInputs ?? weighted.inputs };
+      });
+      workingSlate = { ...workingSlate, playerPool: players };
+      const warnings = [`Official MLB Stats API ${season} season-to-date hitter/pitcher totals were used as a rate baseline (retrieved ${current.retrievedAt}); 70/30 current/prior season blending is provisional and not outcome-calibrated, and this is not a day-of projection.`];
+      if (matched.length) warnings.push(`Official MLB statistics matched exact normalized player name and team for ${matched.length}/${workingSlate.playerPool.length} slate players.`);
+      if (missing.length) warnings.push(`Official MLB season statistics had no unambiguous exact name/team match for ${missing.length} players: ${missing.slice(0, 12).join(', ')}${missing.length > 12 ? `, and ${missing.length - 12} more` : ''}.`);
+      stages.projectionDataSourceWarnings = [...((stages.projectionDataSourceWarnings as string[] | undefined) ?? []), ...warnings];
+      } catch (error) {
+      const warning = error instanceof Error ? error.message : 'Official MLB Stats API season-stat refresh failed.';
+      stages.projectionDataSourceWarnings = [...((stages.projectionDataSourceWarnings as string[] | undefined) ?? []), warning];
+      }
+    }
   // SportsDataIO is authoritative for CFB roster membership and injury status when its complete
   // team rosters resolve. It intentionally cannot confirm college starters. ESPN remains a
   // fallback only when SportsDataIO could not resolve a complete CFB roster.
@@ -632,7 +667,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   const portfolioConstraints = multiEntryGpp
     ? { ...(maxLineupOverlap !== undefined ? { maxLineupOverlap } : {}), ...(workingSlate.contest.format === 'SHOWDOWN' ? { maxCaptainExposure: 0.5 } : {}) }
     : maxLineupOverlap !== undefined ? { maxLineupOverlap } : undefined;
-  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, maxSearchNodes: boundedIntegerEnv('FDS_OPTIMIZER_MAX_SEARCH_NODES', 50_000, 1_000, 100_000), fieldSimulations: boundedIntegerEnv('FDS_FIELD_SIMULATIONS', 64, 16, 128), fieldMaxScoreComparisons: boundedIntegerEnv('FDS_FIELD_SIMULATION_MAX_COMPARISONS', 2_000_000, 100_000, 5_000_000), ...(runOptions.fixedRosterSlots ? { fixedRosterSlots: runOptions.fixedRosterSlots } : {}), ...(portfolioConstraints ? { portfolioConstraints } : {}) });
+  const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, maxSearchNodes: boundedIntegerEnv('FDS_OPTIMIZER_MAX_SEARCH_NODES', 100_000, 1_000, 100_000), fieldSimulations: boundedIntegerEnv('FDS_FIELD_SIMULATIONS', 64, 16, 128), fieldMaxScoreComparisons: boundedIntegerEnv('FDS_FIELD_SIMULATION_MAX_COMPARISONS', 2_000_000, 100_000, 5_000_000), ...(runOptions.fixedRosterSlots ? { fixedRosterSlots: runOptions.fixedRosterSlots } : {}), ...(portfolioConstraints ? { portfolioConstraints } : {}) });
   assertOptimizer(optimizer, workingSlate);
   assertContestMetrics(optimizer);
   stages.optimizer = optimizer;
