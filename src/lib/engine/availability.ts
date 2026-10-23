@@ -127,7 +127,8 @@ export function parseAvailabilityRecords(payload: unknown, sport: Sport, retriev
     // marks phrases such as "not out" as OUT and loses the negation in provider descriptions.
     const inactive = /(?:^|\b)(inactive|out|scratched)(?:\b|$)/i.test(state) && !/\bnot\s+(?:inactive|out|scratched)\b/i.test(state);
     const battingOrder = readNumber(row, ['BattingOrder', 'battingOrder']); const position = readString(row, ['Position', 'position']);
-    const confirmedMlbStarter = sport === 'MLB' && confirmed && (battingOrder !== undefined || (starting && /^(P|SP)$/i.test(position ?? '')));
+    const confirmedStartingPitcher = row.__sportsDataIoStartingPitcher === true;
+    const confirmedMlbStarter = sport === 'MLB' && confirmed && (battingOrder !== undefined || confirmedStartingPitcher || (starting && /^(P|SP)$/i.test(position ?? '')));
     const status: AvailabilityRecord['status'] = inactive ? (/(out|scratched|doubtful)/i.test(state) ? 'OUT' : 'INACTIVE') : confirmedMlbStarter ? 'CONFIRMED_STARTER' : confirmed && starting ? 'ACTIVE' : available === false ? 'INACTIVE' : 'PROJECTED';
     const roleStatus: NonNullable<SlatePlayer['availability']>['roleStatus'] = sport === 'MLB' ? (confirmedMlbStarter ? 'CONFIRMED_STARTER' : 'UNKNOWN') : confirmed && starting ? 'EXPECTED_STARTER' : 'ROLE_UNCONFIRMED';
     return [{ playerName, team, providerPlayerId: readString(row, ['PlayerID', 'PlayerId', 'playerId']), status, roleStatus, confirmed, battingOrder, updatedAt: readString(row, ['Updated', 'DateTime', 'updatedAt']), note: /doubtful|questionable|probable/i.test(state) ? state : undefined }];
@@ -140,10 +141,30 @@ function roleStatusFor(sport: Sport, record: AvailabilityRecord): NonNullable<Sl
   if (record.status === 'OUT' || record.status === 'INACTIVE' || record.status === 'NOT_IN_CONFIRMED_LINEUP') return 'NOT_STARTER';
   return 'ROLE_UNCONFIRMED';
 }
-function extractProviderPlayerRows(payload: unknown): unknown[] { if (!Array.isArray(payload)) return []; return payload.flatMap((game) => { const row = asRecord(game); if (!row) return []; return ['HomeBattingLineup', 'AwayBattingLineup'].flatMap((key) => Array.isArray(row[key]) ? row[key] : []).concat(['HomeStartingPitcher', 'AwayStartingPitcher'].flatMap((key) => row[key] && typeof row[key] === 'object' ? [row[key]] : [])); }); }
+function extractProviderPlayerRows(payload: unknown): unknown[] {
+  if (!Array.isArray(payload)) return [];
+  return payload.flatMap((value) => {
+    const game = asRecord(value);
+    if (!game) return [];
+    const rows: Array<Record<string, unknown>> = [];
+    for (const [lineupKey, teamKey] of [['HomeBattingLineup', 'HomeTeam'], ['AwayBattingLineup', 'AwayTeam']] as const) {
+      const team = readString(game, [teamKey]);
+      const lineup = Array.isArray(game[lineupKey]) ? game[lineupKey] as unknown[] : [];
+      for (const player of lineup) {
+        const row = asRecord(player);
+        if (row) rows.push({ ...row, Team: readString(row, ['Team', 'team', 'TeamAbbreviation']) ?? team });
+      }
+    }
+    for (const [pitcherKey, teamKey] of [['HomeStartingPitcher', 'HomeTeam'], ['AwayStartingPitcher', 'AwayTeam']] as const) {
+      const pitcher = asRecord(game[pitcherKey]);
+      if (pitcher) rows.push({ ...pitcher, Team: readString(pitcher, ['Team', 'team', 'TeamAbbreviation']) ?? readString(game, [teamKey]), __sportsDataIoStartingPitcher: true });
+    }
+    return rows;
+  });
+}
 function identityKey(name: string, team?: string): string { return `${normalizeProviderName(name)}|${normalizeTeamCode(team)}`; }
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
-function readString(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) if (typeof record[key] === 'string' && String(record[key]).trim()) return String(record[key]).trim(); return undefined; }
+function readString(record: Record<string, unknown>, keys: string[]): string | undefined { for (const key of keys) { const value = record[key]; if ((typeof value === 'string' || typeof value === 'number') && String(value).trim()) return String(value).trim(); } return undefined; }
 function fullName(record: Record<string, unknown>): string | undefined { const first = readString(record, ['FirstName', 'firstName']); const last = readString(record, ['LastName', 'lastName']); return first && last ? `${first} ${last}` : first ?? last; }
 function readNumber(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'number' && Number.isFinite(value)) return value; if (typeof value === 'string' && Number.isFinite(Number(value))) return Number(value); } return undefined; }
 function readBoolean(record: Record<string, unknown>, keys: string[]): boolean { for (const key of keys) { if (typeof record[key] === 'boolean') return record[key] as boolean; if (record[key] === 1 || record[key] === '1' || String(record[key]).toLowerCase() === 'true') return true; } return false; }

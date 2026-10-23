@@ -84,19 +84,15 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   if (excludedPlayers.length) { const names = excludedPlayers.map((player) => player.playerName); warnings.push(`${excludedPlayers.length} player(s) have no projection and were excluded from lineup generation: ${names.slice(0, 10).join(', ')}${names.length > 10 ? `, and ${names.length - 10} more` : ''}.`); }
   const ineligiblePlayers = input.validatedSlate.playerPool.filter((player) => isExplicitlyUnavailable(player));
   if (ineligiblePlayers.length) warnings.push(`${ineligiblePlayers.length} player(s) excluded from lineup generation because availability is explicitly OUT/INACTIVE or the player was not found on the complete provider roster: ${ineligiblePlayers.map((player) => player.playerName).slice(0, 10).join(', ')}.`);
-  // An MLB starting pitcher is not interchangeable with an unconfirmed player. A DraftKings
-  // slate can contain eligible players before the official starters are posted, and UNKNOWN or
-  // PROJECTED does not verify that the pitcher will actually take the mound. Relievers remain
-  // eligible unless explicitly unavailable because they can enter the game without being the
-  // confirmed starter. This prevents stale/future starter projections from producing a captain
-  // who is not pitching while preserving valid bullpen options.
-  const unconfirmedMlbStarters = input.validatedSlate.sport === 'MLB'
-    ? input.validatedSlate.playerPool.filter((player) => /^(SP|P)$/i.test(String(player.position ?? '').trim()) && player.availability?.status !== 'CONFIRMED_STARTER')
+  // A provisional MLB roster is not an entry-ready player pool. Provider FPPG can make
+  // unconfirmed reserves and relievers look like strong values, so require current confirmed
+  // starting-lineup status for every new roster assignment. Existing locked assignments remain
+  // preserved during late swap; new picks must wait for confirmed lineup data.
+  const unconfirmedMlbPlayers = input.validatedSlate.sport === 'MLB'
+    ? input.validatedSlate.playerPool.filter((player) => player.availability?.status !== 'CONFIRMED_STARTER' && !fixedPlayerIds.has(player.playerId))
     : [];
-  if (unconfirmedMlbStarters.length) warnings.push(`${unconfirmedMlbStarters.length} MLB starting pitcher(s) excluded because they were not confirmed starters: ${unconfirmedMlbStarters.map((player) => player.playerName).slice(0, 10).join(', ')}${unconfirmedMlbStarters.length > 10 ? `, and ${unconfirmedMlbStarters.length - 10} more` : ''}.`);
-  const excludedIds = new Set(unconfirmedMlbStarters.map((player) => player.playerId));
-  const nonStarters = input.validatedSlate.sport === 'MLB' ? input.validatedSlate.playerPool.filter((player) => player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP') : [];
-  if (nonStarters.length) warnings.push(`${nonStarters.length} MLB player(s) excluded because they were not in the confirmed starting lineup: ${nonStarters.map((player) => player.playerName).slice(0, 10).join(', ')}${nonStarters.length > 10 ? `, and ${nonStarters.length - 10} more` : ''}.`);
+  if (unconfirmedMlbPlayers.length) warnings.push(`${unconfirmedMlbPlayers.length} MLB player(s) excluded because their current starting-lineup status is not confirmed: ${unconfirmedMlbPlayers.map((player) => player.playerName).slice(0, 10).join(', ')}${unconfirmedMlbPlayers.length > 10 ? `, and ${unconfirmedMlbPlayers.length - 10} more` : ''}. Wait for the official lineup feed and scan again before using a new lineup.`);
+  const excludedIds = new Set(unconfirmedMlbPlayers.map((player) => player.playerId));
   const workingInput: OptimizerInput = { ...input, validatedSlate: { ...input.validatedSlate, playerPool: input.validatedSlate.playerPool.filter((player) => projectionByPlayer.has(player.playerId) && (!isExplicitlyUnavailable(player) || fixedPlayerIds.has(player.playerId)) && (!excludedIds.has(player.playerId) || fixedPlayerIds.has(player.playerId))) } };
 
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
@@ -124,7 +120,9 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   enumerate(slots, 0, {}, 0, 0, new Set(), workingInput, projectionByPlayer, playersByValue, minSalaryBySlot, generated, Number.MAX_SAFE_INTEGER, minSalaryUsed, searchControl, fixedRosterSlots);
   const uniqueGenerated = deduplicateSlotPermutations(generated);
   const exhaustive = !searchControl.truncated;
-  if (!uniqueGenerated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
+  if (!uniqueGenerated.length) return blocked(input.validatedSlate, profile, now, input.validatedSlate.sport === 'MLB' && unconfirmedMlbPlayers.length
+    ? [`No legal lineup can be built from confirmed MLB starters. ${unconfirmedMlbPlayers.length} unconfirmed player(s) were excluded; wait for the official starting lineups and scan again.`]
+    : minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
   if (!exhaustive) warnings.push(`Lineup search stopped at the ${searchControl.budget}-node work budget; results are bounded and may omit better legal builds.`);
   if (exhaustive && searchControl.prunedBranches) warnings.push(`Objective bounds proved the retained top ${uniqueGenerated.length} Max FPTS lineup(s); equivalent slot permutations were removed.`);
   else if (exhaustive) warnings.push(`Exhaustive legal lineup enumeration completed (${uniqueGenerated.length} unique roster assignments after equivalent-slot permutations were removed).`);

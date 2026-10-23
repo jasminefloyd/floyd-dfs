@@ -79,8 +79,18 @@ export class SportsDataIoClient {
       const byKey = new Map(rosterRecords.map((record) => [`${normalizeProviderName(record.playerName)}|${normalizeTeamCode(record.team)}`, record]));
       for (const record of lineupRecords) byKey.set(`${normalizeProviderName(record.playerName)}|${normalizeTeamCode(record.team)}`, record);
       const records = [...byKey.values()];
-      const confirmedTeams = new Set(lineupRecords.filter((record) => record.confirmed && record.battingOrder !== undefined).map((record) => normalizeTeamCode(record.team)).filter(Boolean));
-      const confirmedLineupAvailable = slateTeams.size > 1 ? [...slateTeams].every((team) => confirmedTeams.has(team)) : records.some((record) => record.confirmed && record.battingOrder !== undefined);
+      const confirmedBattingOrdersByTeam = new Map<string, Set<number>>();
+      for (const record of lineupRecords) {
+        if (!record.confirmed || record.battingOrder === undefined || !record.team) continue;
+        const team = normalizeTeamCode(record.team);
+        const battingOrders = confirmedBattingOrdersByTeam.get(team) ?? new Set<number>();
+        battingOrders.add(record.battingOrder);
+        confirmedBattingOrdersByTeam.set(team, battingOrders);
+      }
+      // One confirmed row is not proof that MLB has locked the whole batting order. Treat the
+      // feed as authoritative for this slate only after all nine batting spots are confirmed
+      // for every team represented in the slate.
+      const confirmedLineupAvailable = [...slateTeams].every((team) => (confirmedBattingOrdersByTeam.get(team)?.size ?? 0) >= 9);
       return { ...parsed, retrievedAt, records, confirmedLineupAvailable, note: `SportsDataIO MLB roster profiles and lineup records scoped to ${[...slateTeams].join('/')}.` };
     }
     if (slate.sport === 'CFB') return this.getCfbRosterSnapshot(slate, signal);
