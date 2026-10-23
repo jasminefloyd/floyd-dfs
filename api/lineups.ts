@@ -31,8 +31,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const run = generationRunId ? runById.get(generationRunId) : undefined;
       const requestPayload = asRecord(run?.request_payload);
       const input = asRecord(requestPayload?.input);
+      const savedSlate = asRecord(input?.validatedSlate);
+      const contest = asRecord(savedSlate?.contest);
       const contestResult = latestResultByLineup.get(String(row.id));
-      return { ...row, latest_revision: revisionsByLineup.get(String(row.id)) ?? 0, ...(contestResult ?? {}), contest_result: contestResult ?? null, generation_run_id: generationRunId ?? null, contest_name: typeof input?.contestName === 'string' ? input.contestName : null, sport: typeof input?.sport === 'string' ? input.sport : null, contest_format: typeof input?.contestFormat === 'string' ? input.contestFormat : null };
+      return { ...row, latest_revision: revisionsByLineup.get(String(row.id)) ?? 0, ...(contestResult ?? {}), contest_result: contestResult ?? null, generation_run_id: generationRunId ?? null, contest_id: typeof contest?.draftKingsContestId === 'string' ? contest.draftKingsContestId : null, contest_name: typeof contest?.name === 'string' ? contest.name : typeof input?.contestName === 'string' ? input.contestName : null, sport: typeof savedSlate?.sport === 'string' ? savedSlate.sport : typeof input?.sport === 'string' ? input.sport : null, contest_format: typeof contest?.format === 'string' ? contest.format : typeof input?.contestFormat === 'string' ? input.contestFormat : null };
     });
     res.status(200).json({ lineups });
   } catch (error) { respondError(req, res, error); }

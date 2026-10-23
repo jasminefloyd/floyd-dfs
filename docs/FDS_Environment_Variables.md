@@ -13,7 +13,7 @@ This is a names-and-purpose inventory. Store values in ignored local `.env` file
 | `OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Optional server-side research/model providers. Experimental numeric effects remain separately disabled by default. |
 | `THE_ODDS_API_KEY`, `ODDS_API_BASE_URL`, `BALLDONTLIE_KEY`, `BALLDONTLIE_BASE_URL`, `SERPAPI_API_KEY`, `FIRECRAWL_API_KEY`, `FIELD_SENTIMENT_URL` | Optional research, odds, injury, and field-sentiment integrations. Use only with approved entitlements and configured request budgets. |
 | `ESPN_BASE_URL` | ESPN API root used by game-state/research adapters. |
-| `FDS_PLAYER_PHOTO_ALLOWED_HOSTS`, `FDS_PLAYER_PHOTO_CACHE_TTL_DAYS` | Exact HTTPS hostname allowlist and tenant-scoped photo metadata revalidation period. Keep hosts empty until provider rights/hostnames are reviewed. |
+| `FDS_PLAYER_PHOTO_ALLOWED_HOSTS`, `FDS_PLAYER_PHOTO_CACHE_TTL_DAYS` | Exact HTTPS hostname allowlist and tenant-scoped photo metadata revalidation period. ESPN roster headshots use `a.espncdn.com`; enable only after image rights and attribution are reviewed. |
 | `FDS_RESEARCH_QUERY_BUDGET`, `FDS_RESEARCH_BATCH_SIZE`, `FDS_AVAILABILITY_FRESHNESS_MINUTES`, `FDS_CONTEXT_FRESHNESS_MINUTES` | Bounded research fan-out and evidence freshness values. |
 | `FDS_SWAP_PLAN_FRESHNESS_MINUTES`, `FDS_OPTIMIZER_MAX_SEARCH_NODES`, `FDS_FIELD_SIMULATIONS`, `FDS_FIELD_SIMULATION_MAX_COMPARISONS` | Swap expiry and bounded optimizer/field-diagnostic workloads. Monitor before increasing. |
 | `FDS_ENABLE_EXPERIMENTAL_CONTEXT_EFFECTS` | Numeric context-feature kill switch; keep `false` until scoped P11 evidence and approval exist. |

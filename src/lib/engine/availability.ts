@@ -1,6 +1,6 @@
 import type { SlatePlayer, Sport, ValidatedSlate } from './contracts.js';
 
-export interface AvailabilityRecord { playerName: string; team?: string; providerPlayerId?: string; status: NonNullable<SlatePlayer['availability']>['status']; roleStatus?: NonNullable<SlatePlayer['availability']>['roleStatus']; confirmed: boolean; battingOrder?: number; updatedAt?: string; note?: string; }
+export interface AvailabilityRecord { playerName: string; team?: string; providerPlayerId?: string; photoUrl?: string; status: NonNullable<SlatePlayer['availability']>['status']; roleStatus?: NonNullable<SlatePlayer['availability']>['roleStatus']; confirmed: boolean; battingOrder?: number; updatedAt?: string; note?: string; }
 export interface AvailabilitySnapshot { source: string; retrievedAt: string; records: AvailabilityRecord[]; confirmedLineupAvailable: boolean; rosterComplete?: boolean; eventId?: string; eventTeams?: string[]; note?: string; diagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number; retrievedAt: string }>; }
 
 export function normalizeProviderName(value: string): string { return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\b(jr|sr|ii|iii|iv|v)\b\.?/g, '').replace(/[^a-z0-9]/g, ''); }
@@ -20,7 +20,7 @@ export function withDegradedAvailability(slate: ValidatedSlate, message: string)
   return { ...slate, validation: { ...slate.validation, status, warnings: [...slate.validation.warnings, message] } };
 }
 
-export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot, now?: Date): ValidatedSlate {
+export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: AvailabilitySnapshot, now?: Date, allowedPhotoHosts: string[] = []): ValidatedSlate {
   const retrievedAt = Date.parse(snapshot.retrievedAt);
   const staleAfterMs = 12 * 60 * 60 * 1000;
   const stale = now !== undefined && (!Number.isFinite(retrievedAt) || retrievedAt > now.getTime() + 5 * 60 * 1000 || (now.getTime() - retrievedAt > staleAfterMs));
@@ -70,10 +70,15 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
       return { ...player, availability: { status: confirmedMlbLineup ? 'NOT_IN_CONFIRMED_LINEUP' as const : notInProviderRoster ? 'NOT_IN_PROVIDER_ROSTER' as const : 'UNKNOWN' as const, roleStatus: 'UNKNOWN' as const, confirmed: false, source: snapshot.source, retrievedAt: snapshot.retrievedAt, mappedBy: 'UNMAPPED' as const, note: providerIdentityConflict ? 'Provider ID contradicted the player name/team; identity was rejected.' : records.length > 1 ? 'Provider identity match was ambiguous.' : confirmedMlbLineup ? 'No matching record in the confirmed lineup; treated as a non-starter for primary optimization.' : notInProviderRoster ? 'DraftKings player could not be matched to the complete provider roster; excluded from the primary slate.' : snapshot.note ?? 'Provider returned no exact name/team match.' } };
     }
     const record = records[0];
-    if (player.availability && snapshot.source.toUpperCase().includes('ESPN') && !shouldReplaceAvailability(player.availability, record)) return player;
+    const isEspn = snapshot.source.toUpperCase().includes('ESPN');
     const mappedBy: NonNullable<SlatePlayer['availability']>['mappedBy'] = providerIdRecords.length ? 'PROVIDER_ID' : exactRecords.length ? 'NAME_AND_TEAM' : 'NAME_ONLY';
-    const identity = record.providerPlayerId ? snapshot.source.toUpperCase().includes('ESPN') ? { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : mappedBy } : snapshot.source.toUpperCase().includes('SPORTSDATAIO') ? { ...player.identity, sportsDataIoId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : mappedBy } : player.identity : player.identity;
-    return { ...player, ...(identity ? { identity } : {}), availability: { status: record.status, roleStatus: record.roleStatus ?? roleStatusFor(slate.sport, record), confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
+    const identity = record.providerPlayerId && isEspn ? { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy } : player.identity;
+    const photoIdentityVerified = providerIdRecords.length === 1 || exactRecords.length === 1;
+    const photoUrl = isEspn && photoIdentityVerified ? approvedPhotoUrl(record.photoUrl, allowedPhotoHosts) : undefined;
+    const photo = photoUrl ? { tenantId: slate.tenantId, playerId: player.playerId, providerId: record.providerPlayerId, source: 'ESPN', url: photoUrl, retrievedAt: snapshot.retrievedAt, verifiedAt: snapshot.retrievedAt } : player.photo;
+    if (player.availability && isEspn && !shouldReplaceAvailability(player.availability, record)) return { ...player, ...(identity ? { identity } : {}), ...(photoUrl ? { imageUrl: photoUrl, photo } : {}) };
+    const resolvedIdentity = record.providerPlayerId ? isEspn ? identity : snapshot.source.toUpperCase().includes('SPORTSDATAIO') ? { ...player.identity, sportsDataIoId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : mappedBy } : player.identity : player.identity;
+    return { ...player, ...(resolvedIdentity ? { identity: resolvedIdentity } : {}), ...(photoUrl ? { imageUrl: photoUrl, photo } : {}), availability: { status: record.status, roleStatus: record.roleStatus ?? roleStatusFor(slate.sport, record), confirmed: record.confirmed, source: snapshot.source, retrievedAt: snapshot.retrievedAt, providerPlayerId: record.providerPlayerId, mappedBy, battingOrder: record.battingOrder, note: record.note ?? (record.battingOrder ? `Batting order ${record.battingOrder}.` : undefined) } };
   });
   const isExcluded = (player: SlatePlayer) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE' || player.availability?.status === 'NOT_IN_CONFIRMED_LINEUP' || player.availability?.status === 'NOT_IN_PROVIDER_ROSTER';
   const removed = playerPool.filter(isExcluded).length;
@@ -90,6 +95,15 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
   else if (snapshot.rosterComplete && ['NFL', 'CFB'].includes(slate.sport)) warnings.push(`${snapshot.source} verified roster membership for the primary ${slate.sport} slate, but did not verify starters; remaining role status is not a confirmed starting lineup.`);
   else warnings.push(`${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
   return { ...slate, playerPool: filtered, providerDiagnostics: [...(slate.providerDiagnostics ?? []), ...(snapshot.diagnostics ?? [])], validation: { ...slate.validation, warnings } };
+}
+
+function approvedPhotoUrl(value: string | undefined, allowedHosts: string[]): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const hosts = new Set(allowedHosts.map((host) => host.trim().toLowerCase()).filter(Boolean));
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port && hosts.has(url.hostname.toLowerCase()) ? url.toString() : undefined;
+  } catch { return undefined; }
 }
 
 function shouldReplaceAvailability(existing: NonNullable<SlatePlayer['availability']>, incoming: AvailabilityRecord): boolean {

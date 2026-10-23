@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../../server/runtime.js';
+import { getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../../server/runtime.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
@@ -7,13 +7,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const context = await tenantContext(req); await requireOwnedLineup(context, String(req.query.lineupId ?? ''));
     const id = String(req.query.lineupId ?? '');
     const body = parseBody(req);
-    const contestId = text(body.contestId);
+    const savedSlate = await getOwnedLineupSlate(context, id);
+    const requestedContestId = text(body.contestId);
+    if (requestedContestId && savedSlate?.contest.draftKingsContestId && requestedContestId !== savedSlate.contest.draftKingsContestId) throw new Error('Contest ID does not match the contest selected for this saved lineup.');
+    const contestId = requestedContestId || savedSlate?.contest.draftKingsContestId || '';
     const externalEntryId = text(body.externalEntryId);
-    const contestName = text(body.contestName);
-    const sport = text(body.sport).toUpperCase();
-    const contestFormat = text(body.contestFormat).toUpperCase();
-    if (Boolean(contestId) !== Boolean(externalEntryId)) throw new Error('Provide both the DraftKings contest ID and external entry ID so the official standings can be matched later.');
-    if (contestId && (!['MLB','WNBA','NFL','CFB','GOLF','NBA'].includes(sport) || !['CLASSIC','SHOWDOWN'].includes(contestFormat))) throw new Error('A linked DraftKings entry requires a supported sport and contest format.');
+    const contestName = text(body.contestName) || savedSlate?.contest.name || '';
+    const sport = text(body.sport).toUpperCase() || savedSlate?.sport || '';
+    const contestFormat = text(body.contestFormat).toUpperCase() || savedSlate?.contest.format || '';
+    if (externalEntryId && !contestId) throw new Error('The selected contest could not be recovered for this lineup; refresh the run before linking a DraftKings entry ID.');
+    if (externalEntryId && (!['MLB','WNBA','NFL','CFB','GOLF','NBA'].includes(sport) || !['CLASSIC','SHOWDOWN'].includes(contestFormat))) throw new Error('A linked DraftKings entry requires a supported sport and contest format.');
 
     const current = await context.db.from('floyd_dfs_generated_lineups').select('id,status,lineup_payload,selection_run_id').eq('id', id).eq('tenant_id', context.tenantId).maybeSingle();
     if (current.error) throw current.error;
@@ -44,10 +47,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const selectionPackage = output.get('SELECTION')?.output_payload as Record<string, unknown> | undefined;
       const snapshot = await context.db.from('floyd_dfs_lock_snapshots').insert({ tenant_id: context.tenantId, generated_lineup_id: id, locked_at: new Date().toISOString(), lineup_payload: result.data.lineup_payload, projection_snapshot: projection ?? {}, game_script: null, risk_flags: [], research_version: Number(output.get('RESEARCH')?.version ?? 1), adjustment_version: Number(output.get('SPORT_ADJUSTMENT')?.version ?? 1), projection_version: Number(output.get('PROJECTION')?.version ?? 1), optimization_version: Number(output.get('OPTIMIZE')?.version ?? 1), selection_version: Number(output.get('SELECTION')?.version ?? 1) });
       if (snapshot.error) throw snapshot.error;
-      res.status(200).json({ lineupId: id, status: 'ENTERED', entryLinked: Boolean(contestId), lockSnapshotCreated: true, selection: selectionPackage ?? null });
+      res.status(200).json({ lineupId: id, status: 'ENTERED', contestId: contestId || null, entryLinked: Boolean(externalEntryId), lockSnapshotCreated: true, selection: selectionPackage ?? null });
       return;
     }
-    res.status(200).json({ lineupId: id, status: 'ENTERED', entryLinked: Boolean(contestId), lockSnapshotCreated: false });
+    res.status(200).json({ lineupId: id, status: 'ENTERED', contestId: contestId || null, entryLinked: Boolean(externalEntryId), lockSnapshotCreated: false });
   } catch (error) { respondError(req, res, error); }
 }
 

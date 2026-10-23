@@ -154,15 +154,12 @@ export function LineupDisplay({ lineups, manifest, selectedLineupRank, onSelectL
     const id = lineup.id;
     if (!id || savingIds.has(id)) return;
     const entry = entryDetails[id] ?? { contestId: '', externalEntryId: '' };
-    if (!entry.contestId.trim() || !entry.externalEntryId.trim()) {
-      setSaveErrors((current) => ({ ...current, [id]: 'Add the DraftKings contest ID and entry ID from your submitted entry.' }));
-      return;
-    }
+    const contestId = entry.contestId.trim() || String(manifest?.slate?.contest_id ?? '');
     setSavingIds((current) => new Set(current).add(id));
     setSaveErrors((current) => { const next = { ...current }; delete next[id]; return next; });
     try {
       if (!onSaveLineup) throw new Error('Mark as entered is unavailable for this lineup.');
-      await onSaveLineup(lineup, { contestId: entry.contestId.trim(), externalEntryId: entry.externalEntryId.trim() });
+      await onSaveLineup(lineup, { contestId, externalEntryId: entry.externalEntryId.trim() });
       setEnteredIds((current) => new Set(current).add(id));
     } catch (error) {
       setSaveErrors((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Unable to mark this lineup as entered. Try again.' }));
@@ -416,8 +413,8 @@ export function LineupDisplay({ lineups, manifest, selectedLineupRank, onSelectL
                 {/* Action Buttons */}
                 <div className="border-t border-slate-200 bg-slate-50 p-3.5 sm:p-4">
                   <div className="mb-3 grid gap-2 sm:grid-cols-2">
-                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">DraftKings contest ID<input value={entryDetails[lineup.id ?? '']?.contestId ?? manifest?.slate?.contest_id ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: event.target.value, externalEntryId: current[lineup.id!]?.externalEntryId ?? '' } }))} placeholder="Contest ID" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
-                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Your DraftKings entry ID<input value={entryDetails[lineup.id ?? '']?.externalEntryId ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: current[lineup.id!]?.contestId ?? manifest?.slate?.contest_id ?? '', externalEntryId: event.target.value } }))} placeholder="Entry ID from DraftKings" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
+                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">DraftKings contest ID (optional; filled from selected contest)<input value={entryDetails[lineup.id ?? '']?.contestId ?? manifest?.slate?.contest_id ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: event.target.value, externalEntryId: current[lineup.id!]?.externalEntryId ?? '' } }))} placeholder="Filled from selected contest" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
+                    <label className="text-[10px] font-bold uppercase tracking-wide text-slate-500">DraftKings entry ID (optional; add later to auto-match standings)<input value={entryDetails[lineup.id ?? '']?.externalEntryId ?? ''} onChange={(event) => lineup.id && setEntryDetails((current) => ({ ...current, [lineup.id!]: { contestId: current[lineup.id!]?.contestId ?? manifest?.slate?.contest_id ?? '', externalEntryId: event.target.value } }))} placeholder="Can be linked later" className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs normal-case tracking-normal text-slate-800" /></label>
                   </div>
                   <button
                     type="button"
@@ -425,9 +422,9 @@ export function LineupDisplay({ lineups, manifest, selectedLineupRank, onSelectL
                     onClick={() => void markEntered(lineup)}
                     className="w-full rounded-xl bg-[#0b1f3a] py-3 text-sm font-black text-white transition-colors duration-[var(--transition-fast)] hover:bg-[#061426] disabled:cursor-default disabled:bg-emerald-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500"
                   >
-                    {savingIds.has(lineup.id ?? '') ? 'Saving…' : lineup.id && enteredIds.has(lineup.id) ? 'Link / update DraftKings entry ID' : 'Record external entry'}
+                    {savingIds.has(lineup.id ?? '') ? 'Saving…' : lineup.id && enteredIds.has(lineup.id) ? 'Link / update DraftKings entry ID' : 'Record as entered'}
                   </button>
-                  <p className="mt-2 text-center text-[11px] text-slate-500">Saves the DraftKings contest and entry IDs so official standings can be matched later. It does not submit the lineup.</p>
+                  <p className="mt-2 text-center text-[11px] text-slate-500">Records this lineup as entered in the selected contest. Entry ID is optional and can be added later for automatic standings matching. It does not submit the lineup.</p>
                   {lineup.id && saveErrors[lineup.id] ? <p role="alert" className="mt-2 text-sm font-semibold text-red-700">{saveErrors[lineup.id]}</p> : null}
                   <div className="mt-3 border-t border-slate-200 pt-3">
                     <button type="button" disabled={!lineup.id || !enteredIds.has(lineup.id) || Boolean(swapPlansByLineup[lineup.id]?.loading)} onClick={() => void refreshAlternatives(lineup)} className="w-full rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-2.5 text-sm font-black text-cyan-950 disabled:cursor-not-allowed disabled:opacity-50">{swapPlansByLineup[lineup.id ?? '']?.loading ? 'Checking contest and game status…' : 'Refresh alternatives'}</button>

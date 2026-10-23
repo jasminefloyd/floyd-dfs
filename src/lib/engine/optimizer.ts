@@ -104,7 +104,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   // Search always continues until the node budget or the legal tree is exhausted. `maxCandidates`
   // limits only the returned shortlist, never the number of early legal leaves inspected.
   const maxFptsObjective = isMaxFptsProfile(profile);
-  const searchControl = { visited: 0, budget: boundedInteger(options.maxSearchNodes, 50_000, 1_000, 100_000), truncated: false, objectiveBounded: maxFptsObjective, targetLineups: maxCandidates, bestTopK: [] as Array<{ key: string; score: number }>, seenLineups: new Set<string>(), candidatesEvaluated: 0, prunedBranches: 0, slotUpperBounds: {} as Record<string, number> };
+  const searchControl = { visited: 0, budget: boundedInteger(options.maxSearchNodes, 50_000, 1_000, 100_000), truncated: false, objectiveBounded: maxFptsObjective, targetLineups: maxCandidates, bestTopK: [] as Array<{ key: string; score: number }>, seenLineups: new Set<string>(), candidatesEvaluated: 0, prunedBranches: 0 };
   // Sorts by RAW projected value aligned with the actual objective being scored (median/ceiling,
   // weighted the same way scoreCandidate() weights them below) -- not by salary efficiency
   // (points per $1k). Efficiency systematically ranks cheap, decent-production bench players
@@ -120,9 +120,8 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const searchValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); if (!projection) return 0; const mean = meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50); return mean * (profile.meanWeight ?? 0) + projection.projectedOutcomes.medianP50 * profile.medianWeight + projection.projectedOutcomes.ceilingP90 * profile.ceilingWeight; };
   const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
   const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
-  searchControl.slotUpperBounds = Object.fromEntries(Object.keys(workingInput.validatedSlate.rosterRules.slots).map((slot) => [slot, Math.max(0, ...playersByValue.filter((player) => player.eligibility[slot]).map((player) => { const projection = projectionByPlayer.get(player.playerId); return projection ? meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50) * (workingInput.validatedSlate.rosterRules.slots[slot].fantasyMultiplier ?? 1) : Number.NEGATIVE_INFINITY; }))]));
   const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, Number.MAX_SAFE_INTEGER, minSalaryUsed, searchControl, fixedRosterSlots);
+  enumerate(slots, 0, {}, 0, 0, new Set(), workingInput, projectionByPlayer, playersByValue, minSalaryBySlot, generated, Number.MAX_SAFE_INTEGER, minSalaryUsed, searchControl, fixedRosterSlots);
   const uniqueGenerated = deduplicateSlotPermutations(generated);
   const exhaustive = !searchControl.truncated;
   if (!uniqueGenerated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
@@ -149,7 +148,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   if (contestSimulation.status === 'UNAVAILABLE') warnings.push(`Contest simulation unavailable: ${contestSimulation.reason}`);
   else if (contestSimulation.status === 'PARTIAL') warnings.push(`Contest simulation is partial: ${contestSimulation.reason}`);
   const best = allRanked[0];
-  const maxFptsUpperBound = maxFptsObjective ? maxFptsUpperBoundForSlots(workingInput) : undefined;
+  const maxFptsUpperBound = maxFptsObjective && best ? exhaustive ? (best.expectedPoints ?? best.median) : maxFptsUpperBoundForSlots(workingInput) : undefined;
   const objectiveGap = maxFptsUpperBound === undefined || !best ? undefined : Math.max(0, maxFptsUpperBound - (best.expectedPoints ?? best.median));
   return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' || !exhaustive || contestSimulation.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED', searchCompleteness: exhaustive ? 'EXHAUSTIVE' : 'BOUNDED', ...(exhaustive ? { optimalityGap: 0 } : {}), searchDiagnostics: { algorithm: maxFptsObjective ? 'DETERMINISTIC_BRANCH_AND_BOUND' : 'DETERMINISTIC_VALUE_ORDERED_DFS', terminationReason: !exhaustive ? 'NODE_BUDGET' : searchControl.prunedBranches ? 'OBJECTIVE_BOUND_PROVEN' : 'SEARCH_SPACE_EXHAUSTED', nodesVisited: searchControl.visited, elapsedMilliseconds: Math.max(0, Date.now() - startedAt), candidatesEvaluated: searchControl.candidatesEvaluated, uniqueLineups: uniqueGenerated.length, bestIncumbentObjective: best ? objectiveScore(best, profile) : undefined, ...(maxFptsUpperBound !== undefined ? { validUpperBound: maxFptsUpperBound, objectiveGap } : {}) }, ...(options.portfolioConstraints ? { portfolioConstraints: options.portfolioConstraints } : {}), contestSimulation: { status: contestSimulation.status, simulations: contestSimulation.simulations, fieldEntries: contestSimulation.fieldEntries, fieldModel: contestSimulation.fieldModel, payoutModel: contestSimulation.payoutModel, reason: contestSimulation.reason, seed: contestSimulation.seed, ownershipProvenance: contestSimulation.ownershipProvenance, dependenceModel: contestSimulation.dependenceModel, rulesVersion: contestSimulation.rulesVersion }, ...(cashLineEstimate ? { cashLineEstimate } : {}) };
 }
@@ -235,12 +234,12 @@ function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<str
   return result;
 }
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, currentExpectedPoints: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number; truncated: boolean; objectiveBounded: boolean; targetLineups: number; bestTopK: Array<{ key: string; score: number }>; seenLineups: Set<string>; candidatesEvaluated: number; prunedBranches: number; slotUpperBounds: Record<string, number> }, fixedRosterSlots: Record<string, string>): void {
+function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, currentExpectedPoints: number, used: Set<string>, input: OptimizerInput, projectionByPlayer: Map<string, ProjectionPackage['players'][number]>, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number; truncated: boolean; objectiveBounded: boolean; targetLineups: number; bestTopK: Array<{ key: string; score: number }>; seenLineups: Set<string>; candidatesEvaluated: number; prunedBranches: number }, fixedRosterSlots: Record<string, string>): void {
   if (output.length >= limit && !control.objectiveBounded) return;
   if (control.visited >= control.budget) { control.truncated = true; return; }
   control.visited += 1;
   if (control.objectiveBounded && control.bestTopK.length >= control.targetLineups) {
-    const remainingUpperBound = currentExpectedPoints + slots.slice(index).reduce((sum, slot) => sum + (control.slotUpperBounds[baseSlot(slot)] ?? 0), 0);
+    const remainingUpperBound = currentExpectedPoints + remainingSlotsUpperBound(slots, index, used, input, projectionByPlayer, playersByValue, fixedRosterSlots);
     const weakestRetained = control.bestTopK[control.bestTopK.length - 1].score;
     if (remainingUpperBound < weakestRetained - 1e-9) { control.prunedBranches += 1; return; }
   }
@@ -306,10 +305,54 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     used.add(player.playerId);
     const projection = input.projectionPackage.players.find((row) => row.playerId === player.playerId);
     const expectedPlayerPoints = projection ? meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50) * (input.validatedSlate.rosterRules.slots[ruleSlot]?.fantasyMultiplier ?? 1) : 0;
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, currentExpectedPoints + expectedPlayerPoints, used, input, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control, fixedRosterSlots);
+    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, currentExpectedPoints + expectedPlayerPoints, used, input, projectionByPlayer, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control, fixedRosterSlots);
     delete rosterSlots[slot];
     used.delete(player.playerId);
   }
+}
+
+// Recompute an optimistic bound for each branch after removing already-selected players.
+// The earlier static bound reused an assigned CPT as the hypothetical best player in every
+// remaining UTIL slot, so it was valid but too loose to finish common showdown searches.
+// Salary and team constraints remain relaxed here, preserving admissibility while making
+// the bound strictly tighter as the roster fills.
+function remainingSlotsUpperBound(slots: string[], index: number, used: Set<string>, input: OptimizerInput, projections: Map<string, ProjectionPackage['players'][number]>, players: SlatePlayer[], fixedRosterSlots: Record<string, string>): number {
+  const remaining = slots.slice(index);
+  const available = players.filter((player) => !(used.has(player.playerId) && input.validatedSlate.rosterRules.uniquePlayersRequired));
+  if (!input.validatedSlate.rosterRules.uniquePlayersRequired) {
+    let upperBound = 0;
+    for (const slot of remaining) {
+      const base = baseSlot(slot);
+      const best = available.filter((player) => player.eligibility[base] && (!fixedRosterSlots[slot] || fixedRosterSlots[slot] === player.playerId)).map((player) => {
+        const projection = projections.get(player.playerId);
+        return projection ? meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50) * (input.validatedSlate.rosterRules.slots[base]?.fantasyMultiplier ?? 1) : Number.NEGATIVE_INFINITY;
+      }).reduce((maximum, value) => Math.max(maximum, value), Number.NEGATIVE_INFINITY);
+      if (!Number.isFinite(best)) return Number.NEGATIVE_INFINITY;
+      upperBound += best;
+    }
+    return upperBound;
+  }
+  // With unique players, each remaining athlete can contribute at most once. Sum each
+  // athlete's best possible value in any remaining slot and take the best N distinct
+  // athletes. This remains optimistic (it relaxes slot matching, salary, and team rules)
+  // but avoids counting one top-projected player as every remaining Utility.
+  const bestValues: number[] = [];
+  for (const player of available) {
+    let best = Number.NEGATIVE_INFINITY;
+    for (const slot of remaining) {
+    const base = baseSlot(slot);
+      if (!player.eligibility[base]) continue;
+      const projection = projections.get(player.playerId);
+      if (!projection) continue;
+      const value = meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50)
+        * (input.validatedSlate.rosterRules.slots[base]?.fantasyMultiplier ?? 1);
+      if (value > best) best = value;
+    }
+    if (Number.isFinite(best)) bestValues.push(best);
+  }
+  bestValues.sort((a, b) => b - a);
+  if (bestValues.length < remaining.length) return Number.NEGATIVE_INFINITY;
+  return bestValues.slice(0, remaining.length).reduce((sum, value) => sum + value, 0);
 }
 
 function salaryForSlot(player: SlatePlayer, slot: string, rule?: { salaryMultiplier?: number }): number | undefined { return salaryForRosterSlot(player, slot, rule); }

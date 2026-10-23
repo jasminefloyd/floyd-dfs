@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:full": "vercel dev",
+    "dev:full": "vercel dev --listen 127.0.0.1:3000",
     "build": "tsc -b && vite build",
     "check:server": "tsc -p tsconfig.server.json",
     "test:parity": "node scripts/run-engine-parity.mjs",

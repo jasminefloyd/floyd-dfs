@@ -107,7 +107,9 @@ export class EspnProjectionClient {
           const name = text(athlete.fullName ?? athlete.displayName);
           if (!name) return [];
           const status = espnAvailabilityStatus(athlete);
-          return [{ playerName: name, team, providerPlayerId: text(athlete.id) || undefined, status, roleStatus: ['NFL', 'CFB'].includes(slate.sport) ? 'ROLE_UNCONFIRMED' : undefined, confirmed: false, updatedAt: new Date().toISOString(), note: ['NFL', 'CFB'].includes(slate.sport) ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
+          const headshot = asRecord(athlete.headshot);
+          const photoUrl = text(headshot?.href ?? athlete.headshot).trim();
+          return [{ playerName: name, team, providerPlayerId: text(athlete.id) || undefined, photoUrl: photoUrl || undefined, status, roleStatus: ['NFL', 'CFB'].includes(slate.sport) ? 'ROLE_UNCONFIRMED' : undefined, confirmed: false, updatedAt: new Date().toISOString(), note: ['NFL', 'CFB'].includes(slate.sport) ? 'Listed on ESPN roster; starting role was not confirmed by this source.' : undefined }];
         });
       } catch (error) { diagnostics.push({ provider: `ESPN ${slate.sport} roster ${team}`, status: 'FAILED', error: error instanceof Error ? error.message : `ESPN roster request failed for ${team}.`, retrievedAt: new Date().toISOString() }); return []; }
     }));

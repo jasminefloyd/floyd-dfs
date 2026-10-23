@@ -6,6 +6,13 @@ import { authenticatedHeaders } from './supabaseClient';
 type JsonRecord = Record<string, unknown>;
 const DEFAULT_FLOYD_DFS_API_URL = '';
 
+function apiErrorMessage(body: JsonRecord, response: Response, subject: string): string {
+  if (import.meta.env.DEV && response.status === 502) {
+    return 'The local Fantasy AI API is not responding at 127.0.0.1:3000. Start `npm run dev:full` in a separate terminal and keep it running.';
+  }
+  return typeof body.error === 'string' ? body.error : `${subject} request failed (${response.status}).`;
+}
+
 export interface FloydGenerationResult {
   manifest: MIOS_FantasyManifest;
   lineups: Lineup[];
@@ -51,7 +58,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body) headers.set('Content-Type', 'application/json');
   const response = await fetch(apiUrl(path), { ...init, headers });
   const body = await response.json().catch(() => ({})) as JsonRecord;
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Floyd DFS request failed (${response.status}).`);
+  if (!response.ok) throw new Error(apiErrorMessage(body, response, 'Floyd DFS'));
   return body as T;
 }
 
@@ -64,7 +71,7 @@ export interface FloydGameGroup { draftGroupId: string; matchupLabel: string; ga
 export async function listFloydGameGroups(params: { sport: string; contestType: string }, signal?: AbortSignal): Promise<FloydGameGroup[]> {
   const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}`), { signal, headers: await authenticatedHeaders() });
   const body = await response.json().catch(() => ({})) as JsonRecord;
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
+  if (!response.ok) throw new Error(apiErrorMessage(body, response, 'Slate'));
   return Array.isArray(body.groups) ? body.groups.filter(isJsonRecord).map((group) => ({ draftGroupId: String(group.draftGroupId ?? ''), matchupLabel: String(group.matchupLabel ?? 'Game'), gameCount: typeof group.gameCount === 'number' ? group.gameCount : undefined })).filter((group) => group.draftGroupId) : [];
 }
 
@@ -72,7 +79,7 @@ export async function listFloydContests(params: { sport: string; contestType: st
   const groupQuery = params.draftGroupId ? `&draftGroupId=${encodeURIComponent(params.draftGroupId)}` : '';
   const response = await fetch(apiUrl(`/api/slates?sport=${encodeURIComponent(params.sport.toUpperCase())}&format=${encodeURIComponent(params.contestType.toUpperCase())}${groupQuery}`), { signal, headers: await authenticatedHeaders() });
   const body = await response.json().catch(() => ({})) as JsonRecord;
-  if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `Slate request failed (${response.status}).`);
+  if (!response.ok) throw new Error(apiErrorMessage(body, response, 'Slate'));
   const contests = flattenSlateResponse(body);
   return contests.map(({ contest, group }) => {
     const matchup = (contest.matchup ?? group?.matchup) as JsonRecord | null | undefined;
@@ -167,7 +174,7 @@ export async function generateFloydLineups(input: { sport: string; contestType: 
   throw new Error('Floyd DFS lineup generation timed out while waiting for the durable run.');
 }
 
-export async function markFloydLineupEntered(lineupId: string, entry: { contestId: string; externalEntryId: string; contestName?: string; sport?: string; contestFormat?: string }): Promise<void> {
+export async function markFloydLineupEntered(lineupId: string, entry: { contestId?: string; externalEntryId?: string; contestName?: string; sport?: string; contestFormat?: string }): Promise<void> {
   await request(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: JSON.stringify(entry) });
 }
 
@@ -195,7 +202,18 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   const entryEligible = trust?.entryEligible === true;
   const slateValidation = asRecord(slate?.validation);
   const slateWarnings = Array.isArray(slateValidation?.warnings) ? slateValidation.warnings.map(String) : [];
-  const allCautions = [...cautions, ...slateWarnings, validationCaution, trustCaution, ...releaseReasons, ...trustGaps.map((gap) => `Unresolved data gate: ${gap}`)];
+  const projectionStage = [...stages].reverse().find((stage) => isJsonRecord(stage) && String(stage.stage ?? '').toUpperCase() === 'PROJECTION');
+  const projectionOutput = asRecord(projectionStage && isJsonRecord(projectionStage) ? projectionStage.output_payload ?? projectionStage.output : undefined);
+  const projectedPlayers = Array.isArray(projectionOutput?.players) ? projectionOutput.players.filter(isJsonRecord) : [];
+  const fallbackCount = projectedPlayers.filter((player) => player.modelPath === 'PROVIDER_FPPG_FALLBACK').length;
+  const projectionCautions = fallbackCount ? [`${fallbackCount}/${projectedPlayers.length} projections use DraftKings aggregate FPPG instead of sport-specific opportunity inputs. Their ceilings are provisional and are not calibrated against realized winning scores.`] : [];
+  const optimizerStage = [...stages].reverse().find((stage) => isJsonRecord(stage) && String(stage.stage ?? '').toUpperCase() === 'OPTIMIZE');
+  const optimizerOutput = asRecord(optimizerStage && isJsonRecord(optimizerStage) ? optimizerStage.output_payload ?? optimizerStage.output : undefined);
+  const searchDiagnostics = asRecord(optimizerOutput?.searchDiagnostics);
+  const optimizerCautions = optimizerOutput?.searchCompleteness === 'BOUNDED'
+    ? [`Optimizer stopped at its node budget (${String(searchDiagnostics?.nodesVisited ?? 'unknown')} nodes); returned lineups are legal but the global best was not proven.`]
+    : [];
+  const allCautions = [...cautions, ...slateWarnings, ...projectionCautions, ...optimizerCautions, validationCaution, trustCaution, ...releaseReasons, ...trustGaps.map((gap) => `Unresolved data gate: ${gap}`)];
   return { manifest_id: String(slate?.slateId ?? crypto.randomUUID()), sport: input.sport, contest_type: input.contestType, contest_date: input.contest.contest_date, contest_id: input.contest.contest_id, game_id: input.contest.game_ids[0], slate: input.contest, player_roster: playerPool, injury_updates: [], vegas_context: [], social_sentiment: [], catalysts: [], narrative_seeds: [], source_status: { draftkings: 'ok' }, source_health: {}, readiness: { status: blocked ? 'blocked' : 'caution', engine_state: 'MODEL_VALIDATION_REQUIRED', eligible_for_lineups: !blocked && entryEligible, eligible_for_tournament: false, hard_blocks: blocked ? cautions : [], cautions: allCautions }, model_version: 'floyd-dfs', data_warnings: allCautions, collected_at: new Date().toISOString(), dossier_version: 'floyd-dfs-research', dossier: research ?? undefined, floyd_pipeline: pipeline };
 }
 

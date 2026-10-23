@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { diagnoseLineupResult } from '../../server/learningDiagnosis.js';
-import { cors, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
+import { cors, getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
 
-const COLUMNS = ['actual_dk_points', 'finish_position', 'cash_line', 'field_size', 'entry_fee', 'payout'];
+const COLUMNS = ['actual_dk_points'];
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   try {
@@ -12,7 +12,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const records = parseCsv(csv);
     const headers = records.shift()?.map((header) => header.trim().toLowerCase().replace(/\s+/g, '_')) ?? [];
     for (const required of COLUMNS) if (!headers.includes(required)) throw new Error(`CSV is missing required column "${required}".`);
-    if (!headers.includes('contest_id') && !headers.includes('contest_name')) throw new Error('CSV must include contest_id or contest_name to identify the contest.');
     if (!headers.includes('lineup_id') && !(headers.includes('contest_id') && headers.includes('external_entry_id'))) throw new Error('CSV must include lineup_id, or both contest_id and external_entry_id from your linked DraftKings entry.');
     const batchId = crypto.randomUUID();
     const context = await tenantContext(req);
@@ -22,8 +21,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       const rowNumber = index + 2;
       try {
         const row = Object.fromEntries(headers.map((header, column) => [header, values[column] ?? '']));
-        const contestId = text(row.contest_id) || null;
-        const contestName = text(row.contest_name) || null;
+        const suppliedContestId = text(row.contest_id) || null;
+        let contestId = suppliedContestId;
+        let contestName = text(row.contest_name) || null;
         const externalEntryId = text(row.external_entry_id) || null;
         let lineupId = text(row.lineup_id);
         if (!lineupId && contestId && externalEntryId) {
@@ -36,6 +36,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const lineup = await context.db.from('floyd_dfs_generated_lineups').select('id,status,lineup_payload,selection_run_id').eq('tenant_id', context.tenantId).eq('id', lineupId).maybeSingle();
         if (lineup.error) throw lineup.error;
         if (!lineup.data || lineup.data.status !== 'ENTERED') throw new Error('lineup_id does not identify an entered lineup in this tenant.');
+        const savedSlate = await getOwnedLineupSlate(context, lineupId);
+        if (suppliedContestId && savedSlate?.contest.draftKingsContestId && suppliedContestId !== savedSlate.contest.draftKingsContestId) throw new Error('contest_id does not match the contest selected for this saved lineup.');
+        contestId ??= savedSlate?.contest.draftKingsContestId ?? null;
+        contestName ??= savedSlate?.contest.name ?? null;
         const actual = number(row.actual_dk_points, true)!;
         const cashLine = number(row.cash_line);
         const finishPosition = integer(row.finish_position);
@@ -44,8 +48,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const entryFee = number(row.entry_fee);
         const fieldSize = integer(row.field_size);
         const paidPositions = integer(row.paid_positions);
-        if (cashLine === null || finishPosition === null || fieldSize === null || entryFee === null || payout === null) throw new Error('Contest outcome requires cash_line, finish_position, field_size, entry_fee, and payout.');
-        if (!contestId && !contestName) throw new Error('Contest identity requires contest_id or contest_name.');
         if (cashLine !== null && cashLine <= 0) throw new Error('cash_line must be greater than zero.');
         if (finishPosition !== null && (finishPosition < 1 || (fieldSize !== null && finishPosition > fieldSize))) throw new Error('finish_position must be within the field size.');
         if (fieldSize !== null && fieldSize < 1) throw new Error('field_size must be positive.');
@@ -53,8 +55,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (finishPercentile !== null && (finishPercentile < 0 || finishPercentile > 100)) throw new Error('finish_percentile must be between 0 and 100.');
         if (payout !== null && payout < 0) throw new Error('payout cannot be negative.');
         if (entryFee !== null && entryFee < 0) throw new Error('entry_fee cannot be negative.');
-        const sport = text(row.sport)?.toUpperCase() ?? null;
-        const contestFormat = text(row.contest_format)?.toUpperCase() ?? null;
+        const sport = text(row.sport)?.toUpperCase() ?? savedSlate?.sport ?? null;
+        const contestFormat = text(row.contest_format)?.toUpperCase() ?? savedSlate?.contest.format ?? null;
         const actualPercentile = finishPercentile ?? (finishPosition !== null && fieldSize && fieldSize > 1 ? 100 * (1 - (finishPosition - 1) / (fieldSize - 1)) : null);
         const valuesToSave = {
           actual_dk_points: actual, cash_line: cashLine, beat_cash_line: cashLine === null ? null : actual >= cashLine,
@@ -77,11 +79,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       } catch (error) { errors.push({ row: rowNumber, error: error instanceof Error ? error.message : 'Row import failed.' }); }
     }
     cors(req, res);
-    res.status(errors.length ? 207 : 200).json({ batchId, imported, failed: errors.length, errors: errors.slice(0, 100), note: 'Match standings by app lineup_id or by contest_id plus the external_entry_id registered when the DraftKings entry was recorded.' });
+    res.status(errors.length ? 207 : 200).json({ batchId, imported, failed: errors.length, errors: errors.slice(0, 100), note: 'For lineup learning, actual_dk_points plus app lineup_id is enough; contest identity is recovered from the saved selection. For automatic DraftKings standings matching, provide the external entry ID or import by a previously linked contest and entry ID.' });
   } catch (error) { respondError(req, res, error); }
 }
 
-export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof tenantContext>>; resultId: string; lineupId: string; lineupPayload: unknown; selectionRunId: string; enteredScore: number; contestKey: string }): Promise<void> {
+export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<typeof tenantContext>>; resultId: string; lineupId: string; lineupPayload: unknown; selectionRunId: string; enteredScore: number; contestKey: string; officialOutcome?: boolean }): Promise<void> {
   const { context, resultId, lineupId, selectionRunId } = input;
   const payload = record(input.lineupPayload); const playerIds = [...new Set((Array.isArray(payload.playerIds) ? payload.playerIds : []).map(String))];
   const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id,selection_package').eq('tenant_id', context.tenantId).eq('id', selectionRunId).maybeSingle();
@@ -114,7 +116,7 @@ export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<
   const actualSources = [...new Set(actualRows.filter((row) => playerIds.includes(String(row.player_id))).map((row) => String(row.provider ?? 'UNKNOWN')))];
   const source = actualSources.length ? actualSources.join(',') : 'PLAYER_ACTUALS_UNAVAILABLE';
   const reconciliation = { status, computedPlayerActualScore: computed === null ? null : Number(computed.toFixed(4)), recordedActualScore: input.enteredScore, difference, playerCount: playerIds.length, source, scoring: 'verified player actuals and saved roster slot multipliers', reasons: [...new Set(reasons)], reconciledAt: new Date().toISOString() };
-  const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, official_outcome: true, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
+  const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, official_outcome: input.officialOutcome ?? true, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
   if (update.error) throw update.error;
   if ((eligible || status === 'MISMATCH') && selection.data) {
     const snapshot = await context.db.from('floyd_dfs_lock_snapshots').select('research_version,adjustment_version,lineup_payload').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('locked_at', { ascending: false }).limit(1).maybeSingle();

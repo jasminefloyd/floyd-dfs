@@ -38,6 +38,7 @@ type Json = Record<string, unknown>;
 loadDotenv({ path: '.env.local' });
 
 function env(name: string): string | undefined { const value = process.env[name]; return value?.trim() || undefined; }
+function photoHostsFromEnv(): string[] { return (env('FDS_PLAYER_PHOTO_ALLOWED_HOSTS') ?? '').split(',').map((host) => host.trim()).filter(Boolean); }
 function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number { const value = Number(env(name)); return Number.isInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : fallback; }
 function requiredEnv(name: string, ...fallbackNames: string[]): string { const value = [name, ...fallbackNames].map(env).find(Boolean); if (!value) throw new Error(`Server environment variable ${name} is not configured.`); return value; }
 
@@ -66,6 +67,18 @@ function authorizeSecret(req: VercelRequest, name: string): void { const expecte
 export function requireOperator(context: TenantContext): void { if (context.role !== 'operator') throw new ApiError(403, 'Operator access is required.', 'FORBIDDEN'); }
 export async function requireOwnedRun(context: TenantContext, runId: string): Promise<Json> { if (!runId || runId.length > 128) throw new ApiError(400, 'A valid run ID is required.', 'INVALID_ID'); const result = await context.db.from('generation_runs').select('*').eq('id', runId).eq('tenant_id', context.tenantId).eq('user_id', context.userId).maybeSingle(); if (result.error) throw result.error; if (!result.data) throw new ApiError(404, 'Run not found.', 'NOT_FOUND'); return result.data as Json; }
 export async function requireOwnedLineup(context: TenantContext, lineupId: string): Promise<Json> { if (!lineupId || lineupId.length > 128) throw new ApiError(400, 'A valid lineup ID is required.', 'INVALID_ID'); const lineup = await context.db.from('floyd_dfs_generated_lineups').select('id,tenant_id,selection_run_id').eq('id', lineupId).eq('tenant_id', context.tenantId).maybeSingle(); if (lineup.error) throw lineup.error; if (!lineup.data) throw new ApiError(404, 'Lineup not found.', 'NOT_FOUND'); const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id').eq('id', lineup.data.selection_run_id).eq('tenant_id', context.tenantId).maybeSingle(); if (selection.error) throw selection.error; if (!selection.data) throw new ApiError(404, 'Lineup not found.', 'NOT_FOUND'); await requireOwnedRun(context, String(selection.data.generation_run_id)); return lineup.data as Json; }
+export async function getOwnedLineupSlate(context: TenantContext, lineupId: string): Promise<ValidatedSlate | undefined> {
+  const lineup = await requireOwnedLineup(context, lineupId);
+  const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id').eq('id', String(lineup.selection_run_id)).eq('tenant_id', context.tenantId).maybeSingle();
+  if (selection.error) throw selection.error;
+  const run = await context.db.from('generation_runs').select('request_payload').eq('id', String(selection.data?.generation_run_id ?? '')).eq('tenant_id', context.tenantId).eq('user_id', context.userId).maybeSingle();
+  if (run.error) throw run.error;
+  const request = run.data?.request_payload as Json | undefined;
+  const input = request?.input as Json | undefined;
+  const slate = input?.validatedSlate;
+  if (!slate || typeof slate !== 'object' || Array.isArray(slate)) return undefined;
+  return parseValidatedSlate(slate as ValidatedSlate, context.tenantId);
+}
 export async function ownedSelectionRunIds(context: TenantContext): Promise<string[]> { const runs = await context.db.from('generation_runs').select('id').eq('tenant_id', context.tenantId).eq('user_id', context.userId); if (runs.error) throw runs.error; const ids = (runs.data ?? []).map((row) => String(row.id)); if (!ids.length) return []; const selections = await context.db.from('floyd_dfs_selection_runs').select('id').eq('tenant_id', context.tenantId).in('generation_run_id', ids); if (selections.error) throw selections.error; return (selections.data ?? []).map((row) => String(row.id)); }
 
 export function cors(req: VercelRequest, res: VercelResponse): void {
@@ -217,7 +230,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     try {
       const availabilitySnapshot = await availability.getAvailabilitySnapshot(workingSlate);
       cfbSportsDataRosterAvailable = workingSlate.sport === 'CFB' && availabilitySnapshot.rosterComplete === true;
-      workingSlate = applyAvailabilitySnapshot(workingSlate, availabilitySnapshot, new Date());
+      workingSlate = applyAvailabilitySnapshot(workingSlate, availabilitySnapshot, new Date(), photoHostsFromEnv());
     }
     catch (error) { const message = error instanceof Error ? error.message : 'Availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `Availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
     if (workingSlate.sport === 'GOLF' && sportsDataIoProductionVerified) {
@@ -472,8 +485,19 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   // team rosters resolve. It intentionally cannot confirm college starters. ESPN remains a
   // fallback only when SportsDataIO could not resolve a complete CFB roster.
   if (espnProjection && ['NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
-    if (workingSlate.sport !== 'CFB' || !cfbSportsDataRosterAvailable) try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate), new Date()); }
+    if (workingSlate.sport !== 'CFB' || !cfbSportsDataRosterAvailable) try { workingSlate = applyAvailabilitySnapshot(workingSlate, await espnProjection.getAvailabilitySnapshot(workingSlate), new Date(), photoHostsFromEnv()); }
     catch (error) { const message = error instanceof Error ? error.message : 'ESPN availability refresh failed.'; stages.availabilityWarnings = [...((stages.availabilityWarnings as string[] | undefined) ?? []), message]; workingSlate = withDegradedAvailability(workingSlate, `ESPN availability refresh failed; players were not filtered for injury/inactive status: ${message}`); }
+  }
+  if (['NFL', 'CFB', 'NBA', 'WNBA'].includes(workingSlate.sport)) {
+    const covered = workingSlate.playerPool.filter((player) => Boolean(player.imageUrl)).length;
+    stages.playerPhotoCoverage = { source: 'ESPN roster headshots', covered, total: workingSlate.playerPool.length, allowlistedHostsConfigured: photoHostsFromEnv().length > 0 };
+    if (!covered) {
+      const warning = photoHostsFromEnv().length
+      ? 'No slate players received a verified ESPN headshot URL. The UI will show its initials fallback.'
+      : 'ESPN headshots were returned only when their HTTPS host was explicitly configured in FDS_PLAYER_PHOTO_ALLOWED_HOSTS; configure the reviewed host a.espncdn.com to display them.';
+      stages.playerPhotoWarning = warning;
+      workingSlate = { ...workingSlate, validation: { ...workingSlate.validation, warnings: [...workingSlate.validation.warnings, warning] } };
+    }
   }
   if (workingSlate.sport === 'WNBA') {
     const now = Date.now();

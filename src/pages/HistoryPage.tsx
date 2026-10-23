@@ -39,7 +39,7 @@ export default function HistoryPage() {
   }
   return <AppPage eyebrow="04 / HISTORY" title="Your lineup history." subtitle="Every generated and entered lineup stays attached to its run lineage.">
     <div className="mb-4 flex flex-wrap gap-2">{['all', 'generated', 'entered'].map((value) => <button key={value} type="button" onClick={() => setStatus(value)} className={`rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${status === value ? 'border-[#0b1f3a] bg-[#0b1f3a] text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{value}</button>)}</div>
-    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import my DraftKings results'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Matches by <code>lineup_id</code> or the contest + DraftKings entry ID saved with your lineup.</span><label className="cursor-pointer rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900">Import full contest standings<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importField(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Normalized field CSV: contest_id, external_entry_id, sport, contest_format, field_size, entry_fee, paid_positions, finish_position, actual_dk_points, payout, player_ids. The cash line is derived only when all field entries are present.</span></div>
+    <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3"><label className="cursor-pointer rounded-md border border-slate-300 px-3 py-2 text-xs font-black text-[#0b1f3a]">{importing ? 'Importing…' : 'Import my DraftKings results'}<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importResults(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Matches by app <code>lineup_id</code>, or by an entry ID you linked. Contest ID is filled from the selected contest.</span><label className="cursor-pointer rounded-md border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs font-black text-cyan-900">Import full contest standings<input type="file" accept=".csv,text/csv" className="sr-only" disabled={importing} onChange={(event) => { void importField(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label><span className="text-[11px] text-slate-500">Full-field analysis uses contest and entry IDs from the standings export; individual lineup learning can use its saved lineup ID.</span></div>
     {importStatus ? <p className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800">{importStatus}</p> : null}
     {fieldImportStatus ? <p className="mb-3 rounded-md border border-cyan-200 bg-cyan-50 p-2 text-xs text-cyan-900">{fieldImportStatus}</p> : null}
     {error ? <ErrorBox message={error} /> : filtered.length ? <div className="grid gap-3 md:grid-cols-2">{filtered.map((row, index) => <HistoryCard key={String(row.id ?? index)} row={row} />)}</div> : <EmptyState text="No persisted lineups match this filter." />}
@@ -69,7 +69,7 @@ function HistoryCard({ row }: { row: HistoryRow }) {
       <Metric label="Salary" value={formatMoney(payload.salaryUsed)} />
       <Metric label="Players" value={String(players || '—')} />
     </div>
-    {hasRecordedResult ? <div className={`mt-3 rounded-lg border p-3 text-xs ${reconciliation === 'MATCHED' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-300 bg-amber-50 text-amber-950'}`}><p className="font-black">Contest outcome · {reconciliation.replaceAll('_', ' ')}{row.model_evaluation_eligible === true ? ' · eligible for evaluation' : ' · excluded from model evaluation'}</p><p className="mt-1">{Number(row.actual_dk_points).toFixed(2)} actual points{Number.isFinite(Number(row.cash_line)) ? ` · cash line ${Number(row.cash_line).toFixed(2)} · ${row.beat_cash_line ? 'cleared' : 'missed'}` : ''}{Number.isFinite(Number(row.finish_position)) ? ` · rank #${row.finish_position}` : ''}{Number.isFinite(Number(row.payout)) ? ` · payout $${Number(row.payout).toFixed(2)}` : ''}</p>{typeof reconciliationDetail.reasons === 'string' ? <p className="mt-1">{reconciliationDetail.reasons}</p> : Array.isArray(reconciliationDetail.reasons) && reconciliationDetail.reasons.length ? <p className="mt-1">{reconciliationDetail.reasons.map(String).join(' ')}</p> : null}</div> : null}
+    {hasRecordedResult ? <div className={`mt-3 rounded-lg border p-3 text-xs ${reconciliation === 'MATCHED' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-300 bg-amber-50 text-amber-950'}`}><p className="font-black">Contest outcome · {reconciliation.replaceAll('_', ' ')}{row.model_evaluation_eligible === true ? ' · eligible for evaluation' : ' · excluded from model evaluation'}</p><p className="mt-1">{Number(row.actual_dk_points).toFixed(2)} actual points{row.cash_line != null && Number.isFinite(Number(row.cash_line)) ? ` · cash line ${Number(row.cash_line).toFixed(2)} · ${row.beat_cash_line ? 'cleared' : 'missed'}` : ''}{row.finish_position != null && Number.isFinite(Number(row.finish_position)) ? ` · rank #${row.finish_position}` : ''}{row.payout != null && Number.isFinite(Number(row.payout)) ? ` · payout $${Number(row.payout).toFixed(2)}` : ''}</p>{typeof reconciliationDetail.reasons === 'string' ? <p className="mt-1">{reconciliationDetail.reasons}</p> : Array.isArray(reconciliationDetail.reasons) && reconciliationDetail.reasons.length ? <p className="mt-1">{reconciliationDetail.reasons.map(String).join(' ')}</p> : null}</div> : null}
     <div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-500">
       <span>{formatDate(String(row.created_at ?? ''))}</span>
       {generationRunId ? <Link className="font-black text-[#0b1f3a] underline" to={`/runs/${encodeURIComponent(generationRunId)}`}>View run</Link> : <span className="text-[10px] text-slate-400">Run lineage unavailable</span>}
@@ -85,15 +85,15 @@ function LinkDraftKingsEntry({ lineupId, row }: { lineupId: string; row: History
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
   async function save() {
-    if (!contestId.trim() || !externalEntryId.trim()) { setStatus('Enter both DraftKings IDs.'); return; }
+    if (!externalEntryId.trim()) { setStatus('Enter the DraftKings entry ID to link standings.'); return; }
     setSaving(true); setStatus('');
     try {
-      await floydRequest(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: JSON.stringify({ contestId: contestId.trim(), externalEntryId: externalEntryId.trim(), contestName: String(row.contest_name ?? ''), sport: String(row.sport ?? '').toUpperCase(), contestFormat: String(row.contest_format ?? '').toUpperCase() }) });
+      await floydRequest(`/api/lineups/${encodeURIComponent(lineupId)}/entered`, { method: 'POST', body: JSON.stringify({ ...(contestId.trim() ? { contestId: contestId.trim() } : {}), externalEntryId: externalEntryId.trim(), contestName: String(row.contest_name ?? ''), sport: String(row.sport ?? '').toUpperCase(), contestFormat: String(row.contest_format ?? '').toUpperCase() }) });
       setStatus('DraftKings entry linked. It will match when you import completed standings.');
     } catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Unable to link this DraftKings entry.'); }
     finally { setSaving(false); }
   }
-  return <div className="mt-3 rounded-md border border-cyan-200 bg-cyan-50 p-3"><p className="text-[10px] font-black uppercase tracking-wide text-cyan-900">Link this saved lineup to DraftKings</p><div className="mt-2 grid grid-cols-2 gap-2"><label className="text-[10px] font-bold text-slate-600">Contest ID<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label><label className="text-[10px] font-bold text-slate-600">External entry ID<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label></div><button type="button" onClick={() => void save()} disabled={saving} className="mt-2 rounded-md bg-cyan-900 px-3 py-2 text-[10px] font-black text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save entry link'}</button>{status ? <p className="mt-2 text-[10px] text-cyan-950">{status}</p> : null}</div>;
+  return <div className="mt-3 rounded-md border border-cyan-200 bg-cyan-50 p-3"><p className="text-[10px] font-black uppercase tracking-wide text-cyan-900">Link this saved lineup to DraftKings standings (optional)</p><div className="mt-2 grid grid-cols-2 gap-2"><label className="text-[10px] font-bold text-slate-600">Contest ID (filled from selection)<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label><label className="text-[10px] font-bold text-slate-600">External entry ID<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs" /></label></div><button type="button" onClick={() => void save()} disabled={saving} className="mt-2 rounded-md bg-cyan-900 px-3 py-2 text-[10px] font-black text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save entry link'}</button>{status ? <p className="mt-2 text-[10px] text-cyan-950">{status}</p> : null}</div>;
 }
 
 function historyGenerationRunId(row: HistoryRow): string | undefined {
@@ -130,8 +130,6 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
   async function submit() {
     const points = Number(actualDkPoints);
     if (!Number.isFinite(points)) { setError('Actual DK points is required and must be a number.'); return; }
-    if (!contestId.trim() && !contestName.trim()) { setError('Add a DraftKings contest ID or contest name.'); return; }
-    if (![cashLine, finishPosition, fieldSize, entryFee, payout].every((value) => value.trim() && Number.isFinite(Number(value)))) { setError('Complete cash line, finish position, field size, entry fee, and payout to save a fully labeled result.'); return; }
     setSubmitting(true);
     setError(null);
     try {
@@ -177,21 +175,22 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
         Actual DK points
         <input type="number" value={actualDkPoints} onChange={(event) => setActualDkPoints(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
       </label>
+      <p className="text-xs text-slate-600">Actual points are enough to check the lineup against verified player actuals. Contest finish, payout, and cash-line details are optional; complete standings are needed for full-field learning.</p>
       <div className="grid grid-cols-2 gap-2">
-        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings contest ID<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
-        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings entry ID<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings contest ID (from selected contest)<input value={contestId} onChange={(event) => setContestId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">DraftKings entry ID (optional)<input value={externalEntryId} onChange={(event) => setExternalEntryId(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Contest name<input value={contestName} onChange={(event) => setContestName(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm normal-case text-slate-800" /></label>
-        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Field size (required)<input type="number" min="1" value={fieldSize} onChange={(event) => setFieldSize(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
-        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Entry fee $ (required)<input type="number" min="0" step="0.01" value={entryFee} onChange={(event) => setEntryFee(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
-        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Paid positions<input type="number" min="1" value={paidPositions} onChange={(event) => setPaidPositions(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Field size (optional)<input type="number" min="1" value={fieldSize} onChange={(event) => setFieldSize(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Entry fee $ (optional)<input type="number" min="0" step="0.01" value={entryFee} onChange={(event) => setEntryFee(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
+        <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">Paid positions (optional)<input type="number" min="1" value={paidPositions} onChange={(event) => setPaidPositions(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" /></label>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
-          Cash line (required)
+          Cash line (optional)
           <input type="number" value={cashLine} onChange={(event) => setCashLine(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
         </label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
-          Finish position (required)
+          Finish position (optional)
           <input type="number" value={finishPosition} onChange={(event) => setFinishPosition(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
         </label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
@@ -199,7 +198,7 @@ function RecordResult({ lineupId, row }: { lineupId: string; row: HistoryRow }) 
           <input type="number" min="0" max="100" value={finishPercentile} onChange={(event) => setFinishPercentile(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
         </label>
         <label className="block text-[10px] font-black uppercase tracking-wide text-slate-500">
-          Payout $ (required; enter 0 if no payout)
+          Payout $ (optional)
           <input type="number" min="0" step="0.01" value={payout} onChange={(event) => setPayout(event.target.value)} className="mt-1 block w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm text-slate-800" />
         </label>
       </div>

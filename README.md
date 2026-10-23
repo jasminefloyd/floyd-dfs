@@ -8,10 +8,16 @@ Use Node.js `22.12.0` or a supported Node 20 release (`20.19.0` or newer). The c
 
 ```bash
 npm install
+npm run dev:full
+```
+
+For the Vite client at port `5177` with the local API proxy, start both processes in separate terminals:
+
+```bash
 npm run dev
 ```
 
-The Vite app runs locally at `http://127.0.0.1:5177/`.
+Keep `npm run dev:full` running as well; it serves the Vercel API handlers at `http://127.0.0.1:3000/` (the script pins this port to match the Vite proxy). Without it, browser requests to `/api/*` from Vite return `502 Bad Gateway`. The Vite app runs locally at `http://127.0.0.1:5177/`.
 
 ## Environment
 
@@ -67,8 +73,4 @@ There are 18 incremental SQL migrations in `supabase/migrations/`; the repositor
 
 The monthly provider audit is registered for `0 14 1 * *` UTC in Vercel Production. Independent missed-run alerting still needs configuration; do not use `vercel crons run` as a health check because it triggers a real audit. Read [P13 acceptance/release notes](docs/P13_Acceptance_and_Release.md) before changing release gates or operating production.
 
-Run the Vite app and local API handlers together:
-
-```bash
-npm run dev:full
-```
+`npm run dev:full` starts the local Vercel runtime for API handlers. Start `npm run dev` in another terminal only when you want to use the Vite development origin and its `/api` proxy.

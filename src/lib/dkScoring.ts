@@ -4,7 +4,6 @@
 // https://help.draftkings.com/hc/en-us/articles/4405224006931
 // DK basketball rules define double/triple categories as points, rebounds, assists,
 // steals, and blocks: https://sportsbook.draftkings.com/help/sport-rules/basketball
-import { scoreBasketballStatLine } from './dkBasketballScoring.cjs';
 
 export type DkSport = 'nba' | 'wnba' | 'mlb' | 'nfl' | 'cfb' | 'golf';
 export type DkContestType = 'classic' | 'showdown';
@@ -126,7 +125,27 @@ function hasStat(line: StatLine, keys: string[]): boolean {
 }
 
 export function dkBasketballFantasyPoints(statLine: StatLine): number {
-  return scoreBasketballStatLine(statLine, DK_SCORING.nba).points;
+  const points = stat(statLine, ['points', 'pts']);
+  const threes = stat(statLine, ['threePointFieldGoalsMade', 'threePointersMade', 'threePointers', 'three_pointers', 'three_pointers_made', 'three_point_field_goals_made', 'threePointMade', 'threesMade', 'fg3m', '3pm']);
+  const rebounds = stat(statLine, ['totalRebounds', 'rebounds', 'reb', 'total_rebounds']);
+  const assists = stat(statLine, ['assists', 'ast']);
+  const steals = stat(statLine, ['steals', 'stl']);
+  const blocks = stat(statLine, ['blocks', 'blockedShots', 'blk']);
+  const turnovers = stat(statLine, ['turnovers', 'turnover', 'tov']);
+  const qualifyingCategories = [points, rebounds, assists, steals, blocks].filter((value) => value >= 10).length;
+  const doubleDouble = qualifyingCategories >= 2 ? 1 : 0;
+  const tripleDouble = qualifyingCategories >= 3 ? 1 : 0;
+  // Keep this formula aligned with dkBasketballScoring.cjs, used by Node data-import scripts.
+  const score = points * DK_SCORING.nba.points
+    + threes * DK_SCORING.nba.threePointersMade
+    + rebounds * DK_SCORING.nba.rebounds
+    + assists * DK_SCORING.nba.assists
+    + steals * DK_SCORING.nba.steals
+    + blocks * DK_SCORING.nba.blocks
+    + turnovers * DK_SCORING.nba.turnovers
+    + doubleDouble * DK_SCORING.nba.doubleDouble
+    + tripleDouble * DK_SCORING.nba.tripleDouble;
+  return Math.round((score + Number.EPSILON) * 1e6) / 1e6;
 }
 
 export function dkNflFantasyPoints(statLine: StatLine, role?: DkRole): number {
