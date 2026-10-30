@@ -35,6 +35,8 @@ assert.match(collectRoute, /isFeatureEnabled\('STREET_TEAM_V2'\)/);
 assert.match(collectRoute, /dataTier: process\.env\.SPORTS_DATA_IO_DATA_TIER/);
 assert.match(streetTeamService, /isSportsDataIoProductionVerifiedDataTier\(options\.dataTier\)/);
 assert.match(streetTeamService, /no provider request was made/);
+assert.match(streetTeamService, /floyd_dfs_behavior_signals/);
+assert.match(streetTeamService, /onConflict: 'id', ignoreDuplicates: true/);
 assert.match(briefingRoute, /tenantContext\(req\)/);
 assert.match(briefingRoute, /snapshot: null/);
 assert.match(briefingRoute, /latestCollectionRun/);

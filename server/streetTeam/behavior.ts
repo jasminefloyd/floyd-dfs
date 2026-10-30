@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { BehaviorSignal } from '../../src/lib/engine/contracts.js';
+import type { BehaviorSignal, IntelligenceObservation } from '../../src/lib/engine/contracts.js';
 import type { NbaStreetTeamObservationInput } from '../nbaStreetTeamProvider.js';
 
 const CONTEXT_RULES = [
@@ -62,10 +62,52 @@ export function deriveStreetTeamBehaviorSignals(
   return output;
 }
 
+/** Map snapshot signals to the additive, tenant-scoped behavior ledger rows. */
+export function toStreetTeamBehaviorSignalRows(
+  tenantId: string,
+  signals: BehaviorSignal[],
+  observations: Array<Pick<IntelligenceObservation, 'id' | 'classification' | 'observedAt' | 'publishedAt' | 'effectiveAt'>>,
+): Array<Record<string, unknown>> {
+  const observationById = new Map(observations.map((observation) => [observation.id, observation]));
+  return signals.map((signal) => {
+    const observationId = signal.observationIds[0];
+    const observation = observationById.get(observationId);
+    if (!observation) throw new Error(`Behavior signal ${signal.id} has no persisted source observation.`);
+    if (!['OFFICIAL_CONFIRMED', 'CORROBORATED_REPORT', 'SINGLE_SOURCE_REPORT', 'HYPOTHESIS'].includes(observation.classification)) {
+      throw new Error(`Behavior signal ${signal.id} has an unsupported evidence class.`);
+    }
+    return {
+      id: stableUuid(signal.id),
+      tenant_id: tenantId,
+      sport: signal.sport,
+      player_id: signal.subject.kind === 'PLAYER' ? signal.subject.id : null,
+      team_id: signal.subject.kind === 'TEAM' ? signal.subject.id : null,
+      source_observation_id: observationId,
+      signal_type: signal.event.split(':', 1)[0],
+      claim: signal.event,
+      evidence_class: observation.classification,
+      confidence: signal.confidence,
+      model_effect: signal.numericEffect ?? null,
+      effect_status: signal.effectStatus,
+      model_version: signal.modelVersion ?? null,
+      effective_at: observation.effectiveAt ?? observation.publishedAt ?? null,
+      observed_at: observation.observedAt,
+    };
+  });
+}
+
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function stableId(value: string): string {
   return `behavior:${createHash('sha256').update(value).digest('hex').slice(0, 32)}`;
+}
+
+function stableUuid(value: string): string {
+  const bytes = createHash('sha256').update(value).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

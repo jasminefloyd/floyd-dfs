@@ -4,7 +4,7 @@ import { ENGINE_CONTRACT_VERSION, type StreetTeamSnapshot } from '../src/lib/eng
 import { parseStreetTeamSnapshot } from '../src/lib/engine/boundaryContracts.js';
 import { SportsDataIoNbaStreetTeamProvider } from './nbaStreetTeamProvider.js';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
-import { deriveStreetTeamBehaviorSignals } from './streetTeam/behavior.js';
+import { deriveStreetTeamBehaviorSignals, toStreetTeamBehaviorSignalRows } from './streetTeam/behavior.js';
 
 const LEASE_MS = 10 * 60_000;
 /** The daily NBA collection cadence establishes the default current-state TTL. */
@@ -122,6 +122,13 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
           raw_payload: observation.payload,
         }));
         const saved = await db.from('floyd_dfs_intel_observations').upsert(rows, { onConflict: 'tenant_id,sport,provider,content_sha256', ignoreDuplicates: true });
+        if (saved.error) throw saved.error;
+      }
+    }
+    if (snapshot.behaviorSignals.length) {
+      const rows = toStreetTeamBehaviorSignalRows(tenantId, snapshot.behaviorSignals, snapshot.observations);
+      for (const batch of chunks(rows, 250)) {
+        const saved = await db.from('floyd_dfs_behavior_signals').upsert(batch, { onConflict: 'id', ignoreDuplicates: true });
         if (saved.error) throw saved.error;
       }
     }
