@@ -16,7 +16,7 @@ type GameScenarioRecord = { gameId: string; trial: number; teamScores: Record<st
 export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionPackage, mode: SimulationMode, requestedSeed?: string): ProjectionPackage {
   const seed = requestedSeed?.trim() || slate.slateId;
   if (!['NBA', 'NFL'].includes(slate.sport) || mode === 'baseline') {
-    return { ...baseline, gameSimulation: { mode: 'BASELINE', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials: baseline.simulationRuns, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: [], diagnostics: { mappedGames: 0, incompleteGames: 0, simulatedPlayers: 0, baselineFallbackPlayers: 0, overtimeTrials: 0, overtimeInputs: 'NOT_APPLICABLE' } } };
+    return { ...baseline, gameSimulation: { mode: 'BASELINE', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials: baseline.simulationRuns, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: [], diagnostics: { mappedGames: 0, incompleteGames: 0, simulatedPlayers: 0, baselineFallbackPlayers: 0, overtimeTrials: 0, overtimeInputs: 'NOT_APPLICABLE', scoreMarginDistributions: [] } } };
   }
   const trials = baseline.simulationRuns;
   const projections = new Map(baseline.players.map((projection) => [projection.playerId, projection]));
@@ -80,14 +80,31 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
       uncertaintyFactors: [...new Set([...projection.uncertaintyFactors, 'Connected game-event scenarios are provisional and not yet calibrated against prospective actuals'])],
     };
   });
+  const scoreMarginDistributions = summarizeScoreMargins(gameScores);
   return {
     ...baseline,
     modelVersion: `${baseline.modelVersion}+${GAME_SIMULATION_MODEL_VERSION}`,
     players,
     status: 'PARTIAL',
     gaps: [...baseline.gaps, { reason: 'Connected NBA/NFL game simulations are experimental. Prospective actual-data validation and independent model review are required before any release promotion.' }, ...warnings.map((reason) => ({ reason }))],
-    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs } },
+    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs, scoreMarginDistributions } },
   };
+}
+
+/** Descriptive diagnostics only: no unvalidated margin cutoff is labeled a blowout. */
+function summarizeScoreMargins(scenarios: GameScenarioRecord[]): Array<{ gameId: string; trials: number; medianAbsoluteMargin: number; p90AbsoluteMargin: number; p95AbsoluteMargin: number; maxAbsoluteMargin: number }> {
+  const marginsByGame = new Map<string, number[]>();
+  for (const scenario of scenarios) {
+    const scores = Object.values(scenario.teamScores);
+    if (scores.length !== 2 || !scores.every(Number.isFinite)) continue;
+    const margins = marginsByGame.get(scenario.gameId) ?? [];
+    margins.push(Math.abs(scores[0] - scores[1]));
+    marginsByGame.set(scenario.gameId, margins);
+  }
+  return [...marginsByGame].sort(([left], [right]) => left.localeCompare(right)).map(([gameId, values]) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    return { gameId, trials: sorted.length, medianAbsoluteMargin: quantile(sorted, 0.5), p90AbsoluteMargin: quantile(sorted, 0.9), p95AbsoluteMargin: quantile(sorted, 0.95), maxAbsoluteMargin: sorted[sorted.length - 1] };
+  });
 }
 
 function createTeamScenarios(slate: ValidatedSlate, projections: Map<string, PlayerProjection>): TeamScenario[] {
