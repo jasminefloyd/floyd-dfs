@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { ApiError, cors, method, respondError, tenantContext } from '../../server/runtime.js';
-import { getStreetTeamSnapshot, listStreetTeamSnapshots, streetTeamSnapshotFreshness } from '../../server/streetTeam.js';
+import { getLatestStreetTeamCollectionRun, getStreetTeamSnapshot, listStreetTeamSnapshots, streetTeamSnapshotFreshness } from '../../server/streetTeam.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
@@ -17,10 +17,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
     const snapshot = await getStreetTeamSnapshot(context.db, context.tenantId, snapshotId);
-    if (!snapshot) throw new ApiError(404, 'Street Team snapshot was not found.', 'NOT_FOUND');
+    const latestCollectionRun = await getLatestStreetTeamCollectionRun(context.db, context.tenantId);
+    if (!snapshot && snapshotId) throw new ApiError(404, 'Street Team snapshot was not found.', 'NOT_FOUND');
+    if (!snapshot) {
+      cors(req, res);
+      res.status(200).json({ snapshot: null, currentStateFreshness: 'UNKNOWN', ageMs: null, latestCollectionRun });
+      return;
+    }
     const ageMs = Date.now() - Date.parse(snapshot.asOf);
     const currentStateFreshness = streetTeamSnapshotFreshness(snapshot);
-    const response = { snapshot, currentStateFreshness, ageMs: Math.max(0, ageMs) };
+    const response = { snapshot, currentStateFreshness, ageMs: Math.max(0, ageMs), latestCollectionRun };
     cors(req, res);
     res.status(200).json(response);
   } catch (error) { respondError(req, res, error); }

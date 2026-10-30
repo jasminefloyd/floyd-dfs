@@ -165,6 +165,19 @@ export async function listStreetTeamSnapshots(db: SupabaseClient, tenantId: stri
   return result.data ?? [];
 }
 
+export async function getLatestStreetTeamCollectionRun(db: SupabaseClient, tenantId: string): Promise<Record<string, unknown> | null> {
+  const result = await db.from('floyd_dfs_intel_collection_runs')
+    .select('id,status,started_at,finished_at,attempt_count,result,error')
+    .eq('tenant_id', tenantId)
+    .eq('sport', 'NBA')
+    .eq('provider', 'SPORTSDATAIO')
+    .order('started_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  return result.data as Record<string, unknown> | null;
+}
+
 function chunks<T>(items: T[], size: number): T[][] { const batches: T[][] = []; for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size)); return batches; }
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function stableJson(value: unknown): string { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`; return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`; }

@@ -32,5 +32,7 @@ assert.match(collectRoute, /schedulerContext\(req\)/);
 assert.match(collectRoute, /requireOperator\(context\)/);
 assert.match(collectRoute, /isFeatureEnabled\('STREET_TEAM_V2'\)/);
 assert.match(briefingRoute, /tenantContext\(req\)/);
+assert.match(briefingRoute, /snapshot: null/);
+assert.match(briefingRoute, /latestCollectionRun/);
 assert.ok(vercel.crons.some((cron) => cron.path === '/api/street-team/collect' && cron.schedule === '0 8 * * *'));
 console.log('P2 persistence, route authorization, feature flag, and daily schedule assertions passed.');
