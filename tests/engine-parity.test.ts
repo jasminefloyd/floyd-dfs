@@ -67,6 +67,7 @@ const p4ReplayA = applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p
 const p4ReplayB = applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p4-fixed-seed');
 assert.deepEqual(p4ReplayA.gameSimulation?.gameScenarios, p4ReplayB.gameSimulation?.gameScenarios, 'P4 replay must be stable for a fixed seed');
 assert.deepEqual(p4ReplayA.gameSimulation?.diagnostics?.scoreMarginDistributions, p4ReplayB.gameSimulation?.diagnostics?.scoreMarginDistributions, 'P4 score-margin diagnostics must be reproducible for a fixed seed');
+assert.deepEqual(p4ReplayA.gameSimulation?.diagnostics?.covarianceChecks, p4ReplayB.gameSimulation?.diagnostics?.covarianceChecks, 'P4 covariance diagnostics must be reproducible for a fixed seed');
 assert.notDeepEqual(applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p4-other-seed').gameSimulation?.gameScenarios, p4ReplayA.gameSimulation?.gameScenarios, 'P4 replay seeds must select distinct deterministic scenarios');
 assert.equal(p4ReplayA.gameSimulation?.releaseStatus, 'UNVALIDATED', 'simulation remains unvalidated pending historical holdout evidence');
 assert.equal(p4ReplayA.gameSimulation?.diagnostics?.mappedGames, 1);
@@ -75,6 +76,12 @@ const p4Margin = p4ReplayA.gameSimulation?.diagnostics?.scoreMarginDistributions
 assert.equal(p4Margin?.trials, 32, 'P4 score-margin diagnostics must include every complete game trial');
 assert.ok((p4Margin?.p90AbsoluteMargin ?? 0) >= (p4Margin?.medianAbsoluteMargin ?? 0));
 assert.ok((p4Margin?.maxAbsoluteMargin ?? 0) >= (p4Margin?.p95AbsoluteMargin ?? 0));
+const p4Covariance = p4ReplayA.gameSimulation?.diagnostics?.covarianceChecks?.[0];
+assert.equal(p4Covariance?.trials, 32, 'P4 covariance diagnostics must use the shared trial count');
+assert.equal(p4Covariance?.sameTeamPairCount, 1, 'P4 covariance diagnostics must count same-team player pairs');
+assert.equal(p4Covariance?.opposingTeamPairCount, 2, 'P4 covariance diagnostics must count opposing-team player pairs');
+assert.ok(Number.isFinite(p4Covariance?.sameTeamMeanCovariance), 'P4 covariance summary must report finite within-team covariance');
+assert.ok(Number.isFinite(p4Covariance?.opposingTeamMeanCorrelation), 'P4 covariance summary must report finite opposing-team correlation');
 const p4Incomplete = applyGameSimulation({ ...p4Slate, playerPool: p4Slate.playerPool.map((player) => ({ ...player, opponent: undefined })) }, p4Baseline, 'game_simulation', 'p4-incomplete-seed');
 assert.ok(p4Incomplete.gaps.some(({ reason }) => reason.includes('no complete game/team mapping')));
 assert.equal(p4Incomplete.gameSimulation?.diagnostics?.baselineFallbackPlayers, p4Baseline.players.length);

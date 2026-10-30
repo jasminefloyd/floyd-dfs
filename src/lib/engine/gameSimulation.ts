@@ -81,14 +81,59 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
     };
   });
   const scoreMarginDistributions = summarizeScoreMargins(gameScores);
+  const covarianceChecks = summarizePlayerCovariance(games, samples, simulatedPlayerIds, trials);
   return {
     ...baseline,
     modelVersion: `${baseline.modelVersion}+${GAME_SIMULATION_MODEL_VERSION}`,
     players,
     status: 'PARTIAL',
     gaps: [...baseline.gaps, { reason: 'Connected NBA/NFL game simulations are experimental. Prospective actual-data validation and independent model review are required before any release promotion.' }, ...warnings.map((reason) => ({ reason }))],
-    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs, scoreMarginDistributions } },
+    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs, scoreMarginDistributions, covarianceChecks } },
   };
+}
+
+/** Descriptive within-simulation pairwise dependence; this is not empirical validation. */
+function summarizePlayerCovariance(games: Map<string, TeamScenario[]>, samples: Map<string, number[]>, simulatedPlayerIds: Set<string>, trials: number): NonNullable<NonNullable<ProjectionPackage['gameSimulation']>['diagnostics']>['covarianceChecks'] {
+  const result: NonNullable<NonNullable<ProjectionPackage['gameSimulation']>['diagnostics']>['covarianceChecks'] = [];
+  for (const [gameId, teams] of games) {
+    if (teams.length !== 2) continue;
+    const buckets = [
+      { covariances: [] as number[], correlations: [] as number[], zeroVariancePairs: 0 },
+      { covariances: [] as number[], correlations: [] as number[], zeroVariancePairs: 0 },
+    ];
+    const players = teams.flatMap((team) => team.players
+      .filter((player) => simulatedPlayerIds.has(player.playerId))
+      .map((player) => ({ team: team.team, playerId: player.playerId, values: samples.get(player.playerId) ?? [] })));
+    for (let left = 0; left < players.length; left += 1) {
+      for (let right = left + 1; right < players.length; right += 1) {
+        const a = players[left].values; const b = players[right].values;
+        const n = Math.min(trials, a.length, b.length);
+        if (n < 2) continue;
+        const meanA = mean(a.slice(0, n)); const meanB = mean(b.slice(0, n));
+        let covarianceSum = 0; let varianceASum = 0; let varianceBSum = 0;
+        for (let trial = 0; trial < n; trial += 1) {
+          const da = a[trial] - meanA; const db = b[trial] - meanB;
+          covarianceSum += da * db; varianceASum += da * da; varianceBSum += db * db;
+        }
+        const bucket = buckets[players[left].team === players[right].team ? 0 : 1];
+        bucket.covariances.push(covarianceSum / (n - 1));
+        if (varianceASum <= 0 || varianceBSum <= 0) bucket.zeroVariancePairs += 1;
+        else bucket.correlations.push(covarianceSum / Math.sqrt(varianceASum * varianceBSum));
+      }
+    }
+    result.push({
+      gameId, trials,
+      sameTeamPairCount: buckets[0].covariances.length,
+      ...(buckets[0].covariances.length ? { sameTeamMeanCovariance: mean(buckets[0].covariances) } : {}),
+      ...(buckets[0].correlations.length ? { sameTeamMeanCorrelation: mean(buckets[0].correlations) } : {}),
+      sameTeamZeroVariancePairs: buckets[0].zeroVariancePairs,
+      opposingTeamPairCount: buckets[1].covariances.length,
+      ...(buckets[1].covariances.length ? { opposingTeamMeanCovariance: mean(buckets[1].covariances) } : {}),
+      ...(buckets[1].correlations.length ? { opposingTeamMeanCorrelation: mean(buckets[1].correlations) } : {}),
+      opposingTeamZeroVariancePairs: buckets[1].zeroVariancePairs,
+    });
+  }
+  return result.sort((left, right) => left.gameId.localeCompare(right.gameId));
 }
 
 /** Descriptive diagnostics only: no unvalidated margin cutoff is labeled a blowout. */
