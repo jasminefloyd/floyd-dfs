@@ -4,6 +4,7 @@ import { ENGINE_CONTRACT_VERSION, type StreetTeamSnapshot } from '../src/lib/eng
 import { parseStreetTeamSnapshot } from '../src/lib/engine/boundaryContracts.js';
 import { SportsDataIoNbaStreetTeamProvider } from './nbaStreetTeamProvider.js';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
+import { deriveStreetTeamBehaviorSignals } from './streetTeam/behavior.js';
 
 const LEASE_MS = 10 * 60_000;
 /** The daily NBA collection cadence establishes the default current-state TTL. */
@@ -81,7 +82,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       rosterState: providerResult.rosterState,
       availability: providerResult.availability,
       transactions: providerResult.transactions,
-      behaviorSignals: [],
+      behaviorSignals: deriveStreetTeamBehaviorSignals(tenantId, providerResult.observations),
       unknowns: providerResult.unknowns,
       providerDiagnostics: providerResult.providerDiagnostics,
     };

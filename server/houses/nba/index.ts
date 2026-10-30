@@ -60,7 +60,7 @@ export async function analyzeNbaSlate(db: SupabaseClient, run: Record<string, un
     id: report.houseReportId, tenant_id: tenantId, sport: 'NBA', generation_run_id: generationRunId, intel_snapshot_id: report.intelSnapshotId,
     model_version: report.modelVersion, baseline_model_version: report.baselineModelVersion, forecast_cutoff: report.forecastCutoff,
     baseline: report.baselineProjections, adjustments: { adjustedProjections: report.adjustedProjections, driverAttributions: report.driverAttributions },
-    scenario_metadata: { simulation: adjustedProjections.gameSimulation ?? null, scenarioDistributions: report.scenarioDistributions, trustStatus: report.trustStatus, unknowns: report.unknowns, warnings },
+    scenario_metadata: { simulation: adjustedProjections.gameSimulation ?? null, scenarioDistributions: report.scenarioDistributions, behaviorSignals: snapshot.behaviorSignals, trustStatus: report.trustStatus, unknowns: report.unknowns, warnings },
     trust_status: report.trustStatus,
   });
   if (inserted.error) throw inserted.error;
