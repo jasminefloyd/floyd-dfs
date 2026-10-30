@@ -896,7 +896,7 @@ Apply existing tenant RLS conventions to all new tables, including policy covera
 2. **Resolved 2026-10-30:** before the additive migrations, the P0 production catalog snapshot was captured with table columns, defaults, constraints, indexes, RLS policies, views, and triggers; the additive FK names/types were based on that schema evidence. The linked production migration ledger was subsequently verified aligned through `20261030060000` with no pending or remote-only versions. The snapshot is catalog metadata, not a complete `pg_dump` DDL artifact.
 3. Existing NBA connected-game simulation is explicitly provisional; do not infer real-world accuracy from presence of code.
 4. **NBA access and storage verified 2026-10-30:** the user confirmed SportsDataIO production NBA access and storage rights, and the `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` marker was added to Vercel Production. Rate limits, rights for other sports/feeds, and redistribution or commercial-use terms remain outside that confirmation and require separate review before those uses.
-5. Current repository contains compiled `dist/` assets and Supabase `.temp` state; exclude generated artifacts from source reviews and deployment commits.
+5. **Resolved 2026-10-30:** `.gitignore` excludes `dist/` and `supabase/.temp/`; `git ls-files dist supabase/.temp` returned no tracked generated artifacts. Continue excluding these directories from source reviews and commits.
 
 ## J. Definition of done — NBA V1
 
