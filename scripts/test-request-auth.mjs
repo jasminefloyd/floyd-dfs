@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { isOperator, parseBearer, secretMatches, tenantHeaderAllowed } from '../server/authPolicy.mjs';
 
 assert.equal(parseBearer(undefined), undefined, 'missing bearer is denied');
@@ -12,4 +13,8 @@ assert.equal(secretMatches('incorrect-secret', 'correct-secret'), false, 'incorr
 assert.equal(secretMatches(undefined, 'correct-secret'), false, 'missing scheduler/worker secret is denied');
 assert.equal(isOperator('user-a', 'user-a,user-b'), true);
 assert.equal(isOperator('user-c', 'user-a,user-b'), false, 'unlisted users have no operator privilege');
+assert.match(readFileSync('api/results/import.ts', 'utf8'), /requireOperator\(context\)/, 'official CSV result imports require operator authorization');
+assert.match(readFileSync('api/results/import.ts', 'utf8'), /modelEvaluationEligible = eligible && officialOutcome/, 'a points match alone cannot mark an unofficial outcome evaluation eligible');
+assert.match(readFileSync('src/pages/HistoryPage.tsx', 'utf8'), /role === 'operator'/, 'official result import controls are hidden from member accounts');
+assert.match(readFileSync('api/lineups/[lineupId]/result.ts', 'utf8'), /officialOutcome: false/, 'manual member-entered results are not certified as official outcomes');
 console.log('Request authorization policy checks passed.');

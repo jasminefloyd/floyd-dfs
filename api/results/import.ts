@@ -2,12 +2,14 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'node:crypto';
 import { diagnoseLineupResult } from '../../server/learningDiagnosis.js';
 import { syncVerifiedPortfolioOutcome } from '../../server/learning/portfolioOutcomes.js';
-import { cors, getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
+import { cors, getOwnedLineupSlate, method, parseBody, requireOperator, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
 
 const COLUMNS = ['actual_dk_points'];
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
   try {
+    const context = await tenantContext(req);
+    requireOperator(context);
     const body = parseBody(req);
     const csv = typeof body.csvText === 'string' ? body.csvText : '';
     if (!csv.trim() || csv.length > 2_000_000) throw new Error('csvText is required and must be under 2 MB.');
@@ -16,7 +18,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     for (const required of COLUMNS) if (!headers.includes(required)) throw new Error(`CSV is missing required column "${required}".`);
     if (!headers.includes('lineup_id') && !(headers.includes('contest_id') && headers.includes('external_entry_id'))) throw new Error('CSV must include lineup_id, or both contest_id and external_entry_id from your linked DraftKings entry.');
     const batchId = crypto.randomUUID();
-    const context = await tenantContext(req);
     let imported = 0;
     const errors: Array<{ row: number; error: string }> = [];
     for (const [index, values] of records.entries()) {
@@ -119,10 +120,12 @@ export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<
   const actualSources = [...new Set(actualRows.filter((row) => playerIds.includes(String(row.player_id))).map((row) => String(row.provider ?? 'UNKNOWN')))];
   const source = actualSources.length ? actualSources.join(',') : 'PLAYER_ACTUALS_UNAVAILABLE';
   const reconciliation = { status, computedPlayerActualScore: computed === null ? null : Number(computed.toFixed(4)), recordedActualScore: input.enteredScore, difference, playerCount: playerIds.length, source, scoring: 'verified player actuals and saved roster slot multipliers', reasons: [...new Set(reasons)], reconciledAt: new Date().toISOString() };
-  const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, official_outcome: input.officialOutcome ?? true, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
+  const officialOutcome = input.officialOutcome ?? true;
+  const modelEvaluationEligible = eligible && officialOutcome;
+  const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: modelEvaluationEligible, official_outcome: officialOutcome, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
   if (update.error) throw update.error;
   await syncVerifiedPortfolioOutcome(context.db, { tenantId: context.tenantId, lineupId, resultId });
-  if ((eligible || status === 'MISMATCH') && selection.data) {
+  if ((status === 'MATCHED' || status === 'MISMATCH') && selection.data) {
     const snapshot = await context.db.from('floyd_dfs_lock_snapshots').select('research_version,adjustment_version,lineup_payload').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('locked_at', { ascending: false }).limit(1).maybeSingle();
     if (snapshot.error) throw snapshot.error;
     if (snapshot.data) {
