@@ -10,8 +10,13 @@ const LEASE_MS = 10 * 60_000;
 export const NBA_STREET_TEAM_SNAPSHOT_TTL_MS = 24 * 60 * 60_000;
 type CollectionClaim = { status: 'CLAIMED'; runId: string } | { status: 'ALREADY_COMPLETE' | 'ALREADY_RUNNING'; snapshotId?: string; asOf?: string; providerDiagnostics?: unknown[] };
 
+export function isSportsDataIoProductionVerifiedDataTier(value: unknown): boolean {
+  return String(value ?? '').trim().toUpperCase() === 'PRODUCTION_VERIFIED';
+}
+
 export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string, options: {
   apiKey: string;
+  dataTier?: string;
   baseUrl?: string;
   now?: () => Date;
   fetcher?: typeof fetch;
@@ -25,6 +30,17 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
   if (claimed.status !== 'CLAIMED') return claimed;
 
   try {
+    if (!isSportsDataIoProductionVerifiedDataTier(options.dataTier)) {
+      const finishedAt = now().toISOString();
+      const reason = 'Verified SportsDataIO production NBA data tier is not configured; no provider request was made.';
+      const blocked = await db.from('floyd_dfs_intel_collection_runs').update({
+        status: 'FAILED', finished_at: finishedAt, lease_expires_at: null,
+        result: { providerDiagnostics: [{ provider: 'SportsDataIO NBA', status: 'FAILED', retrievedAt: finishedAt, freshness: 'UNKNOWN', error: 'Production NBA data tier is not verified.' }], unknowns: [{ subject: { kind: 'LEAGUE', id: 'nba:league' }, question: 'Verified NBA roster and availability data source is unavailable.', reason }] },
+        error: { message: reason },
+      }).eq('id', claimed.runId).eq('tenant_id', tenantId);
+      if (blocked.error) throw blocked.error;
+      return { status: 'FAILED', providerDiagnostics: [{ provider: 'SportsDataIO NBA', status: 'FAILED', retrievedAt: finishedAt, freshness: 'UNKNOWN', error: 'Production NBA data tier is not verified.' }], unknowns: [{ reason }] };
+    }
     const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2 });
     const provider = new SportsDataIoNbaStreetTeamProvider(client, now);
     const providerResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS) });

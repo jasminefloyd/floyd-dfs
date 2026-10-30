@@ -55,6 +55,65 @@ export function mapWnbaOfficialPlayerStats(resultSet) {
 
 export const mapNbaOfficialPlayerStats = mapWnbaOfficialPlayerStats;
 
+/** SportsDataIO NBA feed dates use US Eastern Time. Reject mixed-date slates. */
+export function nbaOfficialGameDate(slate) {
+  const games = Array.isArray(slate?.games) ? slate.games : [];
+  let timestamps;
+  if (games.length) {
+    timestamps = games.map((game) => Date.parse(String(game?.scheduledStart ?? '')));
+    if (timestamps.some((timestamp) => !Number.isFinite(timestamp))) throw new Error('NBA slate has a game without a valid scheduled start.');
+  } else {
+    const eventDate = String(slate?.event?.eventDate ?? '');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) {
+      const dateTimestamp = Date.parse(`${eventDate}T00:00:00.000Z`);
+      if (Number.isFinite(dateTimestamp) && new Date(dateTimestamp).toISOString().slice(0, 10) === eventDate) return eventDate;
+      throw new Error('NBA slate has an invalid calendar event date.');
+    }
+    const eventTimestamp = Date.parse(eventDate);
+    if (!Number.isFinite(eventTimestamp)) throw new Error('NBA slate has no verified game date or scheduled start.');
+    timestamps = [eventTimestamp];
+  }
+  const dates = new Set(timestamps.map((timestamp) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(timestamp))));
+  if (dates.size !== 1) throw new Error('NBA slate spans multiple Eastern game dates; multi-date actual backfill is not supported for this saved run.');
+  return [...dates][0];
+}
+
+/** Resolve only a unique SportsDataIO provider ID for a DraftKings player ID. */
+export function resolveSportsDataIoDraftKingsPlayerId(draftKingsPlayerId, rosterRows) {
+  const draftKingsId = String(draftKingsPlayerId ?? '').trim();
+  if (!draftKingsId) return null;
+  const ids = [...new Set(rosterRows.flatMap((row) => String(row.DraftKingsPlayerID ?? row.DraftKingsPlayerId ?? '').trim() === draftKingsId
+    ? [String(row.PlayerID ?? row.PlayerId ?? '').trim()]
+    : []).filter(Boolean))];
+  return ids.length === 1 ? ids[0] : null;
+}
+
+/**
+ * Match an archived NBA slate player to an official NBA box-score row.
+ * Provider IDs take precedence when an explicit mapping exists. If there is no
+ * mapping, accept only one exact normalized full-name + team match; ambiguous
+ * or missing matches remain quarantined by the caller.
+ */
+export function matchNbaOfficialPlayer(slatePlayer, rows, providerPlayerId = '') {
+  const providerId = String(providerPlayerId ?? '').trim();
+  if (providerId) {
+    const team = normalizeIdentityTeam(slatePlayer?.team);
+    if (!team) return null;
+    const matches = rows.filter((row) => String(row.PlayerID ?? row.PlayerId ?? '').trim() === providerId && normalizeIdentityTeam(row.Team ?? row.TeamAbbreviation) === team);
+    return matches.length === 1 ? { row: matches[0], matchType: 'PROVIDER_ID' } : null;
+  }
+  const name = normalizeIdentityName(slatePlayer?.playerName ?? slatePlayer?.name);
+  const team = normalizeIdentityTeam(slatePlayer?.team);
+  if (!name || !team) return null;
+  const matches = rows.filter((row) => normalizeIdentityName(row.Name ?? row.PlayerName) === name && normalizeIdentityTeam(row.Team ?? row.TeamAbbreviation) === team);
+  return matches.length === 1 ? { row: matches[0], matchType: 'NAME_AND_TEAM' } : null;
+}
+
+function normalizeIdentityName(value) {
+  return String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function normalizeIdentityTeam(value) { return String(value ?? '').trim().toUpperCase(); }
+
 export function scoreMlbOfficial(row, scoringRules) {
   const rules = ruleMap(scoringRules);
   const stats = [

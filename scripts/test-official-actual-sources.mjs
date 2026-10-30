@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { actualPointIncrement, inningsOuts, mapMlbOfficialBoxScore, mapNbaOfficialPlayerStats, mapWnbaOfficialPlayerStats, scoreMlbOfficial, scoreNbaOfficial, scoreWnbaOfficial } from './officialActualSources.mjs';
+import { actualPointIncrement, inningsOuts, mapMlbOfficialBoxScore, mapNbaOfficialPlayerStats, mapWnbaOfficialPlayerStats, matchNbaOfficialPlayer, nbaOfficialGameDate, resolveSportsDataIoDraftKingsPlayerId, scoreMlbOfficial, scoreNbaOfficial, scoreWnbaOfficial } from './officialActualSources.mjs';
 
 const mlbBox = { teams: { away: { team: { abbreviation: 'SF' }, players: { ID100: { person: { id: 100, fullName: 'Rafael Devers' }, stats: { batting: { atBats: 4, hits: 2, doubles: 0, triples: 0, homeRuns: 1, runs: 1, rbi: 2, strikeOuts: 0, baseOnBalls: 1, hitByPitch: 0, stolenBases: 0 } } }, ID101: { person: { id: 101, fullName: 'Bench Player' }, stats: { batting: {}, pitching: {} } } } } } };
 const mlbRows = mapMlbOfficialBoxScore(823180, mlbBox);
@@ -28,8 +28,21 @@ assert.equal(wnbaActual.components.minutes, 11.2);
 assert.ok(Number.isNaN(scoreWnbaOfficial(wnbaRows[0], { points: { value: 1 } }).points));
 const nbaStats = { headers: ['GAME_ID','TEAM_ABBREVIATION','PLAYER_ID','PLAYER_NAME','MIN','COMMENT','FG3M','REB','AST','STL','BLK','TO','PTS'], rowSet: [['0022600001','BOS',1628369,'Jayson Tatum','30:00','',4,8,6,2,4,4,20]] };
 const nbaRows = mapNbaOfficialPlayerStats(nbaStats);
+assert.equal(nbaOfficialGameDate({ games: [{ scheduledStart: '2026-10-23T01:30:00.000Z' }] }), '2026-10-22', 'NBA API dates are based on the saved Eastern game date, not the UTC date');
+assert.throws(() => nbaOfficialGameDate({ games: [{ scheduledStart: '2026-10-23T01:30:00.000Z' }, { scheduledStart: '2026-10-23T04:30:00.000Z' }] }), /multiple Eastern game dates/);
+assert.throws(() => nbaOfficialGameDate({ games: [{ scheduledStart: '2026-10-23T01:30:00.000Z' }, { scheduledStart: 'unverified' }] }), /without a valid scheduled start/);
+assert.equal(nbaOfficialGameDate({ event: { eventDate: '2026-10-23' }, games: [] }), '2026-10-23', 'an event date without game timestamps remains a calendar date');
+assert.equal(resolveSportsDataIoDraftKingsPlayerId('44616323', [{ PlayerID: 123, DraftKingsPlayerID: 44616323 }]), '123');
+assert.equal(resolveSportsDataIoDraftKingsPlayerId('44616323', [{ PlayerID: 123, DraftKingsPlayerID: 44616323 }, { PlayerID: 124, DraftKingsPlayerID: 44616323 }]), null, 'ambiguous DraftKings cross-references are rejected');
+assert.equal(resolveSportsDataIoDraftKingsPlayerId('missing', [{ PlayerID: 123, DraftKingsPlayerID: 44616323 }]), null);
 assert.equal(nbaRows[0].GameID, '0022600001');
 assert.equal(nbaRows[0].PlayerID, '1628369');
+assert.deepEqual(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'BOS' }, nbaRows), { row: nbaRows[0], matchType: 'NAME_AND_TEAM' });
+assert.deepEqual(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'BOS' }, nbaRows, '1628369'), { row: nbaRows[0], matchType: 'PROVIDER_ID' });
+assert.equal(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'BOS' }, nbaRows, 'wrong-id'), null, 'an explicit provider mapping mismatch is not hidden by name fallback');
+assert.equal(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'NYK' }, nbaRows, '1628369'), null, 'a provider ID cannot override an archived-team mismatch');
+assert.equal(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'NYK' }, nbaRows), null, 'a different team cannot match by name alone');
+assert.equal(matchNbaOfficialPlayer({ playerName: 'Jayson Tatum', team: 'BOS' }, [...nbaRows, { ...nbaRows[0], GameID: '0022600002' }]), null, 'multiple exact name/team matches are quarantined as ambiguous');
 assert.equal(scoreNbaOfficial(nbaRows[0], wnbaRules).points, 51);
 const nbaGolden = scoreNbaOfficial({ Points: 20, ThreePointersMade: 4, Rebounds: 8, Assists: 6, Steals: 2, BlockedShots: 4, Turnovers: 4 }, { points: 1, threePointersMade: 0.5, rebounds: 1.25, assists: 1.5, steals: 2, blocks: 2, turnovers: -0.5, doubleDouble: 1.5, tripleDouble: 3 });
 assert.equal(nbaGolden.points, 51, 'official actual scoring uses the same category scorer as fallback projection');

@@ -19,6 +19,7 @@ try {
 const runtimeMigration = readFileSync('supabase/migrations/20261030030000_street_team_collection_runtime.sql', 'utf8');
 const rlsTest = readFileSync('supabase/tests/p2_street_team_immutability.sql', 'utf8');
 const collectRoute = readFileSync('api/street-team/collect.ts', 'utf8');
+const streetTeamService = readFileSync('server/streetTeam.ts', 'utf8');
 const briefingRoute = readFileSync('api/street-team/briefings.ts', 'utf8');
 const vercel = JSON.parse(readFileSync('vercel.json', 'utf8'));
 for (const table of ['floyd_dfs_intel_snapshots', 'floyd_dfs_intel_snapshot_observations']) {
@@ -31,6 +32,9 @@ assert.match(rlsTest, /append-only snapshot trigger/i);
 assert.match(collectRoute, /schedulerContext\(req\)/);
 assert.match(collectRoute, /requireOperator\(context\)/);
 assert.match(collectRoute, /isFeatureEnabled\('STREET_TEAM_V2'\)/);
+assert.match(collectRoute, /dataTier: process\.env\.SPORTS_DATA_IO_DATA_TIER/);
+assert.match(streetTeamService, /isSportsDataIoProductionVerifiedDataTier\(options\.dataTier\)/);
+assert.match(streetTeamService, /no provider request was made/);
 assert.match(briefingRoute, /tenantContext\(req\)/);
 assert.match(briefingRoute, /snapshot: null/);
 assert.match(briefingRoute, /latestCollectionRun/);

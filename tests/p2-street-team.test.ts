@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
 import { SportsDataIoNbaStreetTeamProvider } from '../server/nbaStreetTeamProvider.js';
-import { NBA_STREET_TEAM_SNAPSHOT_TTL_MS, streetTeamSnapshotFreshness } from '../server/streetTeam.js';
+import { collectNbaStreetTeam, isSportsDataIoProductionVerifiedDataTier, NBA_STREET_TEAM_SNAPSHOT_TTL_MS, streetTeamSnapshotFreshness } from '../server/streetTeam.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type { StreetTeamSnapshot } from '../src/lib/engine/contracts.js';
 
 const fixedNow = () => new Date('2026-10-29T16:00:00.000Z');
@@ -27,6 +28,29 @@ const fetcher: typeof fetch = async (input, init) => {
 };
 
 async function main(): Promise<void> {
+assert.equal(isSportsDataIoProductionVerifiedDataTier(undefined), false);
+assert.equal(isSportsDataIoProductionVerifiedDataTier('trial'), false);
+assert.equal(isSportsDataIoProductionVerifiedDataTier('PRODUCTION_VERIFIED'), true);
+assert.equal(isSportsDataIoProductionVerifiedDataTier(' production_verified '), true);
+const blockedRunUpdates: Record<string, unknown>[] = [];
+const blockedRunQuery = {
+  insert: () => blockedRunQuery,
+  select: () => blockedRunQuery,
+  single: async () => ({ data: { id: 'blocked-run' }, error: null }),
+  update: (value: Record<string, unknown>) => { blockedRunUpdates.push(value); return blockedRunQuery; },
+  eq: () => blockedRunQuery,
+  then: (resolve: (value: { error: null }) => unknown) => Promise.resolve({ error: null }).then(resolve),
+};
+const blockedRunDb = { from: () => blockedRunQuery } as unknown as SupabaseClient;
+let blockedProviderRequests = 0;
+const blockedCollection = await collectNbaStreetTeam(blockedRunDb, 'tenant-test', {
+  apiKey: 'test-key', dataTier: 'TRIAL', now: fixedNow,
+  fetcher: async () => { blockedProviderRequests += 1; throw new Error('Provider must not be called without verified NBA access.'); },
+});
+assert.equal(blockedCollection.status, 'FAILED');
+assert.equal(blockedProviderRequests, 0);
+assert.equal(blockedRunUpdates[0]?.status, 'FAILED');
+assert.match(String((blockedRunUpdates[0]?.error as Record<string, unknown>)?.message), /no provider request was made/);
 assert.equal(NBA_STREET_TEAM_SNAPSHOT_TTL_MS, 24 * 60 * 60_000);
 const freshnessSnapshot: StreetTeamSnapshot = {
   contractVersion: 'p2.test',

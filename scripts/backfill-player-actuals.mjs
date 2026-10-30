@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import { createHash } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
-import { actualPointIncrement, mapMlbOfficialBoxScore, mapNbaOfficialPlayerStats, mapWnbaOfficialPlayerStats, mlbTeamCode, scoreMlbOfficial, scoreWnbaOfficial } from './officialActualSources.mjs';
+import { actualPointIncrement, mapMlbOfficialBoxScore, mapWnbaOfficialPlayerStats, matchNbaOfficialPlayer, mlbTeamCode, nbaOfficialGameDate, resolveSportsDataIoDraftKingsPlayerId, scoreMlbOfficial, scoreWnbaOfficial } from './officialActualSources.mjs';
 import { fetchNflverseFinalPlayerRows, scoreNflversePlayer } from './nflverseActuals.mjs';
 
 dotenv.config({ path: '.env.local', quiet: true });
@@ -10,11 +10,13 @@ const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sportsKey = process.env.SPORTS_DATA_IO_KEY;
 const apiRoot = (process.env.SPORTS_DATA_IO_BASE_URL || 'https://api.sportsdata.io/v3').replace(/\/+$/, '');
+const requestTimeoutMs = boundedInteger(process.env.FDS_ACTUALS_REQUEST_TIMEOUT_MS, 25_000, 1_000, 60_000);
 if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured.');
 // SportsDataIO's free trial intentionally scrambles statistics. HTTP 200 and
 // plausible JSON are not proof that the returned numbers are real. Production
 // actual imports require a separate, manually verified entitlement attestation.
 const sourceDataTier = String(process.env.SPORTS_DATA_IO_DATA_TIER ?? 'UNKNOWN').trim().toUpperCase();
+const backfillOptions = parseBackfillOptions(process.argv.slice(2));
 const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { transport: WebSocket } });
 
 const { data: tenant, error: tenantError } = await db.from('tenants').select('id').eq('slug', 'floyd-dfs').single();
@@ -34,6 +36,7 @@ for (let index = 0; index < runIds.length; index += 200) {
 }
 const eligible = (projections ?? []).flatMap((projection) => {
   if (!['MLB', 'WNBA', 'NBA', 'NFL', 'CFB', 'GOLF'].includes(projection.sport)) return [];
+  if (backfillOptions.sports && !backfillOptions.sports.has(projection.sport)) return [];
   const run = runById.get(projection.generation_run_id);
   const rawSlate = run?.request_payload?.input?.validatedSlate;
   const stage = stageByRun.get(projection.generation_run_id);
@@ -42,18 +45,22 @@ const eligible = (projections ?? []).flatMap((projection) => {
   const slate = rawSlate ? { ...rawSlate, playerPool: array(rawSlate.playerPool).map((player) => ({ ...player, ...(enrichedPlayers.get(String(player.playerId)) ?? {}) })) } : null;
   const lock = Date.parse(slate?.contest?.lockTime ?? '');
   const generated = Date.parse(projection.projection_package?.generatedAt ?? '');
-  const eventDate = String(slate?.event?.eventDate ?? '').slice(0, 10);
-  if (!Number.isFinite(lock) || !Number.isFinite(generated) || generated >= lock || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) || eventDate >= new Date().toISOString().slice(0, 10)) return [];
+  let eventDate;
+  try { eventDate = projection.sport === 'NBA' ? nbaOfficialGameDate(slate) : String(slate?.event?.eventDate ?? '').slice(0, 10); }
+  catch { return []; }
+  const today = projection.sport === 'NBA' ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()) : new Date().toISOString().slice(0, 10);
+  if (!Number.isFinite(lock) || !Number.isFinite(generated) || generated >= lock || !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) || eventDate >= today) return [];
   return [{ projection, run, slate, lock: new Date(lock).toISOString(), generated: new Date(generated).toISOString(), eventDate }];
 });
 
 const cache = new Map();
 const golfCatalog = new Map();
+let sportsDataIoNbaPlayers;
 async function requestJson(base, route) {
   const headers = { accept: 'application/json' };
   if (base.includes('sportsdata.io') && sportsKey) headers['Ocp-Apim-Subscription-Key'] = sportsKey;
   if (base.includes('stats.wnba.com')) Object.assign(headers, { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36', Referer: 'https://www.wnba.com/', Origin: 'https://www.wnba.com', 'x-nba-stats-origin': 'stats', 'x-nba-stats-token': 'true' });
-  const response = await fetch(`${base}/${route}`, { headers });
+  const response = await fetch(`${base}/${route}`, { headers, signal: AbortSignal.timeout(requestTimeoutMs) });
   if (!response.ok) throw new Error(`Official/provider endpoint ${route} returned HTTP ${response.status}.`);
   return response.json();
 }
@@ -63,7 +70,7 @@ async function feed(sport, date, slate) {
   let rows = [];
   if (sport === 'MLB') rows = await officialMlbRows(date, slate);
   else if (sport === 'WNBA') rows = await officialBasketballRows(date, '10', mapWnbaOfficialPlayerStats);
-  else if (sport === 'NBA') rows = await officialBasketballRows(date, '00', mapNbaOfficialPlayerStats);
+  else if (sport === 'NBA') rows = array(await requestJson(apiRoot, `nba/stats/json/PlayerGameStatsByDateFinal/${date}`));
   else if (sport === 'NFL') rows = await fetchNflverseFinalPlayerRows(slate);
   else if (sport === 'CFB') {
     const teams = new Set((slate.playerPool ?? []).map((player) => normalizeTeam(player.team)));
@@ -149,18 +156,24 @@ async function readAll(makeQuery, pageSize = 1000) {
   }
 }
 
-const report = { eligibleProjectionRuns: eligible.length, importedRows: 0, verifiedRows: 0, quarantinedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, blockedUnverifiedProviderRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
+const report = { dryRun: backfillOptions.dryRun, eligibleProjectionRuns: eligible.length, preparedRows: 0, preparedVerifiedRows: 0, preparedQuarantinedRows: 0, importedRows: 0, verifiedRows: 0, quarantinedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, blockedUnverifiedProviderRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
+console.error(`NBA actual backfill: ${eligible.length} eligible projection run(s); dryRun=${backfillOptions.dryRun}; external request timeout=${requestTimeoutMs}ms.`);
 for (const item of eligible) {
   const { projection, slate, eventDate, lock, generated } = item;
   const sport = projection.sport;
-  report.bySport[sport] ??= { eligibleRuns: 0, providerRows: 0, matchedPlayers: 0, unscorableMatches: 0, importedRows: 0, unmatchedPlayers: 0, missingProjection: 0, feedFailures: 0 };
+  report.bySport[sport] ??= { eligibleRuns: 0, providerRows: 0, matchedPlayers: 0, unscorableMatches: 0, preparedRows: 0, importedRows: 0, unmatchedPlayers: 0, missingProjection: 0, feedFailures: 0, blockedUnverifiedProviderRuns: 0, feedFailureReasons: [] };
   report.bySport[sport].eligibleRuns += 1;
   if (sport === 'GOLF' && slate.contest?.format !== 'CLASSIC') { report.unsupportedFormatRuns += 1; continue; }
   if (sport === 'CFB') { report.unsupportedScoringRuns += 1; continue; }
-  if (sport === 'CFB' && (!sportsKey || sourceDataTier !== 'PRODUCTION_VERIFIED')) { report.blockedUnverifiedProviderRuns += 1; continue; }
+  if ((sport === 'CFB' || sport === 'NBA') && (!sportsKey || sourceDataTier !== 'PRODUCTION_VERIFIED')) { report.blockedUnverifiedProviderRuns += 1; report.bySport[sport].blockedUnverifiedProviderRuns += 1; continue; }
   let actualRows;
   try { actualRows = await feed(sport, eventDate, slate); }
-  catch { report.unavailableFeedRuns += 1; report.bySport[sport].feedFailures += 1; continue; }
+  catch (error) {
+    report.unavailableFeedRuns += 1;
+    report.bySport[sport].feedFailures += 1;
+    report.bySport[sport].feedFailureReasons.push(safeFailure(error));
+    continue;
+  }
   report.bySport[sport].providerRows += actualRows.length;
   const slatePlayers = array(slate.playerPool);
   const packagePlayers = array(projection.projection_package?.players);
@@ -175,9 +188,17 @@ for (const item of eligible) {
   if (sport === 'NBA') {
     const canonicalIds = slatePlayers.map((player) => String(player.playerId));
     for (let offset = 0; offset < canonicalIds.length; offset += 200) {
-      const { data, error } = await db.from('floyd_dfs_player_provider_mappings').select('canonical_player_id,provider_player_id').eq('tenant_id', tenant.id).eq('sport', 'NBA').eq('provider', 'NBA_STATS_API').in('canonical_player_id', canonicalIds.slice(offset, offset + 200));
+      const { data, error } = await db.from('floyd_dfs_player_provider_mappings').select('canonical_player_id,provider_player_id').eq('tenant_id', tenant.id).eq('sport', 'NBA').eq('provider', 'SPORTSDATAIO').in('canonical_player_id', canonicalIds.slice(offset, offset + 200));
       if (error) throw error;
       for (const mapping of data ?? []) nbaProviderIdByCanonical.set(String(mapping.canonical_player_id), String(mapping.provider_player_id));
+    }
+    if (!sportsDataIoNbaPlayers) sportsDataIoNbaPlayers = requestJson(apiRoot, 'nba/scores/json/Players').then(array);
+    const rosterRows = await sportsDataIoNbaPlayers;
+    for (const player of slatePlayers) {
+      if (nbaProviderIdByCanonical.has(String(player.playerId))) continue;
+      const draftKingsId = String(player.identity?.draftKingsId ?? player.playerId ?? '').trim();
+      const providerPlayerId = resolveSportsDataIoDraftKingsPlayerId(draftKingsId, rosterRows);
+      if (providerPlayerId) nbaProviderIdByCanonical.set(String(player.playerId), providerPlayerId);
     }
   }
   const prepared = [];
@@ -188,10 +209,15 @@ for (const item of eligible) {
       if (namedProjections.length === 1) projected = namedProjections[0];
     }
     if (!projected) { report.bySport[sport].missingProjection += 1; continue; }
-    const officialLeagueFeed = sport === 'MLB' || sport === 'WNBA' || sport === 'NBA';
+    const officialLeagueFeed = sport === 'MLB' || sport === 'WNBA';
     const providerId = sport === 'NBA' ? nbaProviderIdByCanonical.get(String(player.playerId)) ?? '' : officialLeagueFeed ? '' : sport === 'NFL' ? '' : String(player.identity?.sportsDataIoId ?? '');
     let matches = providerId ? actualRows.filter((row) => String(row.PlayerID ?? row.PlayerId ?? '') === providerId) : [];
     let matchType = 'PROVIDER_ID';
+    if (sport === 'NBA') {
+      const match = matchNbaOfficialPlayer(player, actualRows, providerId);
+      matches = match ? [match.row] : [];
+      matchType = match?.matchType ?? (providerId ? 'PROVIDER_ID' : 'NAME_AND_TEAM');
+    }
     const draftKingsId = String(player.identity?.draftKingsId ?? player.playerId ?? '');
     if (!matches.length && sport === 'GOLF' && draftKingsId) {
       matches = actualRows.filter((row) => String(row.DraftKingsPlayerID ?? row.DraftKingsPlayerId ?? '') === draftKingsId);
@@ -214,15 +240,15 @@ for (const item of eligible) {
     const scoringRules = slate.scoringRules ?? slate.contest?.scoringRules;
     const actual = sport === 'MLB' ? scoreMlbOfficial(matches[0], scoringRules) : sport === 'WNBA' || sport === 'NBA' ? scoreWnbaOfficial(matches[0], scoringRules) : sport === 'NFL' ? scoreNflversePlayer(matches[0], scoringRules) : scoreActual(sport, matches[0], scoringRules);
     if (!Number.isFinite(actual.points)) { report.bySport[sport].unscorableMatches += 1; continue; }
-    const rowDataTier = officialLeagueFeed ? 'OFFICIAL_LEAGUE_STATS' : sport === 'NFL' ? 'NFLVERSE_CC_BY_4.0_PUBLIC_STATS' : 'SPORTSDATAIO_PRODUCTION_VERIFIED';
+    const rowDataTier = officialLeagueFeed ? 'OFFICIAL_LEAGUE_STATS' : sport === 'NBA' || sport === 'CFB' || sport === 'GOLF' ? 'SPORTSDATAIO_PRODUCTION_VERIFIED' : 'NFLVERSE_CC_BY_4.0_PUBLIC_STATS';
     const integrity = validateActual(sport, matches[0], actual, rowDataTier, scoringRules);
     const retrievedAt = new Date().toISOString();
     const endpoint = endpointFor(sport, eventDate);
-    const sourceProvider = sport === 'MLB' ? 'MLB_STATS_API_FINAL' : sport === 'WNBA' ? 'WNBA_STATS_API_FINAL' : sport === 'NBA' ? 'NBA_STATS_API_FINAL' : sport === 'NFL' ? 'NFLVERSE_WEEKLY_PLAYER_STATS_FINAL' : 'SPORTSDATAIO_FINAL';
+    const sourceProvider = sport === 'MLB' ? 'MLB_STATS_API_FINAL' : sport === 'WNBA' ? 'WNBA_STATS_API_FINAL' : sport === 'NBA' ? 'SPORTSDATAIO_NBA_FINAL' : sport === 'NFL' ? 'NFLVERSE_WEEKLY_PLAYER_STATS_FINAL' : 'SPORTSDATAIO_FINAL';
     const providerPlayerId = String(matches[0].PlayerID ?? matches[0].PlayerId ?? '');
     const providerGameId = String(matches[0].GameID ?? matches[0].GameId ?? matches[0].gameId ?? '');
     const scoringRulesSha256 = createHash('sha256').update(stableJson(scoringRules ?? {})).digest('hex');
-    const actualRow = { tenant_id: tenant.id, generation_run_id: projection.generation_run_id, projection_run_id: projection.id, slate_id: `${sport}:${slate.event?.eventId ?? eventDate}:${eventDate}:${slate.contest?.format ?? 'UNKNOWN'}`, sport, contest_format: slate.contest?.format ?? 'UNKNOWN', event_date: eventDate, player_id: String(player.playerId), provider_player_id: providerPlayerId, provider_game_id: providerGameId || null, source_record_id: providerGameId && providerPlayerId ? `${providerGameId}:${providerPlayerId}` : null, season_id: String(slate.event?.seasonId ?? slate.seasonId ?? '') || null, player_name: String(player.playerName), team: player.team ?? null, position: player.position ?? null, model_version: projection.model_version, scoring_rules_sha256: scoringRulesSha256, projection_generated_at: generated, lock_time: lock, projected_floor: projected.floor, projected_median: projected.median, projected_ceiling: projected.ceiling, baseline_fppg: projected.baselineFppg ?? (Number.isFinite(Number(player.providerFppg)) ? Number(player.providerFppg) : null), actual_dk_points: actual.points, actual_components: actual.components, provider: sourceProvider, identity_match: matchType, source_validation_status: integrity.valid ? 'VERIFIED' : 'INVALID_SOURCE', source_validation_reason: integrity.reason ?? null, source_retrieved_at: retrievedAt, source_data_tier: rowDataTier, source_provenance: { provider: sport === 'NFL' ? 'nflverse-data' : officialLeagueFeed ? sourceProvider : 'SportsDataIO', endpoint, responseUpdatedAt: matches[0].Updated ?? matches[0].updated ?? null, dataTier: rowDataTier, license: sport === 'NFL' ? 'CC BY 4.0; attribution required; secondary source, not official NFL' : undefined, scoringRulesSha256, matching: sport === 'NBA' ? 'tenant-mapped NBA_STATS_API canonical player ID plus official game ID and event date' : 'exact normalized player name and team; no fuzzy identity match' }, finality_status: 'FINAL' };
+    const actualRow = { tenant_id: tenant.id, generation_run_id: projection.generation_run_id, projection_run_id: projection.id, slate_id: `${sport}:${slate.event?.eventId ?? eventDate}:${eventDate}:${slate.contest?.format ?? 'UNKNOWN'}`, sport, contest_format: slate.contest?.format ?? 'UNKNOWN', event_date: eventDate, player_id: String(player.playerId), provider_player_id: providerPlayerId, provider_game_id: providerGameId || null, source_record_id: providerGameId && providerPlayerId ? `${providerGameId}:${providerPlayerId}` : null, season_id: String(slate.event?.seasonId ?? slate.seasonId ?? '') || null, player_name: String(player.playerName), team: player.team ?? null, position: player.position ?? null, model_version: projection.model_version, scoring_rules_sha256: scoringRulesSha256, projection_generated_at: generated, lock_time: lock, projected_floor: projected.floor, projected_median: projected.median, projected_ceiling: projected.ceiling, baseline_fppg: projected.baselineFppg ?? (Number.isFinite(Number(player.providerFppg)) ? Number(player.providerFppg) : null), actual_dk_points: actual.points, actual_components: actual.components, provider: sourceProvider, identity_match: matchType, source_validation_status: integrity.valid ? 'VERIFIED' : 'INVALID_SOURCE', source_validation_reason: integrity.reason ?? null, source_retrieved_at: retrievedAt, source_data_tier: rowDataTier, source_provenance: { provider: sport === 'NFL' ? 'nflverse-data' : sport === 'MLB' || sport === 'WNBA' ? sourceProvider : 'SportsDataIO', endpoint, responseUpdatedAt: matches[0].Updated ?? matches[0].updated ?? null, dataTier: rowDataTier, license: sport === 'NFL' ? 'CC BY 4.0; attribution required; secondary source, not official NFL' : undefined, scoringRulesSha256, matching: sport === 'NBA' ? 'verified SportsDataIO DraftKingsPlayerID cross-reference to unique provider PlayerID; then provider ID and final game ID' : 'exact normalized player name and team; no fuzzy identity match' }, finality_status: 'FINAL' };
     actualRow.content_sha256 = createHash('sha256').update(stableJson({ points: actualRow.actual_dk_points, components: actualRow.actual_components, scoringRulesSha256, provider: actualRow.provider, sourceDataTier: rowDataTier, sourceValidationStatus: actualRow.source_validation_status })).digest('hex');
     prepared.push(actualRow);
   }
@@ -241,18 +267,26 @@ for (const item of eligible) {
       }
     }
     const historicalRows = batch.map(({ content_sha256: _contentSha, ...row }) => row);
-    const { error } = await db.from('floyd_dfs_historical_player_actuals').upsert(historicalRows, { onConflict: 'tenant_id,projection_run_id,player_id' });
-    if (error) throw error;
-    const revisions = batch.map((row) => ({ tenant_id: row.tenant_id, generation_run_id: row.generation_run_id, projection_run_id: row.projection_run_id, sport: row.sport, event_date: row.event_date, player_id: row.player_id, provider_game_id: row.provider_game_id, source_record_id: row.source_record_id, season_id: row.season_id, scoring_rules_sha256: row.scoring_rules_sha256, actual_dk_points: row.actual_dk_points, actual_components: row.actual_components, source: row.provider, source_validation_status: row.source_validation_status, source_validation_reason: row.source_validation_reason, finality_status: row.finality_status, source_retrieved_at: row.source_retrieved_at, content_sha256: row.content_sha256, source_data_tier: row.source_data_tier, source_provenance: row.source_provenance }));
-    const revisionResult = await db.from('floyd_dfs_player_actual_revisions').upsert(revisions, { onConflict: 'tenant_id,projection_run_id,player_id,content_sha256', ignoreDuplicates: true });
-    if (revisionResult.error) throw revisionResult.error;
-    report.verifiedRows += batch.filter((row) => row.source_validation_status === 'VERIFIED').length;
-    report.quarantinedRows += batch.filter((row) => row.source_validation_status !== 'VERIFIED').length;
+    report.preparedVerifiedRows += batch.filter((row) => row.source_validation_status === 'VERIFIED').length;
+    report.preparedQuarantinedRows += batch.filter((row) => row.source_validation_status !== 'VERIFIED').length;
+    if (!backfillOptions.dryRun) {
+      const { error } = await db.from('floyd_dfs_historical_player_actuals').upsert(historicalRows, { onConflict: 'tenant_id,projection_run_id,player_id' });
+      if (error) throw error;
+      const revisions = batch.map((row) => ({ tenant_id: row.tenant_id, generation_run_id: row.generation_run_id, projection_run_id: row.projection_run_id, sport: row.sport, event_date: row.event_date, player_id: row.player_id, provider_game_id: row.provider_game_id, source_record_id: row.source_record_id, season_id: row.season_id, scoring_rules_sha256: row.scoring_rules_sha256, actual_dk_points: row.actual_dk_points, actual_components: row.actual_components, source: row.provider, source_validation_status: row.source_validation_status, source_validation_reason: row.source_validation_reason, finality_status: row.finality_status, source_retrieved_at: row.source_retrieved_at, content_sha256: row.content_sha256, source_data_tier: row.source_data_tier, source_provenance: row.source_provenance }));
+      const revisionResult = await db.from('floyd_dfs_player_actual_revisions').upsert(revisions, { onConflict: 'tenant_id,projection_run_id,player_id,content_sha256', ignoreDuplicates: true });
+      if (revisionResult.error) throw revisionResult.error;
+      report.verifiedRows += batch.filter((row) => row.source_validation_status === 'VERIFIED').length;
+      report.quarantinedRows += batch.filter((row) => row.source_validation_status !== 'VERIFIED').length;
+    }
   }
-  report.importedRows += prepared.length;
-  report.bySport[sport].importedRows += prepared.length;
+  report.preparedRows += prepared.length;
+  report.bySport[sport].preparedRows += prepared.length;
+  if (!backfillOptions.dryRun) {
+    report.importedRows += prepared.length;
+    report.bySport[sport].importedRows += prepared.length;
+  }
 }
-report.resultReconciliation = await reconcileExistingResults();
+report.resultReconciliation = backfillOptions.dryRun ? 'SKIPPED_DURING_DRY_RUN' : await reconcileExistingResults();
 console.log(JSON.stringify(report, null, 2));
 
 async function reconcileExistingResults() {
@@ -302,6 +336,22 @@ async function saveReconciliation(result, status, computed, difference, playerCo
 }
 
 function array(value) { return Array.isArray(value) ? value : []; }
+function boundedInteger(value, fallback, min, max) { const parsed = Number(value); return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback; }
+function safeFailure(error) { return (error instanceof Error ? error.message : 'Official/provider feed request failed.').replace(/https?:\/\/[^\s?]+\?[^\s]+/g, '[provider URL]').slice(0, 300); }
+function parseBackfillOptions(args) {
+  if (!args.length) return { sports: null, dryRun: false };
+  const selected = [];
+  let dryRun = false;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === '--dry-run') { dryRun = true; continue; }
+    const value = args[index] === '--sport' ? args[++index] : args[index].startsWith('--sport=') ? args[index].slice('--sport='.length) : null;
+    if (!value) throw new Error('Supported arguments are --sport NBA (repeatable) and --dry-run; omit --sport to process all supported sports.');
+    const sport = value.toUpperCase();
+    if (!['MLB', 'WNBA', 'NBA', 'NFL', 'CFB', 'GOLF'].includes(sport)) throw new Error(`Unsupported backfill sport: ${value}.`);
+    selected.push(sport);
+  }
+  return { sports: selected.length ? new Set(selected) : null, dryRun };
+}
 function normalizeName(value) { return String(value).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
 function normalizeTeam(value) { const code = String(value ?? '').trim().toUpperCase(); return ({ LV: 'LVA', LAS: 'LVA', IN: 'IND', NY: 'NYL', LA: 'LAS', CON: 'CONN', CHW: 'CWS', ATH: 'OAK', KCR: 'KC', SDP: 'SD', WAS: 'WSH', ARI: 'AZ' })[code] ?? code; }
 function normalizeNflTeam(value) { const code = String(value ?? '').trim().toUpperCase(); return ({ JAC: 'JAX', LA: 'LAR', OAK: 'LV', LV: 'LV', SD: 'LAC', STL: 'LAR', WSH: 'WAS' })[code] ?? code; }
@@ -342,7 +392,7 @@ function validateActual(sport, row, actual, rowDataTier, scoringRules) {
 function endpointFor(sport, date) {
   if (sport === 'MLB') return `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${date}; box score https://statsapi.mlb.com/api/v1/game/{gamePk}/boxscore`;
   if (sport === 'WNBA') return `https://stats.wnba.com/stats/scoreboardv2?LeagueID=10&GameDate=${date}; box score https://stats.wnba.com/stats/boxscoretraditionalv2?GameID={gameId}&LeagueID=10`;
-  if (sport === 'NBA') return `https://stats.nba.com/stats/scoreboardv2?LeagueID=00&GameDate=${date}; box score https://stats.nba.com/stats/boxscoretraditionalv2?GameID={gameId}&LeagueID=00`;
+  if (sport === 'NBA') return `${apiRoot}/nba/stats/json/PlayerGameStatsByDateFinal/${date}; roster cross-reference ${apiRoot}/nba/scores/json/Players`;
   if (sport === 'NFL') return 'https://github.com/nflverse/nflverse-data/releases/tag/player_stats; final games resolved from nflverse/nfldata schedule';
   if (sport === 'CFB') return 'cfb/stats/json/PlayerGameStatsByWeekFinal';
   if (sport === 'GOLF') return `golf/v2/json/FantasyGameStatsByTournament`;

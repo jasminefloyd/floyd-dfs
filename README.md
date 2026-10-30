@@ -43,7 +43,7 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=...
 ```
 
-The service-role key, SportsDataIO key, and OpenAI key must be configured as Vercel server environment variables and must not use the `VITE_` prefix. See the [environment inventory](docs/FDS_Environment_Variables.md) for server/client boundaries and safety gates.
+The service-role key, SportsDataIO key, and OpenAI key must be configured as Vercel server environment variables and must not use the `VITE_` prefix. `STREET_TEAM_V2` and `NBA_HOUSE_V1` are production rollout switches; `PORTFOLIO_EV_V1` and `LEARNING_V2` stay disabled until their release gates pass. NBA Street Team collection and NBA actual imports also require `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED`; without it, collection is blocked before calling the provider.
 
 ## Verification commands
 
@@ -63,14 +63,14 @@ The deterministic CI workflow runs the build, typecheck, lint, engine parity, so
 
 ## Data and DraftKings files
 
-`npm run backfill:player-actuals` fetches final official league statistics only for eligible saved Floyd DFS pre-lock projection runs and writes tenant-scoped actual/revision records. It is idempotent but performs production database writes when configured with production credentials. SportsDataIO-backed sports remain blocked unless a separately verified production data tier is configured. Read [the P11 backfill report](docs/P11_Historical_Data_Backfill_2026-10-22.md) before using these data for evaluation.
+`npm run backfill:player-actuals -- --sport NBA --dry-run` checks eligible archived NBA projections without writing actuals or revisions. NBA production retrieval and import remain blocked unless `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` is explicitly configured. A non-dry-run command writes tenant-scoped actual/revision records when production credentials are configured. Read the [P11 backfill report](docs/P11_Historical_Data_Backfill_2026-10-30.md) before importing data or using it for evaluation.
 
-DraftKings' official lineup-upload CSV is downloaded from the authenticated site for the exact sport, contest format, and start time. Do not treat the app's local details CSV as an upload template. Official account history and contest standings are downloaded by the account owner from DraftKings and imported through the History page. See [DraftKings source and history limits](docs/DraftKings_Eligibility_and_History_Sources.md).
+DraftKings' official lineup-upload CSV is downloaded from the authenticated site for the exact sport, contest format, and start time. Do not treat the app's local details CSV as an upload template. Official account history and contest standings are downloaded by the account owner from DraftKings and imported through the History page.
 
-There are 18 incremental SQL migrations in `supabase/migrations/`; the repository does not contain a complete baseline schema. Production migration history has unrelated local/remote drift, so apply reviewed migration files individually and do not use a broad `supabase db push`.
+The SQL migrations in `supabase/migrations/` are incremental; the repository does not contain a complete baseline schema. As of 2026-10-30, all local migration versions matched production through `20261030060000`. Recheck `npx supabase migration list --linked` before future schema work and apply only reviewed migrations.
 
 ## Operations and release
 
-The monthly provider audit is registered for `0 14 1 * *` UTC in Vercel Production. Independent missed-run alerting still needs configuration; do not use `vercel crons run` as a health check because it triggers a real audit. Read [P13 acceptance/release notes](docs/P13_Acceptance_and_Release.md) before changing release gates or operating production.
+The monthly provider audit is registered for `0 14 1 * *` UTC in Vercel Production. The Street Team collector is registered for `0 8 * * *` UTC. Independent missed-run alerting was not verified in this audit. Review the deployment and cron state before changing release gates or operating production. The engineering baseline and rollback requirements are in [the refactoring specification](docs/Fantasy_AI_Engineering_Refactoring_Specification.md).
 
 `npm run dev:full` starts the local Vercel runtime for API handlers. Start `npm run dev` in another terminal only when you want to use the Vite development origin and its `/api` proxy.
