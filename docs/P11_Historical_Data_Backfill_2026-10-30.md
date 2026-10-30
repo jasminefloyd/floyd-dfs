@@ -48,6 +48,8 @@ This result does not establish why the 73 rows failed validation or prove that t
 
 The fail-closed Street Team gate and NBA backfill safeguards were first deployed to Vercel Production on 2026-10-30 at 05:10 UTC. After the user confirmed NBA access and storage rights, `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` was added to Vercel Production and the project was redeployed. At 05:15 UTC, inspection showed the production alias `floyd-dfs.vercel.app` pointing to READY deployment `dpl_Ev8ccVPf6jHoD3DnQnpLGVhEVM9G`, with `api/street-team/collect` included. The production environment-name listing showed both `SPORTS_DATA_IO_KEY` and `SPORTS_DATA_IO_DATA_TIER`; secret values were not accessed. No successful collection had been observed by 05:16 UTC; the configured daily cron is at 08:00 UTC.
 
+On 2026-10-30, the report-only NBA behavior context implementation was deployed as Vercel Production deployment `dpl_9gszNDdCddu42yYN8muMbyQxF6FN` (deployment URL `https://floyd-qds1g9mih-fds-ai-projects.vercel.app`). The deployment command reported `READY` and aliased it to `https://floyd-dfs.vercel.app`. This code change adds evidence-linked behavior context to Street Team snapshots and NBA House reports; it does not change numerical projections or model release state. A direct HTTP request to the production alias could not be verified from the local shell because DNS resolution failed (`curl: (6) Could not resolve host`); the deployment provider's READY/alias result is the available deployment evidence.
+
 ## Remaining acceptance evidence
 
 1. Verify the first daily Street Team run after the 08:00 UTC cron following deployment.
@@ -66,6 +68,7 @@ Validated on 2026-10-30 with Node 20.20.2:
 - `npm run check:server` — passed.
 - `npm run lint` — passed.
 - `npm run test:parity`, `npm run test:fixtures`, `npm run test:contracts`, `npm run test:auth`, `npm run test:actual-sources`, `npm run test:p1-contracts`, and `npm run test:p2-street-team` — passed.
+- The `test:p2-street-team` suite also covers report-only NBA behavior classification: explicit return-to-play, former-team and reported-statement contexts; stable signal IDs; linked evidence; zero numerical effect; and exclusions for league-level items, hypotheses, non-news providers and non-HTTPS article URLs.
 - `node --check scripts/backfill-player-actuals.mjs` and `git diff --check` — passed.
 
 The NBA source checks also reject a provider-ID match when the archived team differs, reject slates with a missing game start, and preserve a date-only event date without shifting it across the Eastern-time boundary. The Street Team service test verifies that an unverified data tier records a failed run and makes zero provider requests.
