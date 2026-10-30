@@ -52,7 +52,7 @@ The fail-closed Street Team gate and NBA backfill safeguards were first deployed
 
 1. Verify the first daily Street Team run after the 08:00 UTC cron following deployment.
 2. Investigate the 73 structurally quarantined actuals and validate the 21 passing rows against official outcomes. The dry-run alone is not sufficient evidence to import.
-3. Obtain official DraftKings contest outcome/field data; it is not currently available for the three archived projection runs.
+3. Obtain official DraftKings contest outcome/field data; it is not currently available for the three archived projection runs. DraftKings documents downloading the full standings CSV from Contests → History → Results → Export Lineups to CSV; completed contest CSVs are available for 10 days after the contest ends. See [DraftKings CSV export instructions](https://support.draftkings.com/dk/en-us/how-do-i-download-a-csv-to-see-gamecenter-standings-for-a-contest?id=kb_article_view&sysparm_article=KB0010448). The three saved contests are within that window as of this audit date.
 4. Import only verified final actuals, reconcile player and full-field DraftKings results, and retain corrected revisions.
 5. Accumulate enough chronological NBA slates for the predeclared projection, interval coverage, simulation, field-calibration, and paired-portfolio gates.
 
