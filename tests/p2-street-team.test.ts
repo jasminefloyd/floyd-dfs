@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
 import { SportsDataIoNbaStreetTeamProvider } from '../server/nbaStreetTeamProvider.js';
+import { deriveStreetTeamBehaviorSignals } from '../server/streetTeam/behavior.js';
 import { collectNbaStreetTeam, isSportsDataIoProductionVerifiedDataTier, NBA_STREET_TEAM_SNAPSHOT_TTL_MS, streetTeamSnapshotFreshness } from '../server/streetTeam.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { StreetTeamSnapshot } from '../src/lib/engine/contracts.js';
@@ -91,6 +92,23 @@ assert.ok(result.observations.every((observation) => observation.classification 
 assert.ok(result.observations.some((observation) => observation.provider === 'ESPN NBA' && observation.subjectId === 'nba:player:sportsdataio:42'));
 assert.ok(result.observations.some((observation) => observation.subjectKind === 'LEAGUE' && observation.subjectId === 'nba:league'));
 assert.ok(result.resolvedFacts.every((fact) => fact.observationIds.every((id) => result.observations.some((observation) => observation.id === id))));
+const newsObservation = result.observations.find((observation) => observation.provider === 'ESPN NBA' && observation.subjectKind === 'PLAYER');
+assert.ok(newsObservation);
+const reportOnlySignals = deriveStreetTeamBehaviorSignals('tenant-test', [newsObservation]);
+assert.equal(reportOnlySignals.length, 1);
+assert.match(reportOnlySignals[0].event, /^RETURN_TO_PLAY_CONTEXT:/);
+assert.equal(reportOnlySignals[0].effectStatus, 'REPORT_ONLY');
+assert.equal(reportOnlySignals[0].numericEffect, 0);
+assert.deepEqual(reportOnlySignals[0].observationIds, [newsObservation.id]);
+assert.equal(deriveStreetTeamBehaviorSignals('tenant-test', [newsObservation])[0].id, reportOnlySignals[0].id);
+assert.equal(deriveStreetTeamBehaviorSignals('tenant-test', [{ ...newsObservation, subjectKind: 'LEAGUE' }]).length, 0);
+assert.equal(deriveStreetTeamBehaviorSignals('tenant-test', [{ ...newsObservation, classification: 'HYPOTHESIS' }]).length, 0);
+assert.equal(deriveStreetTeamBehaviorSignals('tenant-test', [{ ...newsObservation, provider: 'SportsDataIO' }]).length, 0);
+assert.equal(deriveStreetTeamBehaviorSignals('tenant-test', [{ ...newsObservation, payload: { title: 'Example Player returns to practice', articleUrl: 'http://news.example/story' } }]).length, 0);
+const formerTeamObservation = { ...newsObservation, id: 'former-team-news', payload: { title: 'Example Player faces his former team', articleUrl: 'https://news.example/story' } };
+assert.match(deriveStreetTeamBehaviorSignals('tenant-test', [formerTeamObservation])[0].event, /^FORMER_TEAM_CONTEXT:/);
+const statementObservation = { ...newsObservation, id: 'quoted-statement-news', payload: { title: 'Coach says “we are ready for the challenge”', articleUrl: 'https://news.example/story' } };
+assert.match(deriveStreetTeamBehaviorSignals('tenant-test', [statementObservation])[0].event, /^REPORTED_PUBLIC_STATEMENT:/);
 
 const conflictProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
   apiKey: 'test-key', maxAttempts: 1,
