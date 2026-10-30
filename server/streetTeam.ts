@@ -6,6 +6,8 @@ import { SportsDataIoNbaStreetTeamProvider } from './nbaStreetTeamProvider.js';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
 
 const LEASE_MS = 10 * 60_000;
+/** The daily NBA collection cadence establishes the default current-state TTL. */
+export const NBA_STREET_TEAM_SNAPSHOT_TTL_MS = 24 * 60 * 60_000;
 type CollectionClaim = { status: 'CLAIMED'; runId: string } | { status: 'ALREADY_COMPLETE' | 'ALREADY_RUNNING'; snapshotId?: string; asOf?: string; providerDiagnostics?: unknown[] };
 
 export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string, options: {
@@ -25,7 +27,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
   try {
     const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2 });
     const provider = new SportsDataIoNbaStreetTeamProvider(client, now);
-    const providerResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - 24 * 60 * 60_000) });
+    const providerResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS) });
     const asOf = now().toISOString();
     const resolvedFacts = providerResult.resolvedFacts.map((fact) => ({
       ...fact,
@@ -124,7 +126,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
 
 async function claimCollectionRun(db: SupabaseClient, tenantId: string, idempotencyKey: string, now: Date): Promise<CollectionClaim> {
   const leaseExpiresAt = new Date(now.getTime() + LEASE_MS).toISOString();
-  const inserted = await db.from('floyd_dfs_intel_collection_runs').insert({ tenant_id: tenantId, sport: 'NBA', provider: 'SPORTSDATAIO', window_start: new Date(now.getTime() - 24 * 60 * 60_000).toISOString(), window_end: now.toISOString(), status: 'RUNNING', idempotency_key: idempotencyKey, started_at: now.toISOString(), lease_expires_at: leaseExpiresAt }).select('id').single();
+  const inserted = await db.from('floyd_dfs_intel_collection_runs').insert({ tenant_id: tenantId, sport: 'NBA', provider: 'SPORTSDATAIO', window_start: new Date(now.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS).toISOString(), window_end: now.toISOString(), status: 'RUNNING', idempotency_key: idempotencyKey, started_at: now.toISOString(), lease_expires_at: leaseExpiresAt }).select('id').single();
   if (!inserted.error) return { status: 'CLAIMED', runId: String(inserted.data.id) };
   if (inserted.error.code !== '23505') throw inserted.error;
   const existing = await db.from('floyd_dfs_intel_collection_runs').select('id,status,lease_expires_at,attempt_count,result').eq('tenant_id', tenantId).eq('sport', 'NBA').eq('provider', 'SPORTSDATAIO').eq('idempotency_key', idempotencyKey).maybeSingle();
@@ -147,6 +149,14 @@ export async function getStreetTeamSnapshot(db: SupabaseClient, tenantId: string
   if (result.error) throw result.error;
   if (!result.data) return null;
   return parseStreetTeamSnapshot(result.data.snapshot_payload, tenantId);
+}
+
+export function streetTeamSnapshotFreshness(snapshot: StreetTeamSnapshot, now = new Date()): 'FRESH' | 'PARTIAL' | 'STALE' {
+  const ageMs = now.getTime() - Date.parse(snapshot.asOf);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > NBA_STREET_TEAM_SNAPSHOT_TTL_MS) return 'STALE';
+  return snapshot.unknowns.length || snapshot.providerDiagnostics.some((diagnostic) => diagnostic.status === 'FAILED' || diagnostic.status === 'RATE_LIMITED' || diagnostic.freshness !== 'FRESH')
+    ? 'PARTIAL'
+    : 'FRESH';
 }
 
 export async function listStreetTeamSnapshots(db: SupabaseClient, tenantId: string, limit: number): Promise<unknown[]> {

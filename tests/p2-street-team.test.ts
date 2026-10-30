@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
 import { SportsDataIoNbaStreetTeamProvider } from '../server/nbaStreetTeamProvider.js';
+import { NBA_STREET_TEAM_SNAPSHOT_TTL_MS, streetTeamSnapshotFreshness } from '../server/streetTeam.js';
+import type { StreetTeamSnapshot } from '../src/lib/engine/contracts.js';
 
 const fixedNow = () => new Date('2026-10-29T16:00:00.000Z');
 const requested: string[] = [];
@@ -25,6 +27,28 @@ const fetcher: typeof fetch = async (input, init) => {
 };
 
 async function main(): Promise<void> {
+assert.equal(NBA_STREET_TEAM_SNAPSHOT_TTL_MS, 24 * 60 * 60_000);
+const freshnessSnapshot: StreetTeamSnapshot = {
+  contractVersion: 'p2.test',
+  snapshotId: 'snapshot-freshness-test',
+  tenantId: 'tenant-test',
+  sport: 'NBA',
+  asOf: '2026-10-29T16:00:00.000Z',
+  createdAt: '2026-10-29T16:00:00.000Z',
+  evidenceHash: 'test-hash',
+  observations: [],
+  resolvedFacts: [],
+  rosterState: [],
+  availability: [],
+  transactions: [],
+  behaviorSignals: [],
+  unknowns: [],
+  providerDiagnostics: [],
+};
+assert.equal(streetTeamSnapshotFreshness(freshnessSnapshot, new Date('2026-10-30T15:59:59.999Z')), 'FRESH');
+assert.equal(streetTeamSnapshotFreshness(freshnessSnapshot, new Date('2026-10-30T16:00:00.001Z')), 'STALE');
+assert.equal(streetTeamSnapshotFreshness({ ...freshnessSnapshot, providerDiagnostics: [{ provider: 'sample', status: 'SUCCEEDED', retrievedAt: '2026-10-29T16:00:00.000Z', freshness: 'STALE' }] }, new Date('2026-10-30T12:00:00.000Z')), 'PARTIAL');
+
 const client = new SportsDataIoClient({ apiKey: 'test-key', fetcher, maxAttempts: 1 });
 const provider = new SportsDataIoNbaStreetTeamProvider(client, fixedNow, fetcher);
 const result = await provider.collect({ windowStart: new Date('2026-10-28T16:00:00.000Z'), asOf: fixedNow() });

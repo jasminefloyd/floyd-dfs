@@ -3,7 +3,7 @@ import { ENGINE_CONTRACT_VERSION, type AdjustmentPackage, type NbaHouseReport, t
 import { parseNbaHouseReport } from '../../../src/lib/engine/boundaryContracts.js';
 import { projectSlate } from '../../../src/lib/engine/projection.js';
 import { assertProjection } from '../../../src/lib/engine/validation.js';
-import { getStreetTeamSnapshot } from '../../streetTeam.js';
+import { getStreetTeamSnapshot, NBA_STREET_TEAM_SNAPSHOT_TTL_MS } from '../../streetTeam.js';
 
 /** Build a report-only NBA House artifact. This facade never changes the caller's projection. */
 export async function analyzeNbaSlate(db: SupabaseClient, run: Record<string, unknown>, slate: ValidatedSlate, adjustedProjections: ProjectionPackage): Promise<NbaHouseReport | null> {
@@ -21,7 +21,7 @@ export async function analyzeNbaSlate(db: SupabaseClient, run: Record<string, un
   const baselineProjections = projectSlate(slate, baselineAdjustment, new Date(generatedAt));
   assertProjection(baselineProjections);
   const snapshotAgeMs = Date.now() - Date.parse(snapshot.asOf);
-  const snapshotStale = snapshotAgeMs > 24 * 60 * 60_000;
+  const snapshotStale = snapshotAgeMs > NBA_STREET_TEAM_SNAPSHOT_TTL_MS;
   const warnings = [
     'Street Team evidence is attached for point-in-time audit; this House version does not apply unvalidated Street Team or behavioral effects to numeric projections.',
     'Evidence-linked numeric driver attributions are unavailable until calibrated House adjustments are implemented.',

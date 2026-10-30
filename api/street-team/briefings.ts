@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { ApiError, cors, method, respondError, tenantContext } from '../../server/runtime.js';
-import { getStreetTeamSnapshot, listStreetTeamSnapshots } from '../../server/streetTeam.js';
+import { getStreetTeamSnapshot, listStreetTeamSnapshots, streetTeamSnapshotFreshness } from '../../server/streetTeam.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['GET'])) return;
@@ -19,11 +19,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const snapshot = await getStreetTeamSnapshot(context.db, context.tenantId, snapshotId);
     if (!snapshot) throw new ApiError(404, 'Street Team snapshot was not found.', 'NOT_FOUND');
     const ageMs = Date.now() - Date.parse(snapshot.asOf);
-    const currentStateFreshness = ageMs > 60 * 60_000
-      ? 'STALE'
-      : snapshot.unknowns.length || snapshot.providerDiagnostics.some((diagnostic) => diagnostic.status === 'FAILED' || diagnostic.status === 'RATE_LIMITED')
-        ? 'PARTIAL'
-        : 'FRESH';
+    const currentStateFreshness = streetTeamSnapshotFreshness(snapshot);
     const response = { snapshot, currentStateFreshness, ageMs: Math.max(0, ageMs) };
     cors(req, res);
     res.status(200).json(response);
