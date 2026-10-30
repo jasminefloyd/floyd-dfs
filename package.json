@@ -23,7 +23,8 @@
     "test:contracts": "node scripts/test-contract-fixtures.mjs",
     "test:p1-contracts": "node scripts/test-p1-contracts.mjs",
     "test:p2-street-team": "node scripts/test-p2-street-team.mjs",
-    "backup:p02:production": "node scripts/backup-fds-p02-production.mjs"
+    "backup:p02:production": "node scripts/backup-fds-p02-production.mjs",
+    "test:p5-portfolio": "node scripts/test-p5-portfolio.mjs"
   },
   "dependencies": {
     "@sentry/react": "^10.65.0",

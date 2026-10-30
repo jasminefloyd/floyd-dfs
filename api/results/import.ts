@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createHash } from 'node:crypto';
 import { diagnoseLineupResult } from '../../server/learningDiagnosis.js';
+import { syncVerifiedPortfolioOutcome } from '../../server/learning/portfolioOutcomes.js';
 import { cors, getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
 
 const COLUMNS = ['actual_dk_points'];
@@ -120,6 +121,7 @@ export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<
   const reconciliation = { status, computedPlayerActualScore: computed === null ? null : Number(computed.toFixed(4)), recordedActualScore: input.enteredScore, difference, playerCount: playerIds.length, source, scoring: 'verified player actuals and saved roster slot multipliers', reasons: [...new Set(reasons)], reconciledAt: new Date().toISOString() };
   const update = await context.db.from('floyd_dfs_contest_results').update({ reconciliation_status: status, model_evaluation_eligible: eligible, official_outcome: input.officialOutcome ?? true, result_payload: { ...previous, reconciliation } }).eq('tenant_id', context.tenantId).eq('id', resultId);
   if (update.error) throw update.error;
+  await syncVerifiedPortfolioOutcome(context.db, { tenantId: context.tenantId, lineupId, resultId });
   if ((eligible || status === 'MISMATCH') && selection.data) {
     const snapshot = await context.db.from('floyd_dfs_lock_snapshots').select('research_version,adjustment_version,lineup_payload').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('locked_at', { ascending: false }).limit(1).maybeSingle();
     if (snapshot.error) throw snapshot.error;
