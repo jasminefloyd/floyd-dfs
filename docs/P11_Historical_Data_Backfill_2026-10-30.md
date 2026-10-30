@@ -38,18 +38,23 @@ Command:
 npm run backfill:player-actuals -- --sport NBA --dry-run
 ```
 
-Result: 3 eligible projection runs, 3 blocked by the missing provider-tier attestation, 0 source requests, 0 prepared actual rows, 0 database writes. The NBA Stats endpoint was not called. This confirms the safety gate and the existence of candidate pre-lock inputs; it does not validate projection accuracy.
+Initial result before the provider-tier attestation was added: 3 eligible projection runs, 3 blocked, 0 source requests, 0 prepared actual rows, and 0 database writes.
+
+After the user confirmed NBA production access and storage rights, an NBA-only dry-run used the verified tier marker and read the SportsDataIO feeds. It found 3 eligible runs, 312 provider rows, 94 matched projected players, and 94 prepared rows. Of those, 21 passed structural source validation and 73 were quarantined: 63 fantasy totals were not on the saved scoring rules' 0.25-point increment, 6 rows had fractional points, and 4 rows had fractional rebounds. Ten slate players had no matching projection. The run made no database writes and skipped reconciliation. **No rows were imported.**
+
+This result does not establish why the 73 rows failed validation or prove that the 21 structurally valid rows match official outcomes. Those actuals remain unimported pending investigation and contest-result reconciliation. The NBA data dictionary marks several game-stat fields as trial-scrambled; that is relevant context, but is not proof that this production response was scrambled. See the [SportsDataIO NBA data dictionary](https://sportsdata.io/developers/data-dictionary/nba).
 
 ## Production deployment verification
 
-The fail-closed Street Team gate and NBA backfill safeguards were deployed to Vercel Production on 2026-10-30 at 05:10 UTC. The production alias `floyd-dfs.vercel.app` points to READY deployment `dpl_5PzHija77mubYM3d2uM7yNj6MhQK`; Vercel inspection confirmed `api/street-team/collect` is included. The production environment-name listing showed `SPORTS_DATA_IO_KEY` but no `SPORTS_DATA_IO_DATA_TIER`; secret values were not accessed. Consequently, scheduled collection is expected to record a blocked/failed run without making provider requests until the production tier marker is configured. A successful daily collection has not yet been observed.
+The fail-closed Street Team gate and NBA backfill safeguards were deployed to Vercel Production on 2026-10-30 at 05:10 UTC. The production alias `floyd-dfs.vercel.app` points to READY deployment `dpl_5PzHija77mubYM3d2uM7yNj6MhQK`; Vercel inspection confirmed `api/street-team/collect` is included. At that time, the production environment-name listing showed `SPORTS_DATA_IO_KEY` but no `SPORTS_DATA_IO_DATA_TIER`; secret values were not accessed. After the user confirmed NBA access and storage rights, `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` was added as a non-sensitive Vercel Production variable. Vercel environment changes apply to new deployments; the production alias still needs a new deployment to receive this variable. A successful daily collection has not yet been observed.
 
 ## Remaining acceptance evidence
 
-1. Verify that the SportsDataIO account has a production NBA stats entitlement and storage rights; then set the non-secret tier attestation in the environments where the backfill will run.
-2. Re-run the NBA-only dry-run. Review its matched, unmatched, quarantined, and source diagnostics before importing.
-3. Import only verified final actuals, reconcile official player and full-field DraftKings results, and retain corrected revisions.
-4. Accumulate enough chronological NBA slates for the predeclared projection, interval coverage, simulation, field-calibration, and paired-portfolio gates.
+1. Redeploy Vercel Production after adding the data-tier marker, then verify the production alias and first daily Street Team run.
+2. Investigate the 73 structurally quarantined actuals and validate the 21 passing rows against official outcomes. The dry-run alone is not sufficient evidence to import.
+3. Obtain official DraftKings contest outcome/field data; it is not currently available for the three archived projection runs.
+4. Import only verified final actuals, reconcile player and full-field DraftKings results, and retain corrected revisions.
+5. Accumulate enough chronological NBA slates for the predeclared projection, interval coverage, simulation, field-calibration, and paired-portfolio gates.
 
 Until those conditions pass, quantitative P4 validation, P6 model evaluation, and P7 rollout gates remain incomplete. `PORTFOLIO_EV_V1` and `LEARNING_V2` remain disabled, and NBA House remains report-only/shadow-only.
 

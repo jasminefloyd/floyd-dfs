@@ -156,12 +156,12 @@ async function readAll(makeQuery, pageSize = 1000) {
   }
 }
 
-const report = { dryRun: backfillOptions.dryRun, eligibleProjectionRuns: eligible.length, preparedRows: 0, preparedVerifiedRows: 0, preparedQuarantinedRows: 0, importedRows: 0, verifiedRows: 0, quarantinedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, blockedUnverifiedProviderRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
+const report = { dryRun: backfillOptions.dryRun, eligibleProjectionRuns: eligible.length, preparedRows: 0, preparedVerifiedRows: 0, preparedQuarantinedRows: 0, sourceValidationReasons: {}, importedRows: 0, verifiedRows: 0, quarantinedRows: 0, unmatchedPlayers: 0, unavailableFeedRuns: 0, blockedUnverifiedProviderRuns: 0, unsupportedFormatRuns: 0, unsupportedScoringRuns: 0, bySport: {} };
 console.error(`NBA actual backfill: ${eligible.length} eligible projection run(s); dryRun=${backfillOptions.dryRun}; external request timeout=${requestTimeoutMs}ms.`);
 for (const item of eligible) {
   const { projection, slate, eventDate, lock, generated } = item;
   const sport = projection.sport;
-  report.bySport[sport] ??= { eligibleRuns: 0, providerRows: 0, matchedPlayers: 0, unscorableMatches: 0, preparedRows: 0, importedRows: 0, unmatchedPlayers: 0, missingProjection: 0, feedFailures: 0, blockedUnverifiedProviderRuns: 0, feedFailureReasons: [] };
+  report.bySport[sport] ??= { eligibleRuns: 0, providerRows: 0, matchedPlayers: 0, unscorableMatches: 0, preparedRows: 0, importedRows: 0, unmatchedPlayers: 0, missingProjection: 0, feedFailures: 0, blockedUnverifiedProviderRuns: 0, feedFailureReasons: [], sourceValidationReasons: {} };
   report.bySport[sport].eligibleRuns += 1;
   if (sport === 'GOLF' && slate.contest?.format !== 'CLASSIC') { report.unsupportedFormatRuns += 1; continue; }
   if (sport === 'CFB') { report.unsupportedScoringRuns += 1; continue; }
@@ -242,6 +242,11 @@ for (const item of eligible) {
     if (!Number.isFinite(actual.points)) { report.bySport[sport].unscorableMatches += 1; continue; }
     const rowDataTier = officialLeagueFeed ? 'OFFICIAL_LEAGUE_STATS' : sport === 'NBA' || sport === 'CFB' || sport === 'GOLF' ? 'SPORTSDATAIO_PRODUCTION_VERIFIED' : 'NFLVERSE_CC_BY_4.0_PUBLIC_STATS';
     const integrity = validateActual(sport, matches[0], actual, rowDataTier, scoringRules);
+    if (!integrity.valid) {
+      const reason = String(integrity.reason ?? 'Source validation failed without a reason.').slice(0, 200);
+      report.sourceValidationReasons[reason] = (report.sourceValidationReasons[reason] ?? 0) + 1;
+      report.bySport[sport].sourceValidationReasons[reason] = (report.bySport[sport].sourceValidationReasons[reason] ?? 0) + 1;
+    }
     const retrievedAt = new Date().toISOString();
     const endpoint = endpointFor(sport, eventDate);
     const sourceProvider = sport === 'MLB' ? 'MLB_STATS_API_FINAL' : sport === 'WNBA' ? 'WNBA_STATS_API_FINAL' : sport === 'NBA' ? 'SPORTSDATAIO_NBA_FINAL' : sport === 'NFL' ? 'NFLVERSE_WEEKLY_PLAYER_STATS_FINAL' : 'SPORTSDATAIO_FINAL';
