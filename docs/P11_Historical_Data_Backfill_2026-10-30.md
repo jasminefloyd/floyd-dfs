@@ -54,6 +54,8 @@ On 2026-10-30, the report-only NBA behavior context implementation was deployed 
 
 At 05:30 UTC, Vercel CLI accepted production environment updates setting `STREET_TEAM_V2=true` and `NBA_HOUSE_V1=true`. The resulting records are marked `sensitive`; their values are not readable through `env run`, so the runtime flag values are not independently confirmed from the CLI. `PORTFOLIO_EV_V1` and `LEARNING_V2` were not changed and remain absent from the production environment listing. A follow-up production deployment applied the environment revision: deployment `dpl_eZFhC8YqmBeLL4e7StnQ9GRQ3s3t` was reported `READY` and aliased to `https://floyd-dfs.vercel.app`. At 05:33 UTC, read-only HTTP checks returned `200` for the site and `401` for both protected APIs. Production Supabase still had 0 NBA Street Team collection runs and 0 snapshots before the scheduled 08:00 UTC collection; runtime collection success remains pending that scheduled run.
 
+At 05:37 UTC, behavior signals were deployed to the existing `floyd_dfs_behavior_signals` table through Vercel deployment `dpl_DgjZeqnoHi43h3GVtA9vW1R43SGF` (`READY`, aliased to `https://floyd-dfs.vercel.app`). The site returned HTTP 200 and both protected APIs returned HTTP 401. The collector upserts report-only, zero-effect signal rows keyed by deterministic UUID and linked to their source observation. The schema was already present and the migration ledger remained aligned; no migration was required. This deployment preceded the 08:00 UTC cron, so successful provider collection and ledger writes have not yet been observed.
+
 A fresh linked-project read-only migration-ledger check completed at 2026-10-30 05:27 UTC using `npx --yes supabase@latest migration list --linked`. Every listed migration had matching local and remote versions through `20261030060000`; no pending or remote-only migration was reported.
 
 ## Remaining acceptance evidence
@@ -75,6 +77,8 @@ Validated on 2026-10-30 with Node 20.20.2:
 - `npm run lint` — passed.
 - `npm run test:parity`, `npm run test:fixtures`, `npm run test:contracts`, `npm run test:auth`, `npm run test:actual-sources`, `npm run test:p1-contracts`, and `npm run test:p2-street-team` — passed.
 - The `test:p2-street-team` suite also covers report-only NBA behavior classification: explicit return-to-play, former-team and reported-statement contexts; stable signal IDs; linked evidence; zero numerical effect; and exclusions for league-level items, hypotheses, non-news providers and non-HTTPS article URLs.
+- The current `test:p2-street-team` run additionally verifies behavior-ledger row mapping, deterministic UUIDs, tenant/evidence linkage, evidence class, report-only status, zero effect and missing-source rejection; static assertions verify the collector upserts to the existing behavior-signal table.
 - `node --check scripts/backfill-player-actuals.mjs` and `git diff --check` — passed.
+- After behavior-ledger persistence was added, `npm run test:p2-street-team`, `npm run check:server`, `npm run build`, `npm run lint`, and `git diff --check` passed. This shell used Node 20.13.1; Vite warned its minimum is 20.19, but the build completed successfully.
 
 The NBA source checks also reject a provider-ID match when the archived team differs, reject slates with a missing game start, and preserve a date-only event date without shifting it across the Eastern-time boundary. The Street Team service test verifies that an unverified data tier records a failed run and makes zero provider requests.
