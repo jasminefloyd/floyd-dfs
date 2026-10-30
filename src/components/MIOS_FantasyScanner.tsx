@@ -14,6 +14,7 @@ export interface ScanParams {
   lockedPlayers: string[];
   riskTolerance: string;
   lineupMode: string;
+  simulationMode: 'baseline' | 'game_simulation' | 'compare';
   contestStrategy: string;
   maxPlayerExposure: number;
   maxTeamExposure: number;
@@ -99,6 +100,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
   const [fieldSize, setFieldSize] = useState(DEFAULT_SCAN_OPTIONS.fieldSize);
   const [payoutShape, setPayoutShape] = useState(DEFAULT_SCAN_OPTIONS.payoutShape);
   const [lineupMode, setLineupMode] = useState(DEFAULT_SCAN_OPTIONS.lineupMode);
+  const [simulationMode, setSimulationMode] = useState<'baseline' | 'game_simulation' | 'compare'>('baseline');
   const [maxSharedPlayers, setMaxSharedPlayers] = useState<number | ''>('');
   const [configLoaded, setConfigLoaded] = useState(false);
 
@@ -117,6 +119,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
       fieldSize,
       payoutShape,
       lineupMode,
+      simulationMode,
       maxSharedPlayers,
     });
   }, [
@@ -127,6 +130,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
     fieldSize,
     payoutShape,
     lineupMode,
+    simulationMode,
     maxSharedPlayers,
   ]);
 
@@ -135,6 +139,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
     setFieldSize(numberOrDefault(config.fieldSize, DEFAULT_SCAN_OPTIONS.fieldSize));
     setPayoutShape(typeof config.payoutShape === 'string' ? config.payoutShape : DEFAULT_SCAN_OPTIONS.payoutShape);
     setLineupMode(typeof config.lineupMode === 'string' ? config.lineupMode : DEFAULT_SCAN_OPTIONS.lineupMode);
+    setSimulationMode(config.simulationMode === 'game_simulation' || config.simulationMode === 'compare' ? config.simulationMode : 'baseline');
     setMaxSharedPlayers(Number.isInteger(Number(config.maxSharedPlayers)) ? Number(config.maxSharedPlayers) : '');
   }
 
@@ -229,6 +234,7 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
       contestStartTime: selectedSlate.start_time,
       riskTolerance: derived.riskTolerance,
       lineupMode: derived.lineupMode,
+      simulationMode,
       entryCount,
       fieldSize,
       maxEntriesPerUser: derived.maxEntriesPerUser,
@@ -371,6 +377,16 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
           />
         </label>
       </div>
+
+      {(sport === 'nba' || sport === 'nfl') && <div>
+        <label className={`mb-2 ${labelClass}`}>Game Simulation</label>
+        <select value={simulationMode} onChange={(event) => setSimulationMode(event.target.value as typeof simulationMode)} disabled={loading} className={fieldClass}>
+          <option value="baseline">Baseline player projections</option>
+          <option value="game_simulation">Shared game scenarios</option>
+          <option value="compare">Compare baseline and game scenarios</option>
+        </select>
+        <p className="mt-1 text-xs text-slate-500">Experimental shared game environments; outputs remain unvalidated until prospective NFL/NBA results are reconciled.</p>
+      </div>}
 
       <div>
         <label className={`mb-2 ${labelClass}`}>Sport</label>

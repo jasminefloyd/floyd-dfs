@@ -13,7 +13,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (lineups.error) throw lineups.error;
     const results = await queryAll((start, end) => context.db.from('floyd_dfs_contest_results').select('generated_lineup_id,contest_id,beat_cash_line,actual_dk_points,measured_at,reconciliation_status,model_evaluation_eligible,official_outcome,contest_format').eq('tenant_id', context.tenantId).eq('model_evaluation_eligible', true).eq('reconciliation_status', 'MATCHED').eq('official_outcome', true).order('measured_at', { ascending: false }).range(start, end));
     if (results.error) throw results.error;
-    const projectionRuns = await queryAll((start, end) => context.db.from('floyd_dfs_projection_runs').select('generation_run_id,sport,model_version,projection_package,created_at').eq('tenant_id', context.tenantId).order('created_at', { ascending: false }).range(start, end));
+    const projectionRuns = await queryAll((start, end) => context.db.from('floyd_dfs_projection_runs').select('id,generation_run_id,sport,model_version,projection_package,created_at').eq('tenant_id', context.tenantId).order('created_at', { ascending: false }).range(start, end));
     if (projectionRuns.error) throw projectionRuns.error;
     const generationRunIds = [...new Set((projectionRuns.data ?? []).map((row) => String(row.generation_run_id)))];
     const generationData = [];
@@ -28,6 +28,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (historicalActuals.error) throw historicalActuals.error;
     const pairedRows = (historicalActuals.data ?? []).flatMap((row) => row.baseline_fppg === null || row.projected_median === null ? [] : [{ slateId: String(row.slate_id), sport: String(row.sport).toUpperCase() as import('../../src/lib/engine/contracts.js').Sport, role: `${String(row.contest_format ?? 'UNKNOWN')}:${row.position ? String(row.position) : 'UNKNOWN'}`, generatedAt: String(row.projection_generated_at), lockTime: String(row.lock_time), candidatePoints: Number(row.projected_median), candidateFloor: row.projected_floor === null ? undefined : Number(row.projected_floor), candidateCeiling: row.projected_ceiling === null ? undefined : Number(row.projected_ceiling), baselinePoints: Number(row.baseline_fppg), actualPoints: Number(row.actual_dk_points) }]);
     const pairedBaseline = evaluatePairedProjectionBaseline(pairedRows, '2026-09-08T00:00:00.000Z');
+    const verifiedGameActuals = await queryAll((start, end) => context.db.from('floyd_dfs_historical_player_actuals').select('projection_run_id,generation_run_id,player_id,sport,contest_format,slate_id,actual_dk_points,source_validation_status,finality_status').eq('tenant_id', context.tenantId).eq('source_validation_status', 'VERIFIED').in('finality_status', ['FINAL','CORRECTED']).in('sport', ['NBA','NFL']).order('event_date').range(start, end));
+    if (verifiedGameActuals.error) throw verifiedGameActuals.error;
+    const gameSimulationValidation = summarizeGameSimulationValidation(projectionRuns.data ?? [], verifiedGameActuals.data ?? [], generationById, '2026-09-08T00:00:00.000Z');
     const lineupById = new Map((lineups.data ?? []).map((row) => [String(row.id), row]));
     const latestResults = new Map<string, (typeof results.data extends (infer T)[] | null ? T : never)>();
     for (const row of results.data ?? []) latestResults.set(String(row.generated_lineup_id), row);
@@ -47,7 +50,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const projectionValidation = summarizeForecasts(forecasts);
     const calibration = await loadCashLineCalibration(context.db, context.tenantId);
     let updated = 0;
-    if (req.method === 'POST' && calibration.status === 'APPROVED') {
+    if (req.method === 'POST' && calibration.status === 'APPROVED' && asRecord(req.body)?.saveEvaluationOnly !== true) {
       for (const row of lineups.data ?? []) {
         if (row.raw_cash_line_probability === null || row.raw_cash_line_probability === undefined) continue;
         const raw = Number(row.raw_cash_line_probability);
@@ -70,8 +73,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (save.error) throw save.error;
         evaluationArtifacts.push({ sport, format, sampleCount: Number(metrics.playerRows ?? 0), status: String(metrics.status ?? 'UNKNOWN') });
       }
+      for (const report of Object.values(gameSimulationValidation.bySportFormat)) {
+        const save = await context.db.from('floyd_dfs_model_evaluations').insert({ tenant_id: context.tenantId, sport: report.sport, contest_format: report.format, model_version: report.gameSimulationModelVersion, evaluation_window: `[${report.cutoff},)`, sample_count: report.holdout.scenarioPlayerRows, holdout_name: 'connected-game-simulation-chronological-holdout-2026-09-08', metrics: { ...report, releaseDecision: 'HOLD', releaseReason: 'Game simulation metrics are descriptive; model promotion requires sufficient independent slates, improvement over paired baseline, and independent review.' }, data_manifest: { tenant: 'floyd-dfs', forecastTimestamp: 'projection generated strictly before saved contest lock', actualSource: 'verified final/corrected NBA league stats or nflverse CC BY 4.0 final weekly player stats', split: 'chronological holdout grouped by saved slate ID', cutoff: report.cutoff } });
+        if (save.error) throw save.error;
+        evaluationArtifacts.push({ sport: report.sport, format: report.format, sampleCount: report.holdout.scenarioPlayerRows, status: report.status });
+      }
     }
-    cors(req, res); res.status(200).json({ calibration, projectionValidation, preLockProjectionAudit: projectionAudit, pairedBaseline, evaluationArtifacts, playerActualRows: historicalActuals.data?.length ?? 0, updatedLineups: updated, probabilityRelease: 'DISABLED_PENDING_OUT_OF_SAMPLE_BASELINE_VALIDATION' });
+    cors(req, res); res.status(200).json({ calibration, projectionValidation, gameSimulationValidation, preLockProjectionAudit: projectionAudit, pairedBaseline, evaluationArtifacts, playerActualRows: historicalActuals.data?.length ?? 0, updatedLineups: updated, probabilityRelease: 'DISABLED_PENDING_OUT_OF_SAMPLE_BASELINE_VALIDATION' });
   } catch (error) { respondError(req, res, error); }
 }
 
@@ -132,3 +140,44 @@ function summarizePreLockPackages(projections: Array<{ generation_run_id: string
   }
   return { totalPackages: projections.length, linkedPackages: linked, eligiblePreLockPackages: Object.values(bySport).reduce((sum, row) => sum + row.preLock, 0), bySport, method: 'Projection package generatedAt must be strictly earlier than validatedSlate.contest.lockTime; no missing timestamps qualify.' };
 }
+
+function summarizeGameSimulationValidation(projections: Array<{ id: string; generation_run_id: string; sport: string; model_version: string; projection_package: unknown }>, actualRows: Array<{ projection_run_id: string; generation_run_id: string; player_id: string; sport: string; contest_format: string; slate_id: string; actual_dk_points: number }>, runs: Map<string, { request_payload: unknown }>, cutoffText: string) {
+  const cutoff = Date.parse(cutoffText);
+  const actualsByProjection = new Map<string, Map<string, (typeof actualRows)[number]>>();
+  for (const row of actualRows) { const projectionId = String(row.projection_run_id); const playerId = String(row.player_id); const byPlayer = actualsByProjection.get(projectionId) ?? new Map<string, (typeof actualRows)[number]>(); byPlayer.set(playerId, row); actualsByProjection.set(projectionId, byPlayer); }
+  const paired: Array<{ sport: string; format: string; slateId: string; lock: number; gameSamples: number[]; baselineSamples: number[]; actual: number; modelVersion: string }> = [];
+  for (const projectionRun of projections) {
+    const pkg = asRecord(projectionRun.projection_package); const simulation = asRecord(pkg?.gameSimulation);
+    if (!simulation || !['GAME_SIMULATION', 'COMPARE'].includes(String(simulation.mode))) continue;
+    const run = runs.get(String(projectionRun.generation_run_id)); const request = asRecord(run?.request_payload); const input = asRecord(request?.input); const slate = asRecord(input?.validatedSlate); const contest = asRecord(slate?.contest);
+    const generatedAt = Date.parse(String(pkg?.generatedAt ?? '')); const lock = Date.parse(String(contest?.lockTime ?? ''));
+    if (!Number.isFinite(generatedAt) || !Number.isFinite(lock) || generatedAt >= lock || !Number.isFinite(cutoff)) continue;
+    const actuals = actualsByProjection.get(String(projectionRun.id)); if (!actuals) continue;
+    for (const player of Array.isArray(pkg?.players) ? pkg.players : []) {
+      const projection = asRecord(player); if (!projection) continue;
+      const playerId = String(projection.playerId ?? ''); const actualRow = actuals.get(playerId); const actual = Number(actualRow?.actual_dk_points);
+      const gameSamples = numbers(projection.simulatedFantasyPointSamples); const baselineSamples = numbers(projection.baselineSimulatedFantasyPointSamples);
+      if (!Number.isFinite(actual) || gameSamples.length < 30 || baselineSamples.length < 30) continue;
+      paired.push({ sport: String(projectionRun.sport).toUpperCase(), format: String(contest?.format ?? 'UNKNOWN').toUpperCase(), slateId: String(actualRow?.slate_id ?? `${String(slate?.slateId ?? '')}:${String(contest?.format ?? '')}`), lock, gameSamples, baselineSamples, actual, modelVersion: String(simulation.modelVersion ?? projectionRun.model_version) });
+    }
+  }
+  const summarizeSamples = (rows: typeof paired, field: 'gameSamples' | 'baselineSamples') => {
+    const independentSlates = new Set(rows.map((row) => row.slateId)).size;
+    if (!rows.length) return { scenarioPlayerRows: 0, independentSlates: 0, meanAbsoluteError: null, meanBias: null, p20Coverage: null, p50Coverage: null, p90Coverage: null };
+    const outcomes = rows.map((row) => { const sorted = [...row[field]].sort((a, b) => a - b); const mean = row[field].reduce((sum, value) => sum + value, 0) / row[field].length; return { actual: row.actual, mean, p20: quantile(sorted, .2), p50: quantile(sorted, .5), p90: quantile(sorted, .9) }; });
+    return { scenarioPlayerRows: rows.length, independentSlates, meanAbsoluteError: average(outcomes.map((row) => Math.abs(row.mean - row.actual))), meanBias: average(outcomes.map((row) => row.mean - row.actual)), p20Coverage: average(outcomes.map((row) => Number(row.actual <= row.p20))), p50Coverage: average(outcomes.map((row) => Number(row.actual <= row.p50))), p90Coverage: average(outcomes.map((row) => Number(row.actual <= row.p90))) };
+  };
+  const bySportFormat: Record<string, Record<string, any>> = {};
+  for (const key of new Set(paired.map((row) => `${row.sport}:${row.format}`))) {
+    const [sport, format] = key.split(':');
+    const all = paired.filter((row) => row.sport === sport && row.format === format);
+    const holdout = all.filter((row) => row.lock >= cutoff); const training = all.filter((row) => row.lock < cutoff);
+    const baseline = summarizeSamples(holdout, 'baselineSamples'); const gameSimulation = summarizeSamples(holdout, 'gameSamples');
+    const improvement = Number.isFinite(baseline.meanAbsoluteError) && Number(baseline.meanAbsoluteError) > 0 ? (Number(baseline.meanAbsoluteError) - Number(gameSimulation.meanAbsoluteError)) / Number(baseline.meanAbsoluteError) : null;
+    const enough = gameSimulation.independentSlates >= 30 && gameSimulation.scenarioPlayerRows >= 100;
+    bySportFormat[key] = { sport, format, cutoff: new Date(cutoff).toISOString(), baselineModelVersion: 'projection.deterministic.v3', gameSimulationModelVersion: all[0]?.modelVersion ?? 'UNKNOWN', train: { baseline: summarizeSamples(training, 'baselineSamples'), gameSimulation: summarizeSamples(training, 'gameSamples') }, holdout: { baseline, gameSimulation, relativeMaeImprovement: improvement }, threshold: { minimumIndependentSlates: 30, minimumPlayerRows: 100, minimumMaeImprovement: .03 }, status: !enough ? 'INSUFFICIENT_SAMPLE' : improvement !== null && improvement >= .03 ? 'CRITERIA_MET_REQUIRES_REVIEW' : 'IMPROVEMENT_THRESHOLD_NOT_MET', releaseDecision: 'HOLD' };
+  }
+  return { cutoff: new Date(cutoff).toISOString(), pairedPlayerRows: paired.length, bySportFormat, releaseDecision: 'HOLD', note: 'Only final verified player actuals and strictly pre-lock forecasts are included. Paired scenario samples are compared against the saved baseline samples; this report never automatically promotes a model.' };
+}
+function numbers(value: unknown): number[] { return Array.isArray(value) ? value.map(Number).filter(Number.isFinite) : []; }
+function quantile(values: number[], probability: number): number { if (!values.length) return NaN; const index = (values.length - 1) * probability; const low = Math.floor(index); const high = Math.ceil(index); return values[low] + (values[high] - values[low]) * (index - low); }

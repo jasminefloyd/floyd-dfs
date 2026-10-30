@@ -53,7 +53,7 @@ export default function ScanPage() {
   const handleScan = async (params: ScanParams) => {
     setPhase('fetching'); setError(null); setManifest(null); setLineups([]); setDataWarnings([]); setProgressStages([]); setElapsedSeconds(0);
     try {
-      const result = await generateFloydLineups({ sport: params.sport, contestType: params.contestType, contest: params.slate, entries: params.entryCount, fieldSize: params.fieldSize, lineupMode: params.lineupMode, minSalaryUsed: params.minSalaryUsed, maxSharedPlayers: params.maxSharedPlayers }, setProgressStages);
+      const result = await generateFloydLineups({ sport: params.sport, contestType: params.contestType, contest: params.slate, entries: params.entryCount, fieldSize: params.fieldSize, lineupMode: params.lineupMode, simulationMode: params.simulationMode, minSalaryUsed: params.minSalaryUsed, maxSharedPlayers: params.maxSharedPlayers }, setProgressStages);
       setPhase('generating'); setManifest(result.manifest); setLineups(result.lineups); setSelectedLineupRank(result.lineups[0]?.rank ?? 1); setDataWarnings(result.data_warnings);
       if (result.data_warnings.length) showToast('Scan completed with data warnings', 'warning');
     } catch (err) {

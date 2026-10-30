@@ -12,7 +12,8 @@ import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
 import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor } from '../src/lib/engine/sportsDataIoProvider.js';
 import { applyAvailabilitySnapshot, normalizeProviderName, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
-import { assertAdjustment, assertContestMetrics, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
+import { assertAdjustment, assertContestMetrics, assertOptimizer, assertProjection, assertResearch, assertRosterFeasible, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
+import { applyGameSimulation, type SimulationMode } from '../src/lib/engine/gameSimulation.js';
 import { buildLiveStatePackage } from '../src/lib/engine/liveState.js';
 import { OddsResearchProvider, getTeamMarketContext } from '../src/lib/engine/oddsProvider.js';
 import { adjustWithOpenAi } from '../src/lib/engine/openAiAdjustment.js';
@@ -209,7 +210,8 @@ export function providerSet(): { agent: ResearchAgent; availability?: SportsData
   return { agent: new ResearchAgent({ providers, synthesizer, freshness: { availabilityMinutes: boundedIntegerEnv('FDS_AVAILABILITY_FRESHNESS_MINUTES', 5, 1, 60), contextMinutes: boundedIntegerEnv('FDS_CONTEXT_FRESHNESS_MINUTES', 1440, 5, 10080) }, experimentalContextEffectsEnabled: env('FDS_ENABLE_EXPERIMENTAL_CONTEXT_EFFECTS')?.toLowerCase() === 'true' }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined, anthropicKey, anthropicModel: env('ANTHROPIC_MODEL') };
 }
 
-export interface RunOptions { lineupMode?: string; minSalaryUsed?: number; maxSharedPlayers?: number; fixedRosterSlots?: Record<string, string>; }
+export interface RunOptions { lineupMode?: string; simulationMode?: SimulationMode; minSalaryUsed?: number; maxSharedPlayers?: number; fixedRosterSlots?: Record<string, string>; }
+function maxMedian(candidates: Array<{ median: number }>): number | undefined { return candidates.length ? Math.max(...candidates.map((candidate) => candidate.median)) : undefined; }
 
 export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate, runOptions: RunOptions = {}): Promise<Json> {
   slate = parseValidatedSlate(slate, String(run.tenant_id));
@@ -602,6 +604,9 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     } catch (error) { stages.marketContextWarning = error instanceof Error ? error.message : 'Vegas market-context refresh failed.'; }
   }
   await saveStage(db, run, 'SLATE', { rawSlate: slate, enrichedSlate: workingSlate }, workingSlate, workingSlate.validation.status, workingSlate.validation.warnings, workingSlate.validation.errors);
+  // Catch an impossible NFL/NBA pool before expensive research and projections. Availability
+  // refreshes above are incorporated when available; a failed refresh is reported separately.
+  if ((workingSlate.sport === 'NBA' || workingSlate.sport === 'NFL') && !runOptions.fixedRosterSlots) assertRosterFeasible(workingSlate, 250_000, runOptions.minSalaryUsed ?? 0);
   let research = await agent.run({ validatedSlate: workingSlate });
   const criticalGaps = (research.unknowns ?? []).filter((unknown) => unknown.importance === 'CRITICAL');
   if (criticalGaps.length) research = await agent.run({ validatedSlate: workingSlate, researchGaps: criticalGaps });
@@ -646,7 +651,10 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (adjustmentRun.error) throw adjustmentRun.error;
   const adjustmentRows = await db.from('floyd_dfs_player_adjustments').insert(adjustment.adjustments.flatMap((player) => player.adjustments.map((item) => ({ tenant_id: run.tenant_id, adjustment_run_id: adjustmentRun.data.id, player_id: player.playerId, adjustment_type: item.adjustmentType ?? 'CONTEXT', direction: item.direction ?? 'NEUTRAL', magnitude: item.magnitude, confidence: item.confidence, rationale: item.rationale ?? player.projectionNotes[0] ?? 'No additional rationale.', evidence_finding_ids: item.evidenceFindingIds ?? [], metadata: { roleCertainty: player.roleCertainty } }))));
   if (adjustmentRows.error) throw adjustmentRows.error;
-  const projection = projectSlate(workingSlate, adjustment);
+  const baselineProjection = projectSlate(workingSlate, adjustment);
+  const simulationMode = runOptions.simulationMode ?? 'baseline';
+  let projection = applyGameSimulation(workingSlate, baselineProjection, simulationMode);
+  projection.evidenceInputBoundary = { numericInputs: 'STRUCTURED_PROVIDER_FIELDS', acceptedEvidenceFactIds: (research.resolvedFacts ?? []).filter((fact) => fact.state === 'ACCEPTED').map((fact) => fact.id), researchProseUsedAsNumericInput: false, sourceManifest: workingSlate.sourceManifest.map(({ source, receivedAt, fields }) => ({ source, receivedAt, fields })) };
   const projectionWarnings = (stages.projectionDataSourceWarnings as string[] | undefined) ?? [];
   if (workingSlate.sport === 'GOLF' && projection.status === 'BLOCKED' && projectionWarnings.length) {
     projection.gaps.push({ reason: `Golf provider diagnostics: ${projectionWarnings.join(' ')}` });
@@ -668,6 +676,14 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     ? { ...(maxLineupOverlap !== undefined ? { maxLineupOverlap } : {}), ...(workingSlate.contest.format === 'SHOWDOWN' ? { maxCaptainExposure: 0.5 } : {}) }
     : maxLineupOverlap !== undefined ? { maxLineupOverlap } : undefined;
   const optimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: projection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, maxSearchNodes: boundedIntegerEnv('FDS_OPTIMIZER_MAX_SEARCH_NODES', 100_000, 1_000, 100_000), fieldSimulations: boundedIntegerEnv('FDS_FIELD_SIMULATIONS', 64, 16, 128), fieldMaxScoreComparisons: boundedIntegerEnv('FDS_FIELD_SIMULATION_MAX_COMPARISONS', 2_000_000, 100_000, 5_000_000), ...(runOptions.fixedRosterSlots ? { fixedRosterSlots: runOptions.fixedRosterSlots } : {}), ...(portfolioConstraints ? { portfolioConstraints } : {}) });
+  if (simulationMode === 'compare') {
+    const baselineOptimizer = optimizeLineups({ validatedSlate: workingSlate, projectionPackage: baselineProjection }, { lineupMode: runOptions.lineupMode, minSalaryUsed: runOptions.minSalaryUsed, maxSearchNodes: boundedIntegerEnv('FDS_OPTIMIZER_MAX_SEARCH_NODES', 100_000, 1_000, 100_000), fieldSimulations: boundedIntegerEnv('FDS_FIELD_SIMULATIONS', 64, 16, 128), fieldMaxScoreComparisons: boundedIntegerEnv('FDS_FIELD_SIMULATION_MAX_COMPARISONS', 2_000_000, 100_000, 5_000_000), ...(runOptions.fixedRosterSlots ? { fixedRosterSlots: runOptions.fixedRosterSlots } : {}), ...(portfolioConstraints ? { portfolioConstraints } : {}) });
+    projection.gameSimulation = { ...projection.gameSimulation!, comparison: { baselineTopMedian: maxMedian(baselineOptimizer.candidates), gameSimulationTopMedian: maxMedian(optimizer.candidates), baselineCandidateCount: baselineOptimizer.candidates.length, gameSimulationCandidateCount: optimizer.candidates.length } };
+    stages.projection = projection;
+    await saveStage(db, run, 'PROJECTION', { slate: workingSlate, adjustment }, projection, projection.status, [...((stages.projectionDataSourceWarnings as string[] | undefined) ?? []), 'Comparison mode retains both baseline and game-scenario candidate summary; both remain unvalidated.']);
+    const comparisonUpdate = await db.from('floyd_dfs_projection_runs').update({ projection_package: projection }).eq('tenant_id', run.tenant_id).eq('id', projectionRun.data.id);
+    if (comparisonUpdate.error) throw comparisonUpdate.error;
+  }
   assertOptimizer(optimizer, workingSlate);
   assertContestMetrics(optimizer);
   stages.optimizer = optimizer;

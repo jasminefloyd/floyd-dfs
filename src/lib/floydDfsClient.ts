@@ -130,8 +130,8 @@ function enrichedSlateFrom(stagesValue: unknown, fallbackSlate: unknown): unknow
   return isJsonRecord(slateStage) && slateStage.output_payload ? slateStage.output_payload : fallbackSlate;
 }
 
-export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; minSalaryUsed?: number; maxSharedPlayers?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
-  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, draftGroupId: String(input.contest.data.slate_id ?? ''), contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, minSalaryUsed: input.minSalaryUsed, maxSharedPlayers: input.maxSharedPlayers }) });
+export async function generateFloydLineups(input: { sport: string; contestType: string; contest: DraftKingsSlate; entries: number; fieldSize: number; lineupMode?: string; simulationMode?: 'baseline' | 'game_simulation' | 'compare'; minSalaryUsed?: number; maxSharedPlayers?: number }, onProgress?: (stages: ScanProgressStage[]) => void): Promise<FloydGenerationResult> {
+  const queued = await request<JsonRecord>('/api/generation-runs', { method: 'POST', body: JSON.stringify({ sport: input.sport.toUpperCase(), contestFormat: input.contestType.toUpperCase(), contestId: input.contest.contest_id, draftGroupId: String(input.contest.data.slate_id ?? ''), contestName: input.contest.slate_name, contestLockTime: input.contest.start_time, entries: input.entries, fieldSize: input.fieldSize, lineupMode: input.lineupMode, simulationMode: input.simulationMode, minSalaryUsed: input.minSalaryUsed, maxSharedPlayers: input.maxSharedPlayers }) });
   const run = queued.run as JsonRecord;
   // /process is a single request that runs the entire pipeline server-side and only resolves once
   // every stage is done -- awaiting it before polling meant onProgress never fired until the run
@@ -204,9 +204,14 @@ function mapManifest(input: { sport: string; contestType: string; contest: Draft
   const slateWarnings = Array.isArray(slateValidation?.warnings) ? slateValidation.warnings.map(String) : [];
   const projectionStage = [...stages].reverse().find((stage) => isJsonRecord(stage) && String(stage.stage ?? '').toUpperCase() === 'PROJECTION');
   const projectionOutput = asRecord(projectionStage && isJsonRecord(projectionStage) ? projectionStage.output_payload ?? projectionStage.output : undefined);
+  const gameSimulation = asRecord(projectionOutput?.gameSimulation);
   const projectedPlayers = Array.isArray(projectionOutput?.players) ? projectionOutput.players.filter(isJsonRecord) : [];
   const fallbackCount = projectedPlayers.filter((player) => player.modelPath === 'PROVIDER_FPPG_FALLBACK').length;
-  const projectionCautions = fallbackCount ? [`${fallbackCount}/${projectedPlayers.length} projections use DraftKings aggregate FPPG instead of sport-specific opportunity inputs. Their ceilings are provisional and are not calibrated against realized winning scores.`] : [];
+  const projectionCautions = [
+    ...(fallbackCount ? [`${fallbackCount}/${projectedPlayers.length} projections use DraftKings aggregate FPPG instead of sport-specific opportunity inputs. Their ceilings are provisional and are not calibrated against realized winning scores.`] : []),
+    ...(gameSimulation && gameSimulation.mode !== 'BASELINE' ? [`${String(gameSimulation.mode).toLowerCase().replace('_', ' ')} used ${String(gameSimulation.trials ?? 'unknown')} shared game-environment scenarios (${String(gameSimulation.modelVersion ?? 'unknown')}); this model is unvalidated and cannot establish entry readiness.`] : []),
+    ...(asRecord(gameSimulation?.comparison) ? [`Baseline/game-scenario comparison: top candidate median ${String(asRecord(gameSimulation?.comparison)?.baselineTopMedian ?? 'unavailable')} / ${String(asRecord(gameSimulation?.comparison)?.gameSimulationTopMedian ?? 'unavailable')} points across ${String(asRecord(gameSimulation?.comparison)?.baselineCandidateCount ?? 0)} / ${String(asRecord(gameSimulation?.comparison)?.gameSimulationCandidateCount ?? 0)} candidates. This is a descriptive model comparison, not realized-performance validation.`] : []),
+  ];
   const optimizerStage = [...stages].reverse().find((stage) => isJsonRecord(stage) && String(stage.stage ?? '').toUpperCase() === 'OPTIMIZE');
   const optimizerOutput = asRecord(optimizerStage && isJsonRecord(optimizerStage) ? optimizerStage.output_payload ?? optimizerStage.output : undefined);
   const searchDiagnostics = asRecord(optimizerOutput?.searchDiagnostics);

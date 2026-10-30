@@ -7,6 +7,8 @@ interface ForecastSummary { sampleSize: number; meanAbsoluteError: number | null
 interface ForecastValidation { overall: ForecastSummary; bySport: Record<string, ForecastSummary>; note: string; }
 interface PairedMetric { playerRows: number; independentSlates: number; candidateMae: number | null; candidateRmse: number | null; candidateBias: number | null; baselineMae: number | null; relativeMaeImprovement: number | null; candidateQuantileCoverage: { p20: number | null; p50: number | null; p90: number | null }; status: string; }
 interface PairedBaseline { cutoff: string; holdout: PairedMetric; holdoutBySport: Record<string, PairedMetric>; holdoutBySportAndRole: Record<string, PairedMetric>; releaseStatus: string; note: string; }
+interface GameMetric { scenarioPlayerRows: number; independentSlates: number; meanAbsoluteError: number | null; meanBias: number | null; p20Coverage: number | null; p50Coverage: number | null; p90Coverage: number | null; }
+interface GameValidation { cutoff: string; pairedPlayerRows: number; releaseDecision: string; bySportFormat: Record<string, { sport: string; format: string; holdout: { baseline: GameMetric; gameSimulation: GameMetric; relativeMaeImprovement: number | null }; threshold: { minimumIndependentSlates: number; minimumPlayerRows: number; minimumMaeImprovement: number }; status: string; releaseDecision: string }>; note: string; }
 
 export default function LearningPage() {
   const [runId, setRunId] = useState('');
@@ -18,6 +20,9 @@ export default function LearningPage() {
   const [lessonsError, setLessonsError] = useState<string | null>(null);
   const [forecastValidation, setForecastValidation] = useState<ForecastValidation | null>(null);
   const [pairedBaseline, setPairedBaseline] = useState<PairedBaseline | null>(null);
+  const [gameValidation, setGameValidation] = useState<GameValidation | null>(null);
+  const [savingEvaluation, setSavingEvaluation] = useState(false);
+  const [evaluationSaved, setEvaluationSaved] = useState<string | null>(null);
   const [contestId, setContestId] = useState('');
   const [fieldValidation, setFieldValidation] = useState<Record<string, unknown> | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
@@ -29,8 +34,8 @@ export default function LearningPage() {
   }, []);
 
   useEffect(() => {
-    floydRequest<{ projectionValidation: ForecastValidation; pairedBaseline: PairedBaseline }>('/api/learning/calibration')
-      .then((data) => { setForecastValidation(data.projectionValidation); setPairedBaseline(data.pairedBaseline); })
+    floydRequest<{ projectionValidation: ForecastValidation; pairedBaseline: PairedBaseline; gameSimulationValidation: GameValidation }>('/api/learning/calibration')
+      .then((data) => { setForecastValidation(data.projectionValidation); setPairedBaseline(data.pairedBaseline); setGameValidation(data.gameSimulationValidation); })
       .catch((reason) => setForecastError(reason instanceof Error ? reason.message : 'Unable to load projection validation.'));
   }, []);
 
@@ -63,6 +68,16 @@ export default function LearningPage() {
   async function validateField() {
     try { setError(null); const report = await floydRequest<Record<string, unknown>>(`/api/learning/contest-field-validation?contestId=${encodeURIComponent(contestId.trim())}`); setFieldValidation(report); }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to compare imported contest field.'); }
+  }
+
+  async function saveModelEvaluation() {
+    setSavingEvaluation(true); setForecastError(null); setEvaluationSaved(null);
+    try {
+      const data = await floydRequest<{ projectionValidation: ForecastValidation; pairedBaseline: PairedBaseline; gameSimulationValidation: GameValidation; evaluationArtifacts: Array<{ sport: string; format: string; sampleCount: number; status: string }> }>('/api/learning/calibration', { method: 'POST', body: JSON.stringify({ saveEvaluationOnly: true }) });
+      setForecastValidation(data.projectionValidation); setPairedBaseline(data.pairedBaseline); setGameValidation(data.gameSimulationValidation);
+      setEvaluationSaved(`Saved ${data.evaluationArtifacts.length} tenant-scoped evaluation snapshots. All release decisions remain HOLD.`);
+    } catch (reason) { setForecastError(reason instanceof Error ? reason.message : 'Unable to save the evaluation snapshot.'); }
+    finally { setSavingEvaluation(false); }
   }
 
   return (
@@ -132,6 +147,27 @@ export default function LearningPage() {
           {Object.keys(pairedBaseline.holdoutBySportAndRole).length ? <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[620px] text-left text-xs"><thead><tr className="border-b border-slate-200 text-[10px] uppercase tracking-wide text-slate-500"><th className="py-2">Sport / role</th><th>Slates</th><th>Players</th><th>Model MAE</th><th>Baseline MAE</th><th>Improvement</th><th>Status</th></tr></thead><tbody>{Object.entries(pairedBaseline.holdoutBySportAndRole).map(([key, metric]) => <tr key={key} className="border-b border-slate-100 text-slate-700"><td className="py-2 font-bold">{key.replace('::', ' / ')}</td><td>{metric.independentSlates}</td><td>{metric.playerRows}</td><td>{formatMetric(metric.candidateMae)}</td><td>{formatMetric(metric.baselineMae)}</td><td>{formatPercent(metric.relativeMaeImprovement)}</td><td>{metric.status.replaceAll('_', ' ')}</td></tr>)}</tbody></table></div> : <p className="mt-3 text-xs text-slate-500">No paired holdout rows are available yet.</p>}
           <p className="mt-3 text-[10px] leading-5 text-slate-500">{pairedBaseline.note} Release state: {pairedBaseline.releaseStatus}.</p>
         </> : <p className="mt-3 text-sm text-slate-500">Loading paired holdout evaluation…</p>}
+      </section>
+      <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
+        <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Connected game-simulation validation</p>
+        <h2 className="mt-2 text-xl font-black text-[#0b1f3a]">Compare game scenarios with the saved baseline.</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-600">Uses pre-lock scenario samples and verified final player stats, paired by generation run and player. A slate is counted once regardless of player rows. NFL secondary-source player stats support player projection evaluation only; they do not validate DraftKings standings, contest rank, or payouts.</p>
+        {gameValidation ? <>
+          <p className="mt-3 text-xs font-bold text-amber-800">Holdout starts {new Date(gameValidation.cutoff).toLocaleDateString()} · decision: {gameValidation.releaseDecision} · {gameValidation.pairedPlayerRows} paired player rows</p>
+          <button type="button" onClick={() => void saveModelEvaluation()} disabled={savingEvaluation} className="mt-3 rounded-md bg-[#0b1f3a] px-4 py-2 text-xs font-black text-white disabled:opacity-50">{savingEvaluation ? 'Saving evaluation…' : 'Save evaluation snapshot'}</button>
+          {evaluationSaved ? <p className="mt-2 text-xs font-bold text-emerald-800">{evaluationSaved}</p> : null}
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {Object.entries(gameValidation.bySportFormat).map(([key, report]) => <div key={key} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-center justify-between gap-2"><p className="text-xs font-black uppercase tracking-wide text-[#0b1f3a]">{report.sport} · {report.format}</p><span className="text-[9px] font-black uppercase text-amber-700">{report.status.replaceAll('_', ' ')}</span></div>
+              <p className="mt-2 text-xs text-slate-600">{report.holdout.gameSimulation.independentSlates} slates · {report.holdout.gameSimulation.scenarioPlayerRows} players</p>
+              <p className="mt-1 text-xs text-slate-600">MAE baseline {formatMetric(report.holdout.baseline.meanAbsoluteError)} · scenarios {formatMetric(report.holdout.gameSimulation.meanAbsoluteError)} · change {formatPercent(report.holdout.relativeMaeImprovement)}</p>
+              <p className="mt-1 text-[10px] text-slate-500">Scenario bias {formatMetric(report.holdout.gameSimulation.meanBias)} · P20/P50/P90 coverage {formatPercent(report.holdout.gameSimulation.p20Coverage)} / {formatPercent(report.holdout.gameSimulation.p50Coverage)} / {formatPercent(report.holdout.gameSimulation.p90Coverage)}</p>
+              <p className="mt-1 text-[10px] text-slate-500">Requires {report.threshold.minimumIndependentSlates} independent slates, {report.threshold.minimumPlayerRows} players, and {formatPercent(report.threshold.minimumMaeImprovement)} MAE improvement, followed by independent review.</p>
+            </div>)}
+          </div>
+          {!Object.keys(gameValidation.bySportFormat).length ? <p className="mt-3 text-xs text-slate-500">No eligible game-simulation forecast and actual pairs are available yet.</p> : null}
+          <p className="mt-3 text-[10px] leading-5 text-slate-500">{gameValidation.note}</p>
+        </> : <p className="mt-3 text-sm text-slate-500">Loading game-simulation evaluation…</p>}
       </section>
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
         <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Lesson candidates</p>

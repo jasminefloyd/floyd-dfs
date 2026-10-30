@@ -439,6 +439,8 @@ export interface PlayerProjection {
   componentProjection: Record<string, number>;
   projectedOutcomes: { floorP20: number; medianP50: number; ceilingP90: number };
   simulatedFantasyPointSamples?: number[];
+  /** Retained for game-simulation runs so realized outcomes can be compared with the baseline. */
+  baselineSimulatedFantasyPointSamples?: number[];
   salaryEfficiency: { medianPer1k: number; ceilingPer1k: number };
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
   uncertaintyFactors: string[];
@@ -466,6 +468,9 @@ export interface ProjectionPackage {
   effectOutcomes?: Array<{ playerId: string; adjustmentType: string; state: 'APPLIED' | 'CONTEXT_ONLY' | 'REJECTED'; requestedEffect: number; acceptedEffect: number; capApplied?: number; finalValue?: number; dimension?: string; unit?: string; evidenceFindingIds: string[]; reason: string }>;
   gaps: Array<{ reason: string }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
+  /** Scenario samples are experimental until calibrated against prospective actuals. */
+  gameSimulation?: { mode: 'BASELINE' | 'GAME_SIMULATION' | 'COMPARE'; modelVersion: string; seed: string; trials: number; dependence: 'CONNECTED_GAME_EVENTS'; releaseStatus: 'UNVALIDATED'; gameScenarios: Array<{ gameId: string; trial: number; teamScores: Record<string, number> }>; comparison?: { baselineTopMedian?: number; gameSimulationTopMedian?: number; baselineCandidateCount: number; gameSimulationCandidateCount: number } };
+  evidenceInputBoundary?: { numericInputs: 'STRUCTURED_PROVIDER_FIELDS'; acceptedEvidenceFactIds: string[]; researchProseUsedAsNumericInput: false; sourceManifest: Array<{ source: string; receivedAt: string; fields: string[] }> };
 }
 
 export type CandidateType = 'HIGHEST_MEDIAN' | 'HIGHEST_CEILING' | 'HEURISTIC_TOURNAMENT_RANK' | 'LEVERAGE' | 'LOW_DUPLICATION' | 'ALTERNATE_GAME_SCRIPT';

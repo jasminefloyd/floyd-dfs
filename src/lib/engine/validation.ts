@@ -34,6 +34,52 @@ export function assertSlate(slate: ValidatedSlate): void {
   if (slate.validation.status === 'BLOCKED') errors.push(...slate.validation.errors);
   if (errors.length) throw new EngineContractError('SLATE', [...new Set(errors)]);
 }
+
+/** Reject an impossible player pool before running research/projection work. This answers only
+ * whether one legal roster can be assembled; projections still determine the best roster later. */
+export function assertRosterFeasible(slate: ValidatedSlate, nodeLimit = 250_000, minSalaryUsed = 0): void {
+  const slots = Object.entries(slate.rosterRules.slots).flatMap(([slot, rule]) => Array.from({ length: rule.count }, (_, index) => `${slot}_${index + 1}`));
+  const available = slate.playerPool.filter((player) => {
+    const status = player.availability?.status;
+    if (['OUT', 'INACTIVE', 'NOT_IN_CONFIRMED_LINEUP', 'NOT_IN_PROVIDER_ROSTER'].includes(String(status))) return false;
+    if (/^(IL|IR|injured|out|inactive|scratched|doubtful|suspended)/i.test(String(player.providerStatus ?? '').trim())) return false;
+    return slate.sport !== 'MLB' || status === 'CONFIRMED_STARTER';
+  });
+  const salaryCap = slate.salaryCap;
+  const rules = slate.rosterRules.slots;
+  const used = new Set<string>();
+  const roster: Record<string, string> = {};
+  let visited = 0;
+  const visit = (index: number, salary: number): boolean => {
+    visited += 1;
+    if (visited > nodeLimit) return false;
+    if (salary > salaryCap) return false;
+    if (index === slots.length) {
+      if (salary < minSalaryUsed) return false;
+      const playerIds = Object.values(roster);
+      return validateLineupCandidate({ playerIds, rosterSlots: roster, salaryUsed: salary }, slate).length === 0;
+    }
+    const slot = slots[index];
+    const base = slot.replace(/_\d+$/, '');
+    const rule = rules[base];
+    for (const player of available) {
+      if (slate.rosterRules.uniquePlayersRequired && used.has(player.playerId)) continue;
+      if (!player.eligibility[slot] && !player.eligibility[base]) continue;
+      const slotSalary = salaryForRosterSlot(player, slot, rule);
+      if (slotSalary === undefined || salary + slotSalary > salaryCap) continue;
+      roster[slot] = player.playerId;
+      used.add(player.playerId);
+      if (visit(index + 1, salary + slotSalary)) return true;
+      used.delete(player.playerId);
+      delete roster[slot];
+    }
+    return false;
+  };
+  if (!visit(0, 0)) {
+    const reason = visited > nodeLimit ? 'Feasibility search reached its bounded node limit before finding a legal lineup.' : 'No legal lineup can be assembled from the available slate player pool, roster eligibility, and salary cap.';
+    throw new EngineContractError('SLATE', [reason]);
+  }
+}
 export function assertResearch(value: ResearchPackage): void {
   const errors = !value.slateId || !value.tenantId || !value.version || !Array.isArray(value.findings) ? ['identity, version, and findings are required.'] : [];
   if (!['COMPLETE', 'PARTIAL', 'BLOCKED'].includes(value.status)) errors.push('invalid status.');
@@ -60,7 +106,7 @@ export function assertResearch(value: ResearchPackage): void {
   if (errors.length) throw new EngineContractError('RESEARCH', errors);
 }
 export function assertAdjustment(value: AdjustmentPackage, research: ResearchPackage): void { const findingIds = new Set(research.findings.map((finding) => finding.id)); const errors: string[] = []; for (const adjustment of value.adjustments) for (const item of adjustment.adjustments) for (const id of item.evidenceFindingIds ?? []) if (!findingIds.has(id)) errors.push(`adjustment ${adjustment.playerId} cites missing finding ${id}.`); if (errors.length) throw new EngineContractError('SPORT_ADJUSTMENT', errors); }
-export function assertProjection(value: ProjectionPackage): void { const errors: string[] = []; for (const player of value.players) { if (!Object.keys(player.baselineOpportunity).length || !Object.keys(player.adjustedOpportunity).length) errors.push(`projection ${player.playerId} lacks explicit opportunity assumptions.`); if (!player.modelVersion) errors.push(`projection ${player.playerId} lacks modelVersion.`); if (player.modelPath === 'SPORT_STRUCTURED' && !player.distribution) errors.push(`projection ${player.playerId} lacks distribution provenance.`); if (player.simulatedFantasyPointSamples?.some((sample) => !Number.isFinite(sample))) errors.push(`projection ${player.playerId} contains a non-finite simulation sample.`); if (player.projectedOutcomes.floorP20 > player.projectedOutcomes.medianP50 || player.projectedOutcomes.medianP50 > player.projectedOutcomes.ceilingP90) errors.push(`projection ${player.playerId} has unordered outcome quantiles.`); if (player.simulatedFantasyPointSamples && player.simulatedFantasyPointSamples.length !== value.simulationRuns) errors.push(`projection ${player.playerId} sample count does not match simulationRuns.`); } for (const effect of value.effectOutcomes ?? []) { if (![effect.requestedEffect, effect.acceptedEffect].every(Number.isFinite)) errors.push(`projection effect for ${effect.playerId}/${effect.adjustmentType} has a non-finite effect.`); if (effect.state === 'APPLIED' && (!effect.dimension || !Number.isFinite(effect.finalValue))) errors.push(`applied projection effect for ${effect.playerId}/${effect.adjustmentType} lacks a final dimension/value.`); if (effect.state !== 'APPLIED' && effect.acceptedEffect !== 0) errors.push(`non-applied projection effect for ${effect.playerId}/${effect.adjustmentType} must have zero accepted effect.`); } if (errors.length) throw new EngineContractError('PROJECTION', errors); }
+export function assertProjection(value: ProjectionPackage): void { const errors: string[] = []; for (const player of value.players) { if (!Object.keys(player.baselineOpportunity).length || !Object.keys(player.adjustedOpportunity).length) errors.push(`projection ${player.playerId} lacks explicit opportunity assumptions.`); if (!player.modelVersion) errors.push(`projection ${player.playerId} lacks modelVersion.`); if (player.modelPath === 'SPORT_STRUCTURED' && !player.distribution) errors.push(`projection ${player.playerId} lacks distribution provenance.`); if (player.simulatedFantasyPointSamples?.some((sample) => !Number.isFinite(sample)) || player.baselineSimulatedFantasyPointSamples?.some((sample) => !Number.isFinite(sample))) errors.push(`projection ${player.playerId} contains a non-finite simulation sample.`); if (player.projectedOutcomes.floorP20 > player.projectedOutcomes.medianP50 || player.projectedOutcomes.medianP50 > player.projectedOutcomes.ceilingP90) errors.push(`projection ${player.playerId} has unordered outcome quantiles.`); if (player.simulatedFantasyPointSamples && player.simulatedFantasyPointSamples.length !== value.simulationRuns) errors.push(`projection ${player.playerId} sample count does not match simulationRuns.`); if (player.baselineSimulatedFantasyPointSamples && player.baselineSimulatedFantasyPointSamples.length !== value.simulationRuns) errors.push(`projection ${player.playerId} baseline comparison sample count does not match simulationRuns.`); } if (value.gameSimulation && (value.gameSimulation.trials !== value.simulationRuns || value.gameSimulation.gameScenarios.some((scenario) => !Number.isInteger(scenario.trial) || scenario.trial < 0 || scenario.trial >= value.simulationRuns || Object.values(scenario.teamScores).some((score) => !Number.isFinite(score) || score < 0)))) errors.push('game simulation scenario metadata contains invalid trial or score data.'); for (const effect of value.effectOutcomes ?? []) { if (![effect.requestedEffect, effect.acceptedEffect].every(Number.isFinite)) errors.push(`projection effect for ${effect.playerId}/${effect.adjustmentType} has a non-finite effect.`); if (effect.state === 'APPLIED' && (!effect.dimension || !Number.isFinite(effect.finalValue))) errors.push(`applied projection effect for ${effect.playerId}/${effect.adjustmentType} lacks a final dimension/value.`); if (effect.state !== 'APPLIED' && effect.acceptedEffect !== 0) errors.push(`non-applied projection effect for ${effect.playerId}/${effect.adjustmentType} must have zero accepted effect.`); } if (errors.length) throw new EngineContractError('PROJECTION', errors); }
 export function assertContestMetrics(value: OptimizerPackage): void { const errors: string[] = []; for (const candidate of value.candidates) { for (const [name, metric] of [['winFrequency', candidate.winFrequency], ['fractionalWinCredit', candidate.fractionalWinCredit], ['topOnePercentFrequency', candidate.topOnePercentFrequency], ['cashFrequency', candidate.cashFrequency], ['positivePayoutFrequency', candidate.positivePayoutFrequency]] as const) if (metric !== undefined && (!Number.isFinite(metric) || metric < 0 || metric > 1)) errors.push(`candidate ${candidate.id} has invalid ${name}.`); for (const [name, metric] of [['expectedDuplicates', candidate.expectedDuplicates], ['expectedPayout', candidate.expectedPayout], ['expectedProfit', candidate.expectedProfit], ['roi', candidate.roi], ['winFrequencyStandardError', candidate.winFrequencyStandardError], ['cashFrequencyStandardError', candidate.cashFrequencyStandardError], ['expectedPayoutStandardError', candidate.expectedPayoutStandardError]] as const) if (metric !== undefined && (!Number.isFinite(metric) || (name.endsWith('StandardError') && metric < 0))) errors.push(`candidate ${candidate.id} has invalid ${name}.`); if (candidate.expectedDuplicates !== undefined && candidate.expectedDuplicates < 0) errors.push(`candidate ${candidate.id} has invalid expected duplicate count.`); if (candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION' && candidate.simulatedScoreSamples?.some((sample) => !Number.isFinite(sample))) errors.push(`candidate ${candidate.id} has a non-finite joint score sample.`); } if (errors.length) throw new EngineContractError('OPTIMIZE', errors); }
 export function assertOptimizer(value: OptimizerPackage, slate: ValidatedSlate): void { const errors: string[] = []; for (const candidate of value.candidates) errors.push(...validateLineupCandidate(candidate, slate)); if (value.optimalityGap !== undefined && (!Number.isFinite(value.optimalityGap) || value.optimalityGap < 0 || value.optimalityGap > 1)) errors.push('optimizer optimalityGap must be between 0 and 1.'); const search = value.searchDiagnostics; if (search && (![search.nodesVisited, search.elapsedMilliseconds, search.candidatesEvaluated, search.uniqueLineups].every((item) => Number.isFinite(item) && item >= 0) || (search.objectiveGap !== undefined && (!Number.isFinite(search.objectiveGap) || search.objectiveGap < 0)) || (search.validUpperBound !== undefined && !Number.isFinite(search.validUpperBound)))) errors.push('optimizer search diagnostics contain invalid counts or bounds.'); if (errors.length) throw new EngineContractError('OPTIMIZE', errors); }
 export function validateLineupCandidate(candidate: Pick<OptimizerPackage['candidates'][number], 'playerIds' | 'rosterSlots' | 'salaryUsed'>, slate: ValidatedSlate, options: { lockedSlotAssignments?: Record<string, string> } = {}): string[] {
