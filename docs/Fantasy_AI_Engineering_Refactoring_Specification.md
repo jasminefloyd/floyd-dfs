@@ -892,7 +892,7 @@ Apply existing tenant RLS conventions to all new tables, including policy covera
 
 ## I. Key open implementation checks
 
-1. The archive does not include all files referenced by some `package.json` scripts (for example `scripts/import-draftkings-slate.mjs`, `scripts/import-mlb-actual-results.mjs`, `scripts/import-projection-results.mjs`). Decide whether these are obsolete commands or missing deliverables before using them as release gates.
+1. **Resolved 2026-10-30:** the current `package.json` contains no commands referencing `scripts/import-draftkings-slate.mjs`, `scripts/import-mlb-actual-results.mjs`, or `scripts/import-projection-results.mjs`; those absent scripts are not exposed as current project commands and are not release gates. The Phase 0 baseline retains its historical inventory of the earlier package state.
 2. The SQL migrations appear incremental rather than a full bootstrap schema; inspect actual production table definitions (assumed working) before fixing final foreign-key types and names in additive migrations.
 3. Existing NBA connected-game simulation is explicitly provisional; do not infer real-world accuracy from presence of code.
 4. Provider availability is assumed per user instruction; provider data licensing, rate limits and permitted storage still need contractual review before redistribution or commercial deployment.
