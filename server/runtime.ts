@@ -27,7 +27,7 @@ import { EspnStructuredResearchProvider } from '../src/lib/engine/espnStructured
 import { FirecrawlResearchProvider, SerpApiResearchProvider } from '../src/lib/engine/webResearchProvider.js';
 import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.js';
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
-import { currentSeasonWeight, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs.js';
+import { currentSeasonWeight, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow, mapSportsDataIoRosterIdentities } from '../src/lib/engine/projectionInputs.js';
 import { fetchOfficialMlbSeasonRows } from '../src/lib/engine/officialMlbStatsProvider.js';
 import { type ContestFormat, type EngineStage, type ProjectionPackage, type ValidatedSlate } from '../src/lib/engine/contracts.js';
 import { parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
@@ -278,6 +278,13 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     // the known free-trial entitlement scrambles numeric SportsDataIO values.
     if (['MLB', 'NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport) && sportsDataIoProductionVerified) {
       try {
+        if (workingSlate.sport === 'NBA') {
+          const rosterPayload = await availability.get<unknown>('NBA', 'scores', 'Players');
+          const rosterRows = Array.isArray(rosterPayload) ? rosterPayload.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)) : [];
+          const mapped = mapSportsDataIoRosterIdentities(workingSlate.playerPool, rosterRows);
+          workingSlate = { ...workingSlate, playerPool: mapped.players };
+          stages.projectionIdentityMapping = { source: 'SPORTSDATAIO_NBA_PLAYERS_DRAFTKINGS_ID', mapped: mapped.mapped, unresolved: mapped.unresolved, conflicts: mapped.conflicts, rosterRows: rosterRows.length };
+        }
         let seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate);
         let seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
         // Keep current/prior seasons separate. Missing current rows flow through the explicit

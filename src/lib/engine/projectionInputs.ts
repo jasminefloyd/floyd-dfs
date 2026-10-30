@@ -56,6 +56,29 @@ export function isQuarterback(player: { position?: string }): boolean { return /
 // (verified live -- `Games` comes back undefined for every NFL row on this account).
 export function gamesPlayedFromRow(row: Record<string, unknown>): number { return readNumber(row, ['Games', 'Played', 'games']) ?? 0; }
 
+/** Resolve DraftKings IDs through SportsDataIO's current NBA roster, requiring a
+ * unique provider ID and an exact normalized current-team match. */
+export function mapSportsDataIoRosterIdentities<T extends SlatePlayer>(players: T[], rosterRows: Record<string, unknown>[]): { players: T[]; mapped: number; unresolved: number; conflicts: number } {
+  let mapped = 0;
+  let unresolved = 0;
+  let conflicts = 0;
+  const result = players.map((player) => {
+    const draftKingsId = String(player.identity?.draftKingsId ?? player.playerId).trim();
+    const matches = rosterRows.filter((row) => String(row.DraftKingsPlayerID ?? row.DraftKingsPlayerId ?? '').trim() === draftKingsId);
+    const providerIds = [...new Set(matches.map((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId'])).filter((id): id is string => Boolean(id)))];
+    if (providerIds.length !== 1) { unresolved += 1; return player; }
+    const providerId = providerIds[0];
+    const providerTeams = [...new Set(matches.filter((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId']) === providerId).map((row) => normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']) ?? '')).filter(Boolean))];
+    const slateTeam = normalizeTeamCode(player.team ?? '');
+    if (providerTeams.length !== 1 || !slateTeam || providerTeams[0] !== slateTeam) { unresolved += 1; return player; }
+    if (player.identity?.sportsDataIoId && player.identity.sportsDataIoId !== providerId) { conflicts += 1; return player; }
+    if (player.identity?.sportsDataIoId === providerId) return player;
+    mapped += 1;
+    return { ...player, identity: { ...player.identity, sportsDataIoId: providerId, confidence: 'EXACT' as const, matchedBy: 'PROVIDER_ID' as const } };
+  });
+  return { players: result, mapped, unresolved, conflicts };
+}
+
 /** Provisional NBA shrinkage schedule: current-season rates gain weight with sample size. */
 export function currentSeasonWeight(sport: Sport, currentGames: number): number {
   if (sport === 'NBA') return Math.max(0.2, Math.min(0.85, currentGames / (currentGames + 20)));
