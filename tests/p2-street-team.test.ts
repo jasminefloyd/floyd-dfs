@@ -120,6 +120,36 @@ assert.match(deriveStreetTeamBehaviorSignals('tenant-test', [formerTeamObservati
 const statementObservation = { ...newsObservation, id: 'quoted-statement-news', payload: { title: 'Coach says “we are ready for the challenge”', articleUrl: 'https://news.example/story' } };
 assert.match(deriveStreetTeamBehaviorSignals('tenant-test', [statementObservation])[0].event, /^REPORTED_PUBLIC_STATEMENT:/);
 
+const persistedBehaviorRows: Array<Record<string, unknown>> = [];
+let persistedSnapshot: Record<string, unknown> | undefined;
+const collectionQuery = {
+  insert: () => collectionQuery,
+  select: () => collectionQuery,
+  single: async () => ({ data: { id: 'collection-run-test' }, error: null }),
+  update: () => collectionQuery,
+  eq: () => collectionQuery,
+  upsert: async (rows: Array<Record<string, unknown>>) => {
+    if (rows[0]?.source_observation_id) persistedBehaviorRows.push(...rows);
+    return { error: null };
+  },
+  then: (resolve: (value: { error: null }) => unknown) => Promise.resolve({ error: null }).then(resolve),
+};
+const collectionDb = {
+  from: () => collectionQuery,
+  rpc: async (_name: string, args: { p_snapshot: Record<string, unknown> }) => {
+    persistedSnapshot = args.p_snapshot;
+    return { data: args.p_snapshot.id, error: null };
+  },
+} as unknown as SupabaseClient;
+const collected = await collectNbaStreetTeam(collectionDb, 'tenant-test', { apiKey: 'test-key', dataTier: 'PRODUCTION_VERIFIED', now: fixedNow, fetcher });
+assert.equal(collected.status, 'COMPLETE');
+const snapshotPayload = persistedSnapshot?.snapshot_payload as StreetTeamSnapshot | undefined;
+assert.equal(snapshotPayload?.behaviorSignals.length, 1);
+assert.equal(persistedBehaviorRows.length, 1);
+assert.equal(persistedBehaviorRows[0].source_observation_id, snapshotPayload?.behaviorSignals[0].observationIds[0]);
+assert.equal(persistedBehaviorRows[0].effect_status, 'REPORT_ONLY');
+assert.equal(persistedBehaviorRows[0].model_effect, 0);
+
 const conflictProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
   apiKey: 'test-key', maxAttempts: 1,
   fetcher: async (input) => {

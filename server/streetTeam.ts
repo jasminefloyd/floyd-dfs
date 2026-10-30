@@ -43,7 +43,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       return { status: 'FAILED', providerDiagnostics: [{ provider: 'SportsDataIO NBA', status: 'FAILED', retrievedAt: finishedAt, freshness: 'UNKNOWN', error: 'Production NBA data tier is not verified.' }], unknowns: [{ reason }] };
     }
     const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2 });
-    const provider = new SportsDataIoNbaStreetTeamProvider(client, now);
+    const provider = new SportsDataIoNbaStreetTeamProvider(client, now, options.fetcher);
     const providerResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS) });
     const asOf = now().toISOString();
     const resolvedFacts = providerResult.resolvedFacts.map((fact) => ({
@@ -56,6 +56,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       ...observation,
       tenantId,
       sport: 'NBA' as const,
+      source: observation.provider,
       subject: { kind: observation.subjectKind, id: observation.subjectId },
       contentSha256: sha256(stableJson({ ...observation, retrievedAt: observation.retrievedAt })),
     }));
