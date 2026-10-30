@@ -77,7 +77,7 @@ Most handlers are thin wrappers around `server/runtime.ts` functions or `src/lib
 - The DB schema described in the doc (§15–18) isn't tracked in this repo's migrations — `supabase/migrations/` has exactly one file (`20260825000000_cash_line_calibration.sql`). The bulk of the referenced tables (`generation_runs`, `floyd_dfs_research_runs`, etc.) exist in Supabase but their schema isn't version-controlled here.
 - Multi-tenant RLS policies described in the doc aren't present as migrations either.
 - The doc's full Testing Strategy (§34) doesn't exist — see Testing below.
-- `npm run import:dk`, `import:mlb-actuals`, `import:results` reference `scripts/import-*.mjs` files that **don't exist** in `scripts/` (only `run-engine-parity.mjs` does). These npm scripts will fail if run.
+- The former `import:dk`, `import:mlb-actuals`, and `import:results` npm aliases referenced absent CLI files and have been removed. Slate discovery and contest-result imports use the authenticated `/api/slates`, `/api/results/import`, and `/api/results/import-field` routes; verified player actual acquisition/backfill remains a separate provider-backed operation.
 
 If you're asked to implement something "per the design doc," confirm first whether it's meant to close one of these gaps or whether the doc section in question has already been superseded by what's in `src/lib/engine`.
 

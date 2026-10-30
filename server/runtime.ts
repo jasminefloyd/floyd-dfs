@@ -29,12 +29,12 @@ import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.j
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
 import { currentSeasonWeight, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs.js';
 import { fetchOfficialMlbSeasonRows } from '../src/lib/engine/officialMlbStatsProvider.js';
-import { ENGINE_CONTRACT_VERSION, type AdjustmentPackage, type ContestFormat, type EngineStage, type NbaHouseReport, type ProjectionPackage, type StreetTeamSnapshot, type ValidatedSlate } from '../src/lib/engine/contracts.js';
-import { parseNbaHouseReport, parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
+import { type ContestFormat, type EngineStage, type ProjectionPackage, type ValidatedSlate } from '../src/lib/engine/contracts.js';
+import { parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
 import { persistEvidenceLedger } from './evidenceLedger.js';
 import { isFeatureEnabled } from './featureFlags.js';
-import { getStreetTeamSnapshot } from './streetTeam.js';
 import { assessContestPayoutReadiness } from './lineupAgent/contest.js';
+import { analyzeNbaSlate } from './houses/nba/index.js';
 
 type Json = Record<string, unknown>;
 
@@ -665,7 +665,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   }
   assertProjection(projection);
   if (workingSlate.sport === 'NBA' && isFeatureEnabled('NBA_HOUSE_V1')) {
-    const house = await buildAndPersistNbaHouse(db, run, workingSlate, projection);
+    const house = await analyzeNbaSlate(db, run, workingSlate, projection);
     if (house) stages.nbaHouse = house;
     else stages.nbaHouseWarning = 'NBA House was enabled, but no tenant-scoped Street Team snapshot was available; the existing projection path was retained.';
   }
@@ -849,90 +849,6 @@ async function persistConfiguration(db: SupabaseClient, tenantId: string): Promi
     { tenant_id: tenantId, stage: 'SELECTION', name: 'selection.v1', version: 1, template: 'Select only optimizer candidates using contest context; never create or modify lineups.', active: true },
   ];
   const templateResult = await db.from('prompt_templates').upsert(templates, { onConflict: 'tenant_id,stage,name,version' }); if (templateResult.error) throw templateResult.error;
-}
-
-async function buildAndPersistNbaHouse(db: SupabaseClient, run: Json, slate: ValidatedSlate, adjustedProjections: ProjectionPackage): Promise<NbaHouseReport | null> {
-  const tenantId = String(run.tenant_id);
-  const snapshot: StreetTeamSnapshot | null = await getStreetTeamSnapshot(db, tenantId);
-  if (!snapshot) return null;
-  if (snapshot.sport !== 'NBA' || snapshot.tenantId !== tenantId || Date.parse(snapshot.asOf) > Date.now()) throw new Error('NBA House received a cross-tenant, wrong-sport, or future Street Team snapshot.');
-
-  const generatedAt = new Date().toISOString();
-  const baselineAdjustment: AdjustmentPackage = {
-    slateId: slate.slateId,
-    tenantId,
-    sport: 'NBA',
-    version: 1,
-    generatedAt,
-    adjustments: [],
-    researchGaps: [],
-    status: 'COMPLETE',
-  };
-  const baselineProjections = projectSlate(slate, baselineAdjustment, new Date(generatedAt));
-  assertProjection(baselineProjections);
-  const warnings = [
-    'Street Team evidence is attached for point-in-time audit; this House version does not apply unvalidated Street Team or behavioral effects to numeric projections.',
-    'Evidence-linked numeric driver attributions are unavailable until calibrated House adjustments are implemented.',
-  ];
-  if (adjustedProjections.gameSimulation?.releaseStatus === 'UNVALIDATED') warnings.push('Connected game scenarios remain unvalidated against prospective NBA actuals.');
-  const scenarioDistributions = adjustedProjections.gameSimulation && adjustedProjections.gameSimulation.mode !== 'BASELINE'
-    ? [{
-      scenarioId: `${adjustedProjections.gameSimulation.modelVersion}:${adjustedProjections.gameSimulation.seed}`,
-      scenarioType: 'CONNECTED_GAME_TRIAL_DISTRIBUTION',
-      playerOutcomes: Object.fromEntries(adjustedProjections.players.map((player) => {
-        const samples = [...(player.simulatedFantasyPointSamples ?? [])].sort((left, right) => left - right);
-        const quantile = (probability: number): number => {
-          if (!samples.length) return player.projectedOutcomes.medianP50;
-          const index = (samples.length - 1) * probability;
-          const lower = Math.floor(index);
-          const upper = Math.ceil(index);
-          return samples[lower] + (samples[upper] - samples[lower]) * (index - lower);
-        };
-        return [player.playerId, { p10: quantile(0.1), p20: quantile(0.2), p50: quantile(0.5), p80: quantile(0.8), p90: quantile(0.9) }];
-      })),
-    }]
-    : [];
-  if (!scenarioDistributions.length) warnings.push('No connected game simulation was requested; scenario distributions are unavailable for this baseline run.');
-  const trustStatus: NbaHouseReport['trustStatus'] = baselineProjections.status === 'BLOCKED' || adjustedProjections.status === 'BLOCKED'
-    ? 'BLOCKED'
-    : baselineProjections.status === 'PARTIAL' || adjustedProjections.status === 'PARTIAL' || snapshot.providerDiagnostics.some((item) => item.status === 'FAILED' || item.status === 'RATE_LIMITED' || item.freshness !== 'FRESH')
-      ? 'PARTIAL'
-      : 'UNVALIDATED';
-  const report = parseNbaHouseReport({
-    contractVersion: ENGINE_CONTRACT_VERSION,
-    houseReportId: requestId(),
-    tenantId,
-    sport: 'NBA',
-    slateId: slate.slateId,
-    intelSnapshotId: snapshot.snapshotId,
-    modelVersion: 'nba-house.shadow.v1',
-    baselineModelVersion: baselineProjections.modelVersion,
-    forecastCutoff: snapshot.asOf,
-    generatedAt,
-    baselineProjections,
-    adjustedProjections,
-    driverAttributions: [],
-    scenarioDistributions,
-    trustStatus,
-    unknowns: snapshot.unknowns.map((item) => item.question),
-    warnings,
-  }, { expectedTenantId: tenantId, expectedSlateId: slate.slateId, intelSnapshot: snapshot });
-  const inserted = await db.from('floyd_dfs_house_reports').insert({
-    id: report.houseReportId,
-    tenant_id: tenantId,
-    sport: 'NBA',
-    generation_run_id: String(run.id),
-    intel_snapshot_id: report.intelSnapshotId,
-    model_version: report.modelVersion,
-    baseline_model_version: report.baselineModelVersion,
-    forecast_cutoff: report.forecastCutoff,
-    baseline: report.baselineProjections,
-    adjustments: { adjustedProjections: report.adjustedProjections, driverAttributions: report.driverAttributions },
-    scenario_metadata: { simulation: adjustedProjections.gameSimulation ?? null, scenarioDistributions: report.scenarioDistributions, trustStatus: report.trustStatus, unknowns: report.unknowns, warnings: report.warnings },
-    trust_status: report.trustStatus,
-  });
-  if (inserted.error) throw inserted.error;
-  return report;
 }
 
 export function parseBody(req: VercelRequest): Json { if (!req.body) return {}; let value: unknown = req.body; if (typeof req.body === 'string') { if (Buffer.byteLength(req.body, 'utf8') > 10_000_000) throw new ApiError(413, 'Request body exceeds the 10 MB limit.', 'BODY_TOO_LARGE'); try { value = JSON.parse(req.body) as unknown; } catch { throw new ApiError(400, 'Request body must contain valid JSON.', 'INVALID_JSON'); } } else if (Buffer.byteLength(JSON.stringify(req.body), 'utf8') > 10_000_000) throw new ApiError(413, 'Request body exceeds the 10 MB limit.', 'BODY_TOO_LARGE'); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError(400, 'Request body must be a JSON object.', 'INVALID_BODY'); return value as Json; }

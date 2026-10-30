@@ -1,12 +1,8 @@
--- Screenshot uploads are server-mediated and stored under the configured tenant/user path.
+-- Screenshot uploads are server-mediated and use the service-role Storage client.
+-- storage.objects already has RLS enabled and its existing policies are scoped to
+-- other named buckets. The DraftKings bucket therefore has no browser-role policy;
+-- avoid owner-only ALTER TABLE / CREATE POLICY statements against Supabase-managed
+-- storage.objects, which are not executable by the linked postgres role.
 insert into storage.buckets (id, name, public)
 values ('draftkings', 'draftkings', false)
-on conflict (id) do update set public = false;
-
-alter table storage.objects enable row level security;
-drop policy if exists fds_draftkings_server_only on storage.objects;
-create policy fds_draftkings_server_only
-  on storage.objects as restrictive
-  for all to anon, authenticated
-  using (bucket_id <> 'draftkings')
-  with check (bucket_id <> 'draftkings');
+on conflict (id) do update set name = excluded.name, public = false;
