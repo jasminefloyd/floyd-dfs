@@ -46,11 +46,11 @@ This result does not establish why the 73 rows failed validation or prove that t
 
 ## Production deployment verification
 
-The fail-closed Street Team gate and NBA backfill safeguards were deployed to Vercel Production on 2026-10-30 at 05:10 UTC. The production alias `floyd-dfs.vercel.app` points to READY deployment `dpl_5PzHija77mubYM3d2uM7yNj6MhQK`; Vercel inspection confirmed `api/street-team/collect` is included. At that time, the production environment-name listing showed `SPORTS_DATA_IO_KEY` but no `SPORTS_DATA_IO_DATA_TIER`; secret values were not accessed. After the user confirmed NBA access and storage rights, `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` was added as a non-sensitive Vercel Production variable. Vercel environment changes apply to new deployments; the production alias still needs a new deployment to receive this variable. A successful daily collection has not yet been observed.
+The fail-closed Street Team gate and NBA backfill safeguards were first deployed to Vercel Production on 2026-10-30 at 05:10 UTC. After the user confirmed NBA access and storage rights, `SPORTS_DATA_IO_DATA_TIER=PRODUCTION_VERIFIED` was added to Vercel Production and the project was redeployed. At 05:15 UTC, inspection showed the production alias `floyd-dfs.vercel.app` pointing to READY deployment `dpl_Ev8ccVPf6jHoD3DnQnpLGVhEVM9G`, with `api/street-team/collect` included. The production environment-name listing showed both `SPORTS_DATA_IO_KEY` and `SPORTS_DATA_IO_DATA_TIER`; secret values were not accessed. No successful collection had been observed by 05:16 UTC; the configured daily cron is at 08:00 UTC.
 
 ## Remaining acceptance evidence
 
-1. Redeploy Vercel Production after adding the data-tier marker, then verify the production alias and first daily Street Team run.
+1. Verify the first daily Street Team run after the 08:00 UTC cron following deployment.
 2. Investigate the 73 structurally quarantined actuals and validate the 21 passing rows against official outcomes. The dry-run alone is not sufficient evidence to import.
 3. Obtain official DraftKings contest outcome/field data; it is not currently available for the three archived projection runs.
 4. Import only verified final actuals, reconcile player and full-field DraftKings results, and retain corrected revisions.
