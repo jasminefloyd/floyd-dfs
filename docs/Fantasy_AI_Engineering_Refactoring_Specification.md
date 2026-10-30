@@ -893,7 +893,7 @@ Apply existing tenant RLS conventions to all new tables, including policy covera
 ## I. Key open implementation checks
 
 1. **Resolved 2026-10-30:** the current `package.json` contains no commands referencing `scripts/import-draftkings-slate.mjs`, `scripts/import-mlb-actual-results.mjs`, or `scripts/import-projection-results.mjs`; those absent scripts are not exposed as current project commands and are not release gates. The Phase 0 baseline retains its historical inventory of the earlier package state.
-2. The SQL migrations appear incremental rather than a full bootstrap schema; inspect actual production table definitions (assumed working) before fixing final foreign-key types and names in additive migrations.
+2. **Resolved 2026-10-30:** before the additive migrations, the P0 production catalog snapshot was captured with table columns, defaults, constraints, indexes, RLS policies, views, and triggers; the additive FK names/types were based on that schema evidence. The linked production migration ledger was subsequently verified aligned through `20261030060000` with no pending or remote-only versions. The snapshot is catalog metadata, not a complete `pg_dump` DDL artifact.
 3. Existing NBA connected-game simulation is explicitly provisional; do not infer real-world accuracy from presence of code.
 4. Provider availability is assumed per user instruction; provider data licensing, rate limits and permitted storage still need contractual review before redistribution or commercial deployment.
 5. Current repository contains compiled `dist/` assets and Supabase `.temp` state; exclude generated artifacts from source reviews and deployment commits.
