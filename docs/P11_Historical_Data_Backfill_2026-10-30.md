@@ -50,6 +50,8 @@ The fail-closed Street Team gate and NBA backfill safeguards were first deployed
 
 On 2026-10-30, the report-only NBA behavior context implementation was deployed as Vercel Production deployment `dpl_9gszNDdCddu42yYN8muMbyQxF6FN` (deployment URL `https://floyd-qds1g9mih-fds-ai-projects.vercel.app`). The deployment command reported `READY` and aliased it to `https://floyd-dfs.vercel.app`. This code change adds evidence-linked behavior context to Street Team snapshots and NBA House reports; it does not change numerical projections or model release state. A direct HTTP request to the production alias could not be verified from the local shell because DNS resolution failed (`curl: (6) Could not resolve host`); the deployment provider's READY/alias result is the available deployment evidence.
 
+A fresh Supabase migration-ledger check was attempted after that deployment. It could not run because the Supabase CLI is not installed and the shell could not resolve `registry.npmjs.org` to retrieve it (`ENOTFOUND`). Therefore the migration alignment through `20261030060000` above is the last verified ledger result, not a recheck from this deployment window.
+
 ## Remaining acceptance evidence
 
 1. Verify the first daily Street Team run after the 08:00 UTC cron following deployment.
