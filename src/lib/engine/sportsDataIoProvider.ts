@@ -15,9 +15,10 @@ export class SportsDataIoClient {
   private readonly maxAttempts: number;
   constructor(options: SportsDataIoClientOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; this.baseUrl = (options.baseUrl ?? 'https://api.sportsdata.io/v3').replace(/\/+$/, ''); this.timeoutMs = options.timeoutMs ?? 12_000; this.maxAttempts = options.maxAttempts ?? 3; if (!options.apiKey) throw new Error('SportsDataIO API key is required.'); }
   async get<T>(sport: Sport, feed: string, resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
-    const path = [this.baseUrl, sport.toLowerCase(), feed, 'json', resource, parameter].filter(Boolean).join('/');
+    const path = this.sourceUrl(sport, feed, resource, parameter);
     return await this.fetchJson<T>(path, `SportsDataIO ${sport} ${feed}/${resource}`, signal);
   }
+  sourceUrl(sport: Sport, feed: string, resource: string, parameter?: string): string { return [this.baseUrl, sport.toLowerCase(), feed, 'json', resource, parameter].filter(Boolean).join('/'); }
   private async getGolf<T>(resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
     const golfBaseUrl = this.baseUrl.replace(/\/v3$/, '');
     const path = [golfBaseUrl, 'golf', 'v2', 'json', resource, parameter].filter(Boolean).join('/');

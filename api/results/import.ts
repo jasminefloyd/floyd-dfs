@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createHash } from 'node:crypto';
 import { diagnoseLineupResult } from '../../server/learningDiagnosis.js';
 import { cors, getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../server/runtime.js';
 
@@ -68,11 +69,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           official_outcome: true, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED',
           result_payload: { source: 'DRAFTKINGS_CSV', importBatchId: batchId, csvRow: rowNumber },
         };
-        const prior = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('measured_at', { ascending: false }).limit(1).maybeSingle();
-        if (prior.error) throw prior.error;
-        const saved = prior.data
-          ? await context.db.from('floyd_dfs_contest_results').update(valuesToSave).eq('tenant_id', context.tenantId).eq('id', prior.data.id).select('id').single()
-          : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...valuesToSave }).select('id').single();
+        const sourceSha256 = createHash('sha256').update(stableJson({ lineupId, ...valuesToSave, result_payload: { source: 'DRAFTKINGS_CSV' } })).digest('hex');
+        const existing = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).eq('source_sha256', sourceSha256).maybeSingle();
+        if (existing.error) throw existing.error;
+        const saved = existing.data
+          ? { data: existing.data, error: null }
+          : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...valuesToSave, source_sha256: sourceSha256 }).select('id').single();
         if (saved.error) throw saved.error;
         await reconcileAndDiagnose({ context, resultId: String(saved.data.id), lineupId, lineupPayload: lineup.data.lineup_payload, selectionRunId: String(lineup.data.selection_run_id), enteredScore: actual, contestKey: contestId ?? contestName ?? `result:${lineupId}` });
         imported += 1;
@@ -148,6 +150,7 @@ export async function reconcileAndDiagnose(input: { context: Awaited<ReturnType<
 }
 
 function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
+function stableJson(value: unknown): string { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`; return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`; }
 function number(value: unknown, required = false): number | null { const raw = text(value); if (!raw) { if (required) throw new Error('actual_dk_points is required.'); return null; } const parsed = Number(raw.replace(/^\$|,/g, '')); if (!Number.isFinite(parsed)) throw new Error(`Invalid numeric value "${raw}".`); return parsed; }
 function integer(value: unknown): number | null { const parsed = number(value); if (parsed === null) return null; if (!Number.isInteger(parsed)) throw new Error(`Expected an integer but received "${parsed}".`); return parsed; }
 function parseCsv(textValue: string): string[][] {

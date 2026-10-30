@@ -26,9 +26,14 @@ export type GenerationRunState =
 
 /** Versioned boundary for artifacts exchanged between stages. Bump only when an artifact's
  * meaning or required fields change; the numeric `version` remains the run-local revision. */
-export const ENGINE_CONTRACT_VERSION = '2026-10-21.1';
+export const ENGINE_CONTRACT_VERSION = '2026-10-29.1';
+export const SUPPORTED_ENGINE_CONTRACT_VERSIONS = [ENGINE_CONTRACT_VERSION, '2026-10-21.1'] as const;
 export const FDS_TRANSPORT_CONTRACT_VERSION = 'fds.transport.v1';
 export type EngineRunMode = 'PRE_LOCK' | 'LIVE';
+
+export function isSupportedEngineContractVersion(value: unknown): value is (typeof SUPPORTED_ENGINE_CONTRACT_VERSIONS)[number] {
+  return typeof value === 'string' && (SUPPORTED_ENGINE_CONTRACT_VERSIONS as readonly string[]).includes(value);
+}
 
 /** Stable tenant-scoped IDs are strings even when an upstream provider uses numeric IDs. */
 export interface CanonicalIdentity {
@@ -469,7 +474,7 @@ export interface ProjectionPackage {
   gaps: Array<{ reason: string }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
   /** Scenario samples are experimental until calibrated against prospective actuals. */
-  gameSimulation?: { mode: 'BASELINE' | 'GAME_SIMULATION' | 'COMPARE'; modelVersion: string; seed: string; trials: number; dependence: 'CONNECTED_GAME_EVENTS'; releaseStatus: 'UNVALIDATED'; gameScenarios: Array<{ gameId: string; trial: number; teamScores: Record<string, number> }>; comparison?: { baselineTopMedian?: number; gameSimulationTopMedian?: number; baselineCandidateCount: number; gameSimulationCandidateCount: number } };
+  gameSimulation?: { mode: 'BASELINE' | 'GAME_SIMULATION' | 'COMPARE'; modelVersion: string; seed: string; trials: number; dependence: 'CONNECTED_GAME_EVENTS'; releaseStatus: 'UNVALIDATED'; gameScenarios: Array<{ gameId: string; trial: number; teamScores: Record<string, number> }>; diagnostics?: { mappedGames: number; incompleteGames: number; simulatedPlayers: number; baselineFallbackPlayers: number; overtimeTrials: number; overtimeInputs: 'NOT_APPLICABLE' | 'SUPPLIED' | 'MISSING' | 'CONFLICTING' }; comparison?: { baselineTopMedian?: number; gameSimulationTopMedian?: number; baselineCandidateCount: number; gameSimulationCandidateCount: number } };
   evidenceInputBoundary?: { numericInputs: 'STRUCTURED_PROVIDER_FIELDS'; acceptedEvidenceFactIds: string[]; researchProseUsedAsNumericInput: false; sourceManifest: Array<{ source: string; receivedAt: string; fields: string[] }> };
 }
 
@@ -731,4 +736,178 @@ export interface SelectionPackage {
   warnings: string[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
   engineState: 'MODEL_VALIDATION_REQUIRED';
+}
+
+/** Provenance classification for continuously collected, tenant-scoped sports intelligence. */
+export type IntelligenceEvidenceClass = 'OFFICIAL_CONFIRMED' | 'CORROBORATED_REPORT' | 'SINGLE_SOURCE_REPORT' | 'HYPOTHESIS' | 'STALE' | 'SUPERSEDED';
+export type IntelligenceSubjectKind = 'PLAYER' | 'TEAM' | 'EVENT' | 'LEAGUE';
+
+export interface IntelligenceObservation {
+  id: string;
+  tenantId: string;
+  sport: Sport;
+  subject: { kind: IntelligenceSubjectKind; id: string };
+  claim: string;
+  source: string;
+  sourceRecordId?: string;
+  sourceUrl?: string;
+  classification: IntelligenceEvidenceClass;
+  confidence: number;
+  publishedAt?: string;
+  effectiveAt?: string;
+  observedAt: string;
+  retrievedAt: string;
+  expiresAt?: string;
+  supersedesObservationId?: string;
+  contentSha256: string;
+}
+
+export interface StreetTeamResolvedFact {
+  id: string;
+  tenantId: string;
+  sport: Sport;
+  subject: { kind: IntelligenceSubjectKind; id: string };
+  factType: string;
+  value: unknown;
+  observationIds: string[];
+  state: 'ACCEPTED' | 'CONFLICT' | 'UNKNOWN' | 'EXPIRED';
+  confidence: number;
+  effectiveAt?: string;
+  resolvedAt: string;
+  ruleVersion: string;
+}
+
+export interface BehaviorSignal {
+  id: string;
+  tenantId: string;
+  sport: Sport;
+  subject: { kind: 'PLAYER' | 'TEAM'; id: string };
+  event: string;
+  interpretation?: string;
+  observationIds: string[];
+  confidence: number;
+  effectStatus: 'REPORT_ONLY' | 'VALIDATION_REQUIRED' | 'APPROVED';
+  numericEffect?: number;
+  modelVersion?: string;
+}
+
+export interface StreetTeamProviderDiagnostic {
+  provider: string;
+  status: 'SUCCEEDED' | 'EMPTY' | 'FAILED' | 'RATE_LIMITED';
+  retrievedAt: string;
+  freshness: 'FRESH' | 'STALE' | 'UNKNOWN';
+  errorCode?: string;
+}
+
+/** Immutable as-of record shared by sport-specific Houses. */
+export interface StreetTeamSnapshot {
+  contractVersion: string;
+  snapshotId: string;
+  tenantId: string;
+  sport: Sport;
+  asOf: string;
+  createdAt: string;
+  evidenceHash: string;
+  observations: IntelligenceObservation[];
+  resolvedFacts: StreetTeamResolvedFact[];
+  rosterState: Array<{ teamId: string; playerId: string; status: string; validFrom: string; validTo?: string; evidenceIds: string[] }>;
+  availability: Array<{ playerId: string; status: string; effectiveAt?: string; observedAt: string; evidenceIds: string[] }>;
+  transactions: Array<{ playerId: string; fromTeamId?: string; toTeamId?: string; transactionType: string; effectiveAt: string; evidenceIds: string[] }>;
+  behaviorSignals: BehaviorSignal[];
+  unknowns: Array<{ subjectId?: string; question: string; reason: string }>;
+  providerDiagnostics: StreetTeamProviderDiagnostic[];
+}
+
+export interface NbaHouseDriverAttribution {
+  playerId: string;
+  dimension: string;
+  baselineValue: number;
+  adjustedValue: number;
+  evidenceIds: string[];
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  modelVersion: string;
+}
+
+export interface NbaHouseScenarioDistribution {
+  scenarioId: string;
+  scenarioType: string;
+  probability?: number;
+  playerOutcomes: Record<string, { p10?: number; p20?: number; p50: number; p80?: number; p90?: number }>;
+}
+
+export interface NbaHouseReport {
+  contractVersion: string;
+  houseReportId: string;
+  tenantId: string;
+  sport: 'NBA';
+  slateId: string;
+  intelSnapshotId: string;
+  modelVersion: string;
+  baselineModelVersion: string;
+  forecastCutoff: string;
+  generatedAt: string;
+  baselineProjections: ProjectionPackage;
+  adjustedProjections: ProjectionPackage;
+  driverAttributions: NbaHouseDriverAttribution[];
+  scenarioDistributions: NbaHouseScenarioDistribution[];
+  trustStatus: 'VALIDATED' | 'UNVALIDATED' | 'PARTIAL' | 'BLOCKED';
+  unknowns: string[];
+  warnings: string[];
+}
+
+export interface ContestPayoutReadiness {
+  contractVersion: string;
+  tenantId: string;
+  slateId: string;
+  contestId: string;
+  asOf: string;
+  status: 'READY' | 'PARTIAL' | 'UNAVAILABLE';
+  payoutStatus: 'VERIFIED' | 'INCOMPLETE' | 'UNAVAILABLE';
+  payoutTiers: Array<{ rank: number; payout: number }>;
+  entryFee?: number;
+  fieldSize?: number;
+  fieldModelStatus: 'CALIBRATED' | 'EXPERIMENTAL' | 'UNAVAILABLE';
+  fieldModelVersion?: string;
+  warnings: string[];
+}
+
+export interface PortfolioSelection {
+  contractVersion: string;
+  portfolioId: string;
+  tenantId: string;
+  slateId: string;
+  contestId: string;
+  houseReportId: string;
+  generationRunId?: string;
+  modelVersion: string;
+  objective: 'MAX_EXPECTED_NET_RETURN' | 'MAX_EXPECTED_POINTS' | 'RISK_ADJUSTED_RETURN';
+  entryCount: number;
+  candidates: LineupCandidate[];
+  selectedLineups: SelectedLineup[];
+  legalityResults: Array<{ candidateId: string; legal: boolean; errors: string[] }>;
+  payoutReadiness: ContestPayoutReadiness;
+  expectedNetPayout?: number;
+  expectedProfit?: number;
+  cashProbability?: number;
+  fieldModelVersion?: string;
+  warnings: string[];
+  status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
+}
+
+export interface ModelEvaluation {
+  contractVersion: string;
+  evaluationId: string;
+  tenantId: string;
+  sport: Sport;
+  contestFormat: ContestFormat;
+  component: 'PROJECTION' | 'SIMULATION' | 'FIELD_MODEL' | 'OPTIMIZER' | 'PORTFOLIO';
+  baselineModelVersion: string;
+  candidateModelVersion: string;
+  evaluationWindow: { from: string; to: string };
+  evaluatedAt: string;
+  sampleCounts: { independentSlates: number; playerRows: number; lineupRows: number; contestEntries: number };
+  metrics: Record<string, number | null>;
+  dataManifest: Record<string, unknown>;
+  gateDecision: 'PROMOTE' | 'HOLD' | 'INSUFFICIENT_DATA';
+  gateReason: string;
 }

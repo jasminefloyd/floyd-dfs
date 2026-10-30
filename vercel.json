@@ -4,6 +4,7 @@
   "framework": "vite",
   "crons": [
     { "path": "/api/learning/weekly-report", "schedule": "0 13 * * 1" },
-    { "path": "/api/maintenance/draftkings-audit", "schedule": "0 14 1 * *" }
+    { "path": "/api/maintenance/draftkings-audit", "schedule": "0 14 1 * *" },
+    { "path": "/api/street-team/collect", "schedule": "0 8 * * *" }
   ]
 }

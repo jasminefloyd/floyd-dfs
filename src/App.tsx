@@ -8,6 +8,8 @@ import ResearchPage from './pages/ResearchPage'
 import LearningPage from './pages/LearningPage'
 import DesignSystem from './pages/DesignSystem'
 import AdminConsole from './pages/admin/AdminConsole'
+import StreetTeamPage from './pages/StreetTeamPage'
+import NbaHousePage from './pages/NbaHousePage'
 import { ToastProvider } from './components/ToastProvider'
 import { useEnterTransition } from './hooks/useEnterTransition'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -39,6 +41,9 @@ function App() {
           <RouteFade>
             <Routes>
               <Route path="/" element={<ScanPage />} />
+              <Route path="/lineup-lab" element={<ScanPage />} />
+              <Route path="/street-team" element={<StreetTeamPage />} />
+              <Route path="/house/nba" element={<NbaHousePage />} />
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/runs/:runId" element={<RunPage />} />
               <Route path="/research/:runId" element={<ResearchPage />} />

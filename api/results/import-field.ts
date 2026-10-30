@@ -42,9 +42,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     for (const contestId of touchedContests) {
-      const contestRows = await context.db.from('floyd_dfs_contest_field_entries').select('contest_id,external_entry_id,sport,contest_format,field_size,entry_fee,paid_positions,finish_position,actual_dk_points,payout,player_ids').eq('tenant_id', context.tenantId).eq('contest_id', contestId).in('finality_status', ['FINAL','CORRECTED']).limit(50000);
+      const contestRows = await context.db.from('floyd_dfs_contest_field_entries').select('contest_id,external_entry_id,revision,sport,contest_format,field_size,entry_fee,paid_positions,finish_position,actual_dk_points,payout,player_ids').eq('tenant_id', context.tenantId).eq('contest_id', contestId).in('finality_status', ['FINAL','CORRECTED']).limit(50000);
       if (contestRows.error) throw contestRows.error;
-      const field = contestRows.data ?? []; if (!field.length) continue;
+      const latestByEntry = new Map<string, Record<string, unknown>>();
+      for (const row of contestRows.data ?? []) { const key = String(row.external_entry_id); const prior = latestByEntry.get(key); if (!prior || Number(row.revision ?? 0) > Number(prior.revision ?? 0)) latestByEntry.set(key, row as Record<string, unknown>); }
+      const field = [...latestByEntry.values()]; if (!field.length) continue;
       const expected = Number(field[0].field_size);
       if (field.some((entry) => Number(entry.field_size) !== expected || Number(entry.paid_positions) !== Number(field[0].paid_positions) || Number(entry.entry_fee) !== Number(field[0].entry_fee) || entry.sport !== field[0].sport || entry.contest_format !== field[0].contest_format)) {
         errors.push({ row: 0, error: `Contest ${contestId} has inconsistent contest labels; no lineup outcomes were reconciled.` }); continue;
@@ -64,13 +66,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const lineupResult = await context.db.from('floyd_dfs_generated_lineups').select('id,status,lineup_payload,selection_run_id').eq('tenant_id', context.tenantId).eq('id', lineupId).maybeSingle();
         if (lineupResult.error) throw lineupResult.error; if (!lineupResult.data || lineupResult.data.status !== 'ENTERED') continue;
         const actual = Number(entry.actual_dk_points); const finish = Number(entry.finish_position); const fieldSize = Number(entry.field_size); const fee = Number(entry.entry_fee); const payout = Number(entry.payout);
-        const contestResult = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).eq('contest_id', contestId).order('measured_at', { ascending: false }).limit(1).maybeSingle();
-        if (contestResult.error) throw contestResult.error;
         const fieldSnapshotHash = createHash('sha256').update(stableJson(field.map((item) => [item.external_entry_id,item.finish_position,item.actual_dk_points,item.payout]))).digest('hex');
         const values = { actual_dk_points: actual, cash_line: cashLine, beat_cash_line: actual >= cashLine, finish_position: finish, finish_percentile: 100 * (1 - (finish - 1) / Math.max(1, fieldSize - 1)), payout, roi: fee > 0 ? (payout - fee) / fee : null, contest_id: contestId, contest_name: text(body.contestName) || null, sport: entry.sport, contest_format: entry.contest_format, field_size: fieldSize, entry_fee: fee, paid_positions: Number(entry.paid_positions), outcome_source: 'DRAFTKINGS_STANDINGS_CSV', external_entry_id: entry.external_entry_id, official_outcome: true, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED', result_payload: { source: 'DRAFTKINGS_STANDINGS_CSV', fullFieldImport: true, fieldRows: field.length, fieldSnapshotHash, cashLine } };
-        const savedResult = contestResult.data
-          ? await context.db.from('floyd_dfs_contest_results').update(values).eq('tenant_id', context.tenantId).eq('id', contestResult.data.id).select('id').single()
-          : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...values }).select('id').single();
+        const sourceSha256 = createHash('sha256').update(stableJson({ lineupId, ...values })).digest('hex');
+        const existingResult = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).eq('source_sha256', sourceSha256).maybeSingle();
+        if (existingResult.error) throw existingResult.error;
+        const savedResult = existingResult.data
+          ? { data: existingResult.data, error: null }
+          : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...values, source_sha256: sourceSha256 }).select('id').single();
         if (savedResult.error) throw savedResult.error;
         await reconcileAndDiagnose({ context, resultId: String(savedResult.data.id), lineupId, lineupPayload: lineupResult.data.lineup_payload, selectionRunId: String(lineupResult.data.selection_run_id), enteredScore: actual, contestKey: contestId });
         linkedOutcomes += 1;

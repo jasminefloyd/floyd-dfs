@@ -1,4 +1,4 @@
-import { ENGINE_CONTRACT_VERSION } from './contracts.js';
+import { ENGINE_CONTRACT_VERSION, isSupportedEngineContractVersion } from './contracts.js';
 import type { AdjustmentPackage, OptimizerPackage, ProjectionPackage, ResearchPackage, SelectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
 
 export class EngineContractError extends Error { constructor(stage: string, errors: string[]) { super(`${stage} contract validation failed: ${errors.join(' ')}`); this.name = 'EngineContractError'; } }
@@ -16,7 +16,7 @@ export function validateSlate(slate: ValidatedSlate): string[] {
   for (const [slot, rule] of Object.entries(slate.rosterRules.slots)) for (const [label, multiplier] of [['salaryMultiplier', rule.salaryMultiplier], ['fantasyMultiplier', rule.fantasyMultiplier]] as const) if (multiplier !== undefined && (!Number.isFinite(multiplier) || multiplier <= 0)) errors.push(`${slot} ${label} must be finite and positive.`);
   if (!Object.keys(slate.scoringRules).length) errors.push('scoring rules are required.');
   if (!slate.playerPool.length) errors.push('player pool is required.');
-  if (slate.contractVersion && slate.contractVersion !== ENGINE_CONTRACT_VERSION) errors.push(`unsupported slate contract version ${slate.contractVersion}; expected ${ENGINE_CONTRACT_VERSION}.`);
+  if (slate.contractVersion && !isSupportedEngineContractVersion(slate.contractVersion)) errors.push(`unsupported slate contract version ${slate.contractVersion}; expected ${ENGINE_CONTRACT_VERSION} or a supported legacy version.`);
   if (slate.runMode === 'LIVE' && !slate.liveGameState) errors.push('LIVE runs require a structured liveGameState artifact; pre-lock data cannot be extrapolated as live state.');
   const ids = new Set<string>();
   for (const [key, rule] of Object.entries(slate.scoringRules)) if (!Number.isFinite(rule.value)) errors.push(`scoring rule ${key} has a non-finite value.`);
@@ -26,7 +26,7 @@ export function validateSlate(slate: ValidatedSlate): string[] {
 }
 
 export function assertSupportedContractVersion(value: { contractVersion?: string }, stage: string): void {
-  if (value.contractVersion && value.contractVersion !== ENGINE_CONTRACT_VERSION) throw new EngineContractError(stage, [`unsupported contract version ${value.contractVersion}; expected ${ENGINE_CONTRACT_VERSION}.`]);
+  if (value.contractVersion && !isSupportedEngineContractVersion(value.contractVersion)) throw new EngineContractError(stage, [`unsupported contract version ${value.contractVersion}; expected ${ENGINE_CONTRACT_VERSION} or a supported legacy version.`]);
 }
 
 export function assertSlate(slate: ValidatedSlate): void {

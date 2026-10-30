@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createHash } from 'node:crypto';
 import { isOperator, parseBearer, secretMatches, tenantHeaderAllowed } from './authPolicy.mjs';
 import { config as loadDotenv } from 'dotenv';
 import WebSocket from 'ws';
@@ -28,9 +29,12 @@ import { EspnProjectionClient } from '../src/lib/engine/espnProjectionProvider.j
 import { buildCashLineCalibration, calibratedCashLineProbability, rawCashLineProbability, CASH_LINE_CALIBRATION_VERSION, type CashLineObservation } from '../src/lib/engine/cashLineCalibration.js';
 import { currentSeasonWeight, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs.js';
 import { fetchOfficialMlbSeasonRows } from '../src/lib/engine/officialMlbStatsProvider.js';
-import type { ContestFormat, EngineStage, ValidatedSlate } from '../src/lib/engine/contracts.js';
-import { parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
+import { ENGINE_CONTRACT_VERSION, type AdjustmentPackage, type ContestFormat, type EngineStage, type NbaHouseReport, type ProjectionPackage, type StreetTeamSnapshot, type ValidatedSlate } from '../src/lib/engine/contracts.js';
+import { parseNbaHouseReport, parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
 import { persistEvidenceLedger } from './evidenceLedger.js';
+import { isFeatureEnabled } from './featureFlags.js';
+import { getStreetTeamSnapshot } from './streetTeam.js';
+import { assessContestPayoutReadiness } from './lineupAgent/contest.js';
 
 type Json = Record<string, unknown>;
 
@@ -210,7 +214,7 @@ export function providerSet(): { agent: ResearchAgent; availability?: SportsData
   return { agent: new ResearchAgent({ providers, synthesizer, freshness: { availabilityMinutes: boundedIntegerEnv('FDS_AVAILABILITY_FRESHNESS_MINUTES', 5, 1, 60), contextMinutes: boundedIntegerEnv('FDS_CONTEXT_FRESHNESS_MINUTES', 1440, 5, 10080) }, experimentalContextEffectsEnabled: env('FDS_ENABLE_EXPERIMENTAL_CONTEXT_EFFECTS')?.toLowerCase() === 'true' }), availability, espnProjection: espnBaseUrl ? new EspnProjectionClient(espnBaseUrl) : undefined, anthropicKey, anthropicModel: env('ANTHROPIC_MODEL') };
 }
 
-export interface RunOptions { lineupMode?: string; simulationMode?: SimulationMode; minSalaryUsed?: number; maxSharedPlayers?: number; fixedRosterSlots?: Record<string, string>; }
+export interface RunOptions { lineupMode?: string; simulationMode?: SimulationMode; simulationSeed?: string; minSalaryUsed?: number; maxSharedPlayers?: number; fixedRosterSlots?: Record<string, string>; }
 function maxMedian(candidates: Array<{ median: number }>): number | undefined { return candidates.length ? Math.max(...candidates.map((candidate) => candidate.median)) : undefined; }
 
 export async function processRun(db: SupabaseClient, run: Json, slate: ValidatedSlate, runOptions: RunOptions = {}): Promise<Json> {
@@ -653,13 +657,18 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   if (adjustmentRows.error) throw adjustmentRows.error;
   const baselineProjection = projectSlate(workingSlate, adjustment);
   const simulationMode = runOptions.simulationMode ?? 'baseline';
-  let projection = applyGameSimulation(workingSlate, baselineProjection, simulationMode);
+  let projection = applyGameSimulation(workingSlate, baselineProjection, simulationMode, runOptions.simulationSeed);
   projection.evidenceInputBoundary = { numericInputs: 'STRUCTURED_PROVIDER_FIELDS', acceptedEvidenceFactIds: (research.resolvedFacts ?? []).filter((fact) => fact.state === 'ACCEPTED').map((fact) => fact.id), researchProseUsedAsNumericInput: false, sourceManifest: workingSlate.sourceManifest.map(({ source, receivedAt, fields }) => ({ source, receivedAt, fields })) };
   const projectionWarnings = (stages.projectionDataSourceWarnings as string[] | undefined) ?? [];
   if (workingSlate.sport === 'GOLF' && projection.status === 'BLOCKED' && projectionWarnings.length) {
     projection.gaps.push({ reason: `Golf provider diagnostics: ${projectionWarnings.join(' ')}` });
   }
   assertProjection(projection);
+  if (workingSlate.sport === 'NBA' && isFeatureEnabled('NBA_HOUSE_V1')) {
+    const house = await buildAndPersistNbaHouse(db, run, workingSlate, projection);
+    if (house) stages.nbaHouse = house;
+    else stages.nbaHouseWarning = 'NBA House was enabled, but no tenant-scoped Street Team snapshot was available; the existing projection path was retained.';
+  }
   stages.projection = projection;
   await saveStage(db, run, 'PROJECTION', { slate: workingSlate, adjustment }, projection, projection.status, (stages.projectionDataSourceWarnings as string[] | undefined) ?? []);
   const projectionVersion = await nextVersion(db, 'floyd_dfs_projection_runs', String(run.tenant_id), String(run.id));
@@ -708,8 +717,9 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       const calibratedProbability = calibratedCashLineProbability(rawProbability, calibration);
       return { tenant_id: run.tenant_id, selection_run_id: selectionRun.data.id, candidate_key: lineup.candidateId, bullet_number: lineup.bulletNumber, selection_type: lineup.selectionType, lineup_payload: lineup, status: 'GENERATED', cash_line: cashLine ?? null, raw_cash_line_probability: rawProbability, cash_line_probability: calibratedProbability, cash_line_calibration_status: calibration.status, cash_line_calibration_version: CASH_LINE_CALIBRATION_VERSION };
     });
-    const inserted = await db.from('floyd_dfs_generated_lineups').insert(lineups);
+    const inserted = await db.from('floyd_dfs_generated_lineups').insert(lineups).select('id,bullet_number,lineup_payload');
     if (inserted.error) throw inserted.error;
+    await persistInitialLineupRevisionsAndPortfolio(db, run, workingSlate, projection, optimizer, selection, inserted.data ?? [], runOptions.lineupMode, stages.nbaHouse);
   }
   await persistEvidenceLedger(db, { tenantId: String(run.tenant_id), runId: String(run.id), slate: workingSlate, rawSlate: slate, research, adjustment, projection, optimizer, selection });
   const blockedReason = selection.status === 'BLOCKED'
@@ -720,6 +730,55 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
   await db.from('generation_runs').update({ state: finalState, current_stage: 'SELECTION', error: finalError }).eq('tenant_id', run.tenant_id).eq('id', run.id);
   return { ...run, state: finalState, error: finalError, current_stage: 'SELECTION', stages, lineups: selection.selectedLineups };
 }
+
+async function persistInitialLineupRevisionsAndPortfolio(db: SupabaseClient, run: Json, slate: ValidatedSlate, projection: ProjectionPackage, optimizer: ReturnType<typeof optimizeLineups>, selection: ReturnType<typeof selectLineups>, insertedLineups: Array<{ id: string; bullet_number: number; lineup_payload: unknown }>, lineupMode: string | undefined, houseValue?: unknown): Promise<void> {
+  if (!insertedLineups.length) return;
+  const generatedAt = selection.generatedAt;
+  const slateHash = sha256Json(slate);
+  const modelHash = sha256Json({ projectionModel: projection.modelVersion, simulation: projection.gameSimulation?.modelVersion, optimizerProfile: optimizer.objectiveProfile, selectionVersion: selection.version });
+  const rulesHash = sha256Json({ sport: slate.sport, format: slate.contest.format, scoringRules: slate.scoringRules, rosterRules: slate.rosterRules, salaryCap: slate.salaryCap });
+  const revisions = insertedLineups.map((row) => {
+    const payload = asRecord(row.lineup_payload) ?? {};
+    const contentHash = sha256Json({ lineupId: row.id, revision: 1, payload, generatedAt });
+    return { tenant_id: run.tenant_id, lineup_id: String(row.id), revision: 1, parent_revision: null, generation_run_id: run.id, input_sha256: slateHash, model_sha256: modelHash, rules_sha256: rulesHash, slot_assignments: payload.rosterSlots ?? {}, generated_at: generatedAt, state: 'RECOMMENDED', submission_confirmed_at: null, content_sha256: contentHash };
+  });
+  const revisionResult = await db.from('floyd_dfs_lineup_revisions').insert(revisions);
+  if (revisionResult.error) throw revisionResult.error;
+
+  const house = asRecord(houseValue);
+  const houseReportId = typeof house?.houseReportId === 'string' ? house.houseReportId : null;
+  const fieldState = optimizer.contestSimulation?.fieldModel === 'PROJECTED_OWNERSHIP' ? 'EXPERIMENTAL' : 'UNAVAILABLE';
+  const payoutReadiness = assessContestPayoutReadiness(slate, { status: fieldState, version: optimizer.contestSimulation?.fieldModel === 'PROJECTED_OWNERSHIP' ? 'ownership-field.experimental.v1' : undefined });
+  const objective = lineupMode === 'max_fpts' ? 'MAX_EXPECTED_POINTS' : 'HEURISTIC_TOURNAMENT';
+  const portfolioResult = await db.from('floyd_dfs_lineup_portfolios').insert({
+    tenant_id: run.tenant_id,
+    contest_id: slate.contest.draftKingsContestId,
+    generation_run_id: run.id,
+    house_report_id: houseReportId,
+    model_version: `lineup-agent.portfolio.v1:${optimizer.version}`,
+    entry_count: insertedLineups.length,
+    objective,
+    payout_status: payoutReadiness.payoutStatus,
+    field_model_status: payoutReadiness.fieldModelStatus,
+    field_model_version: payoutReadiness.fieldModelVersion ?? null,
+    estimated_net_payout: null,
+    expected_profit: null,
+    cash_probability: null,
+  }).select('id').single();
+  if (portfolioResult.error) throw portfolioResult.error;
+  const selectedByBullet = new Map(selection.selectedLineups.map((lineup) => [lineup.bulletNumber, lineup]));
+  const members = insertedLineups.flatMap((row) => {
+    const selected = selectedByBullet.get(Number(row.bullet_number));
+    return selected ? [{ tenant_id: run.tenant_id, portfolio_id: portfolioResult.data.id, lineup_id: String(row.id), lineup_revision: 1, entry_status: 'GENERATED', estimated_payout: null, actual_payout: null, entry_fee: slate.contest.entryFee ?? null }] : [];
+  });
+  if (members.length) {
+    const memberResult = await db.from('floyd_dfs_portfolio_members').insert(members);
+    if (memberResult.error) throw memberResult.error;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function sha256Json(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
 export async function loadCashLineCalibration(db: SupabaseClient, tenantId: string) {
   const results: Record<string, any>[] = [];
@@ -790,6 +849,90 @@ async function persistConfiguration(db: SupabaseClient, tenantId: string): Promi
     { tenant_id: tenantId, stage: 'SELECTION', name: 'selection.v1', version: 1, template: 'Select only optimizer candidates using contest context; never create or modify lineups.', active: true },
   ];
   const templateResult = await db.from('prompt_templates').upsert(templates, { onConflict: 'tenant_id,stage,name,version' }); if (templateResult.error) throw templateResult.error;
+}
+
+async function buildAndPersistNbaHouse(db: SupabaseClient, run: Json, slate: ValidatedSlate, adjustedProjections: ProjectionPackage): Promise<NbaHouseReport | null> {
+  const tenantId = String(run.tenant_id);
+  const snapshot: StreetTeamSnapshot | null = await getStreetTeamSnapshot(db, tenantId);
+  if (!snapshot) return null;
+  if (snapshot.sport !== 'NBA' || snapshot.tenantId !== tenantId || Date.parse(snapshot.asOf) > Date.now()) throw new Error('NBA House received a cross-tenant, wrong-sport, or future Street Team snapshot.');
+
+  const generatedAt = new Date().toISOString();
+  const baselineAdjustment: AdjustmentPackage = {
+    slateId: slate.slateId,
+    tenantId,
+    sport: 'NBA',
+    version: 1,
+    generatedAt,
+    adjustments: [],
+    researchGaps: [],
+    status: 'COMPLETE',
+  };
+  const baselineProjections = projectSlate(slate, baselineAdjustment, new Date(generatedAt));
+  assertProjection(baselineProjections);
+  const warnings = [
+    'Street Team evidence is attached for point-in-time audit; this House version does not apply unvalidated Street Team or behavioral effects to numeric projections.',
+    'Evidence-linked numeric driver attributions are unavailable until calibrated House adjustments are implemented.',
+  ];
+  if (adjustedProjections.gameSimulation?.releaseStatus === 'UNVALIDATED') warnings.push('Connected game scenarios remain unvalidated against prospective NBA actuals.');
+  const scenarioDistributions = adjustedProjections.gameSimulation && adjustedProjections.gameSimulation.mode !== 'BASELINE'
+    ? [{
+      scenarioId: `${adjustedProjections.gameSimulation.modelVersion}:${adjustedProjections.gameSimulation.seed}`,
+      scenarioType: 'CONNECTED_GAME_TRIAL_DISTRIBUTION',
+      playerOutcomes: Object.fromEntries(adjustedProjections.players.map((player) => {
+        const samples = [...(player.simulatedFantasyPointSamples ?? [])].sort((left, right) => left - right);
+        const quantile = (probability: number): number => {
+          if (!samples.length) return player.projectedOutcomes.medianP50;
+          const index = (samples.length - 1) * probability;
+          const lower = Math.floor(index);
+          const upper = Math.ceil(index);
+          return samples[lower] + (samples[upper] - samples[lower]) * (index - lower);
+        };
+        return [player.playerId, { p10: quantile(0.1), p20: quantile(0.2), p50: quantile(0.5), p80: quantile(0.8), p90: quantile(0.9) }];
+      })),
+    }]
+    : [];
+  if (!scenarioDistributions.length) warnings.push('No connected game simulation was requested; scenario distributions are unavailable for this baseline run.');
+  const trustStatus: NbaHouseReport['trustStatus'] = baselineProjections.status === 'BLOCKED' || adjustedProjections.status === 'BLOCKED'
+    ? 'BLOCKED'
+    : baselineProjections.status === 'PARTIAL' || adjustedProjections.status === 'PARTIAL' || snapshot.providerDiagnostics.some((item) => item.status === 'FAILED' || item.status === 'RATE_LIMITED' || item.freshness !== 'FRESH')
+      ? 'PARTIAL'
+      : 'UNVALIDATED';
+  const report = parseNbaHouseReport({
+    contractVersion: ENGINE_CONTRACT_VERSION,
+    houseReportId: requestId(),
+    tenantId,
+    sport: 'NBA',
+    slateId: slate.slateId,
+    intelSnapshotId: snapshot.snapshotId,
+    modelVersion: 'nba-house.shadow.v1',
+    baselineModelVersion: baselineProjections.modelVersion,
+    forecastCutoff: snapshot.asOf,
+    generatedAt,
+    baselineProjections,
+    adjustedProjections,
+    driverAttributions: [],
+    scenarioDistributions,
+    trustStatus,
+    unknowns: snapshot.unknowns.map((item) => item.question),
+    warnings,
+  }, { expectedTenantId: tenantId, expectedSlateId: slate.slateId, intelSnapshot: snapshot });
+  const inserted = await db.from('floyd_dfs_house_reports').insert({
+    id: report.houseReportId,
+    tenant_id: tenantId,
+    sport: 'NBA',
+    generation_run_id: String(run.id),
+    intel_snapshot_id: report.intelSnapshotId,
+    model_version: report.modelVersion,
+    baseline_model_version: report.baselineModelVersion,
+    forecast_cutoff: report.forecastCutoff,
+    baseline: report.baselineProjections,
+    adjustments: { adjustedProjections: report.adjustedProjections, driverAttributions: report.driverAttributions },
+    scenario_metadata: { simulation: adjustedProjections.gameSimulation ?? null, scenarioDistributions: report.scenarioDistributions, trustStatus: report.trustStatus, unknowns: report.unknowns, warnings: report.warnings },
+    trust_status: report.trustStatus,
+  });
+  if (inserted.error) throw inserted.error;
+  return report;
 }
 
 export function parseBody(req: VercelRequest): Json { if (!req.body) return {}; let value: unknown = req.body; if (typeof req.body === 'string') { if (Buffer.byteLength(req.body, 'utf8') > 10_000_000) throw new ApiError(413, 'Request body exceeds the 10 MB limit.', 'BODY_TOO_LARGE'); try { value = JSON.parse(req.body) as unknown; } catch { throw new ApiError(400, 'Request body must contain valid JSON.', 'INVALID_JSON'); } } else if (Buffer.byteLength(JSON.stringify(req.body), 'utf8') > 10_000_000) throw new ApiError(413, 'Request body exceeds the 10 MB limit.', 'BODY_TOO_LARGE'); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError(400, 'Request body must be a JSON object.', 'INVALID_BODY'); return value as Json; }

@@ -4,6 +4,7 @@ import { adjustSlate } from '../src/lib/engine/adjustment';
 import { buildRunTrust } from '../src/lib/engine/runTrust';
 import { buildLineupDecisionTrace } from '../src/lib/engine/decisionTrace';
 import { projectSlate } from '../src/lib/engine/projection';
+import { applyGameSimulation } from '../src/lib/engine/gameSimulation';
 import { projectionReadiness } from '../src/lib/engine/projection';
 import { buildCashLineCalibration, calibratedCashLineProbability } from '../src/lib/engine/cashLineCalibration';
 import { classifyContestKind, buildValidatedSlateFromBundle, buildValidatedSlateFromScreenshot } from '../src/lib/engine/draftKingsSlate';
@@ -59,6 +60,25 @@ const projection: ProjectionPackage = {
     { playerId: 'p3', salary: 4000, baselineOpportunity: { points: 25 }, adjustedOpportunity: { points: 25 }, opportunityDelta: { points: 0 }, componentProjection: { points: 25 }, projectedOutcomes: { floorP20: 18, medianP50: 25, ceilingP90: 38 }, salaryEfficiency: { medianPer1k: 6.25, ceilingPer1k: 9.5 }, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' },
   ], gaps: [], status: 'COMPLETE',
 };
+
+const p4Slate: ValidatedSlate = { ...baseSlate, playerPool: baseSlate.playerPool.map((player) => ({ ...player, opponent: player.team === 'A' ? 'B' : 'A' })) };
+const p4Baseline: ProjectionPackage = { ...projection, simulationRuns: 32, players: projection.players.map((player) => ({ ...player, simulatedFantasyPointSamples: Array.from({ length: 32 }, (_, i) => player.projectedOutcomes.medianP50 + (i % 5) - 2) })) };
+const p4ReplayA = applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p4-fixed-seed');
+const p4ReplayB = applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p4-fixed-seed');
+assert.deepEqual(p4ReplayA.gameSimulation?.gameScenarios, p4ReplayB.gameSimulation?.gameScenarios, 'P4 replay must be stable for a fixed seed');
+assert.notDeepEqual(applyGameSimulation(p4Slate, p4Baseline, 'game_simulation', 'p4-other-seed').gameSimulation?.gameScenarios, p4ReplayA.gameSimulation?.gameScenarios, 'P4 replay seeds must select distinct deterministic scenarios');
+assert.equal(p4ReplayA.gameSimulation?.releaseStatus, 'UNVALIDATED', 'simulation remains unvalidated pending historical holdout evidence');
+assert.equal(p4ReplayA.gameSimulation?.diagnostics?.mappedGames, 1);
+assert.equal(p4ReplayA.gameSimulation?.diagnostics?.overtimeInputs, 'MISSING');
+const p4Incomplete = applyGameSimulation({ ...p4Slate, playerPool: p4Slate.playerPool.map((player) => ({ ...player, opponent: undefined })) }, p4Baseline, 'game_simulation', 'p4-incomplete-seed');
+assert.ok(p4Incomplete.gaps.some(({ reason }) => reason.includes('no complete game/team mapping')));
+assert.equal(p4Incomplete.gameSimulation?.diagnostics?.baselineFallbackPlayers, p4Baseline.players.length);
+const p4OvertimeSlate: ValidatedSlate = { ...p4Slate, playerPool: p4Slate.playerPool.map((player) => ({ ...player, sportContext: { nba: { overtimeProbability: 1, expectedOvertimePeriods: 1 } } })) };
+const p4OvertimeReplay = applyGameSimulation(p4OvertimeSlate, p4Baseline, 'game_simulation', 'p4-overtime-seed');
+assert.equal(p4OvertimeReplay.gameSimulation?.diagnostics?.overtimeTrials, 32, 'explicit certain overtime input must be applied to every trial');
+assert.equal(p4OvertimeReplay.gameSimulation?.diagnostics?.overtimeInputs, 'SUPPLIED');
+const p4ConflictingOvertimeSlate: ValidatedSlate = { ...p4OvertimeSlate, playerPool: p4OvertimeSlate.playerPool.map((player, index) => index === 0 ? { ...player, sportContext: { nba: { overtimeProbability: 0, expectedOvertimePeriods: 1 } } } : player) };
+assert.equal(applyGameSimulation(p4ConflictingOvertimeSlate, p4Baseline, 'game_simulation', 'p4-conflict-seed').gameSimulation?.diagnostics?.overtimeInputs, 'CONFLICTING');
 
 const showdownSlate = (): ValidatedSlate => ({ ...baseSlate, contest: { ...baseSlate.contest, format: 'SHOWDOWN' }, rosterRules: { rosterSize: 2, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 1 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } }, playerPool: [
   { playerId: 'home-1', playerName: 'Home One', team: 'HOME', salary: 5000, captainSalary: 7500, utilitySalary: 5000, eligibility: { CPT: true, UTIL: true } },
@@ -156,12 +176,12 @@ const testMlbUnconfirmedStarterExclusion = (): void => {
       position: index === 0 ? 'SP' : 'OF',
       availability: index === 0
         ? { status: 'UNKNOWN' as const, confirmed: false, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'UNMAPPED' as const }
-        : { status: 'ACTIVE' as const, confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' as const },
+        : { status: 'CONFIRMED_STARTER' as const, confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' as const },
     })),
   };
   const result = optimizeLineups({ validatedSlate: mlbSlate, projectionPackage: { ...projection, sport: 'MLB' } }, { maxCandidates: 20 }, now);
   assert.equal(result.status, 'COMPLETE');
-  assert.ok(result.warnings.some((warning) => warning.includes('MLB starting pitcher(s) excluded')));
+  assert.ok(result.warnings.some((warning) => warning.includes('MLB player(s) excluded because their current starting-lineup status is not confirmed')));
   assert.ok(result.candidates.every((candidate) => !candidate.playerIds.includes('p1')), 'an unconfirmed MLB starting pitcher must not enter a lineup');
 
   const confirmed = { ...mlbSlate, playerPool: mlbSlate.playerPool.map((player, index) => index === 0 ? { ...player, availability: { ...player.availability!, status: 'CONFIRMED_STARTER' as const, confirmed: true } } : player) };
@@ -1148,8 +1168,8 @@ const testBringBackCorrelationParity = (): void => {
 
 const testMlbHitterCorrelationParity = (): void => {
   const mlbSlate: ValidatedSlate = { ...baseSlate, sport: 'MLB', league: 'MLB', rosterRules: { rosterSize: 2, slots: { OF: { count: 1 }, '1B': { count: 1 } }, uniquePlayersRequired: true }, playerPool: [
-    { playerId: 'of1', playerName: 'OF1', team: 'A', position: 'OF', salary: 5000, eligibility: { OF: true, '1B': false } },
-    { playerId: 'b1', playerName: 'B1', team: 'A', position: '1B', salary: 4000, eligibility: { OF: false, '1B': true } },
+    { playerId: 'of1', playerName: 'OF1', team: 'A', position: 'OF', salary: 5000, eligibility: { OF: true, '1B': false }, availability: { status: 'CONFIRMED_STARTER', confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' } },
+    { playerId: 'b1', playerName: 'B1', team: 'A', position: '1B', salary: 4000, eligibility: { OF: false, '1B': true }, availability: { status: 'CONFIRMED_STARTER', confirmed: true, source: 'SPORTSDATAIO', retrievedAt: now.toISOString(), mappedBy: 'NAME_AND_TEAM' } },
   ] };
   const mlbProjection: ProjectionPackage = { ...projection, players: mlbSlate.playerPool.map((player) => ({ playerId: player.playerId, salary: player.salary, baselineOpportunity: { points: 15 }, adjustedOpportunity: { points: 15 }, opportunityDelta: { points: 0 }, componentProjection: { points: 15 }, projectedOutcomes: { floorP20: 10, medianP50: 15, ceilingP90: 22 }, salaryEfficiency: { medianPer1k: 3, ceilingPer1k: 4.4 }, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' })) };
   const result = optimizeLineups({ validatedSlate: mlbSlate, projectionPackage: mlbProjection }, { maxCandidates: 5 }, now);

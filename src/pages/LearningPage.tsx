@@ -7,8 +7,9 @@ interface ForecastSummary { sampleSize: number; meanAbsoluteError: number | null
 interface ForecastValidation { overall: ForecastSummary; bySport: Record<string, ForecastSummary>; note: string; }
 interface PairedMetric { playerRows: number; independentSlates: number; candidateMae: number | null; candidateRmse: number | null; candidateBias: number | null; baselineMae: number | null; relativeMaeImprovement: number | null; candidateQuantileCoverage: { p20: number | null; p50: number | null; p90: number | null }; status: string; }
 interface PairedBaseline { cutoff: string; holdout: PairedMetric; holdoutBySport: Record<string, PairedMetric>; holdoutBySportAndRole: Record<string, PairedMetric>; releaseStatus: string; note: string; }
-interface GameMetric { scenarioPlayerRows: number; independentSlates: number; meanAbsoluteError: number | null; meanBias: number | null; p20Coverage: number | null; p50Coverage: number | null; p90Coverage: number | null; }
-interface GameValidation { cutoff: string; pairedPlayerRows: number; releaseDecision: string; bySportFormat: Record<string, { sport: string; format: string; holdout: { baseline: GameMetric; gameSimulation: GameMetric; relativeMaeImprovement: number | null }; threshold: { minimumIndependentSlates: number; minimumPlayerRows: number; minimumMaeImprovement: number }; status: string; releaseDecision: string }>; note: string; }
+interface GameMetric { scenarioPlayerRows: number; independentSlates: number; meanAbsoluteError: number | null; meanBias: number | null; crps: number | null; p10Coverage: number | null; p20Coverage: number | null; p50Coverage: number | null; p80Coverage: number | null; p90Coverage: number | null; centralIntervalCoverage?: { '50': number | null; '80': number | null; '90': number | null }; }
+interface GameValidation { cutoff: string; pairedPlayerRows: number; releaseDecision: string; bySportFormat: Record<string, { sport: string; format: string; holdout: { baseline: GameMetric; gameSimulation: GameMetric; relativeCrpsImprovement: number | null; materialCalibrationRegression: boolean }; threshold: { minimumIndependentSlates: number; minimumPlayerRows: number; minimumCrpsImprovement: number; maximumAbsoluteIntervalCoverageRegression: number }; status: string; releaseDecision: string }>; note: string; }
+interface LearningAudit { evaluations: Array<Record<string, unknown>>; registry: Array<Record<string, unknown>>; portfolioPerformance: Array<Record<string, unknown>>; nbaHouseShadowParity: Array<Record<string, unknown>>; rollout: { featureFlags: Record<string, boolean>; productionCutover: string; canarySportScope: string; canaryRuntimeAdapter: string; legacyGenerationRoute: string }; promotionRelease: string; }
 
 export default function LearningPage() {
   const [runId, setRunId] = useState('');
@@ -26,6 +27,8 @@ export default function LearningPage() {
   const [contestId, setContestId] = useState('');
   const [fieldValidation, setFieldValidation] = useState<Record<string, unknown> | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
+  const [learningAudit, setLearningAudit] = useState<LearningAudit | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
 
   useEffect(() => {
     floydRequest<{ lessons: Lesson[] }>('/api/learning/lessons')
@@ -37,6 +40,12 @@ export default function LearningPage() {
     floydRequest<{ projectionValidation: ForecastValidation; pairedBaseline: PairedBaseline; gameSimulationValidation: GameValidation }>('/api/learning/calibration')
       .then((data) => { setForecastValidation(data.projectionValidation); setPairedBaseline(data.pairedBaseline); setGameValidation(data.gameSimulationValidation); })
       .catch((reason) => setForecastError(reason instanceof Error ? reason.message : 'Unable to load projection validation.'));
+  }, []);
+
+  useEffect(() => {
+    floydRequest<LearningAudit>('/api/model-evaluations')
+      .then(setLearningAudit)
+      .catch((reason) => setAuditError(reason instanceof Error ? reason.message : 'Unable to load model registry and portfolio results.'));
   }, []);
 
   async function runCheck() {
@@ -160,9 +169,9 @@ export default function LearningPage() {
             {Object.entries(gameValidation.bySportFormat).map(([key, report]) => <div key={key} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
               <div className="flex items-center justify-between gap-2"><p className="text-xs font-black uppercase tracking-wide text-[#0b1f3a]">{report.sport} · {report.format}</p><span className="text-[9px] font-black uppercase text-amber-700">{report.status.replaceAll('_', ' ')}</span></div>
               <p className="mt-2 text-xs text-slate-600">{report.holdout.gameSimulation.independentSlates} slates · {report.holdout.gameSimulation.scenarioPlayerRows} players</p>
-              <p className="mt-1 text-xs text-slate-600">MAE baseline {formatMetric(report.holdout.baseline.meanAbsoluteError)} · scenarios {formatMetric(report.holdout.gameSimulation.meanAbsoluteError)} · change {formatPercent(report.holdout.relativeMaeImprovement)}</p>
-              <p className="mt-1 text-[10px] text-slate-500">Scenario bias {formatMetric(report.holdout.gameSimulation.meanBias)} · P20/P50/P90 coverage {formatPercent(report.holdout.gameSimulation.p20Coverage)} / {formatPercent(report.holdout.gameSimulation.p50Coverage)} / {formatPercent(report.holdout.gameSimulation.p90Coverage)}</p>
-              <p className="mt-1 text-[10px] text-slate-500">Requires {report.threshold.minimumIndependentSlates} independent slates, {report.threshold.minimumPlayerRows} players, and {formatPercent(report.threshold.minimumMaeImprovement)} MAE improvement, followed by independent review.</p>
+              <p className="mt-1 text-xs text-slate-600">CRPS baseline {formatMetric(report.holdout.baseline.crps)} · scenarios {formatMetric(report.holdout.gameSimulation.crps)} · improvement {formatPercent(report.holdout.relativeCrpsImprovement)}</p>
+              <p className="mt-1 text-[10px] text-slate-500">Scenario bias {formatMetric(report.holdout.gameSimulation.meanBias)} · central 50/80/90% interval coverage {formatPercent(report.holdout.gameSimulation.centralIntervalCoverage?.['50'] ?? null)} / {formatPercent(report.holdout.gameSimulation.centralIntervalCoverage?.['80'] ?? null)} / {formatPercent(report.holdout.gameSimulation.centralIntervalCoverage?.['90'] ?? null)}</p>
+              <p className="mt-1 text-[10px] text-slate-500">Requires {report.threshold.minimumIndependentSlates} independent slates, {report.threshold.minimumPlayerRows} players, {formatPercent(report.threshold.minimumCrpsImprovement)} CRPS improvement, no interval coverage regression above {formatPercent(report.threshold.maximumAbsoluteIntervalCoverageRegression)}, and independent review.</p>
             </div>)}
           </div>
           {!Object.keys(gameValidation.bySportFormat).length ? <p className="mt-3 text-xs text-slate-500">No eligible game-simulation forecast and actual pairs are available yet.</p> : null}
@@ -196,6 +205,21 @@ export default function LearningPage() {
         ) : (
           <p className="mt-4 text-sm text-slate-500">No lesson candidates yet — these accumulate as contest results are recorded in History.</p>
         )}
+      </section>
+      <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-[var(--shadow-subtle)]">
+        <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Model registry and realized portfolio results</p>
+        <h2 className="mt-2 text-xl font-black text-[#0b1f3a]">Review versioned evidence.</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-600">Evaluations and model status are tenant scoped. Portfolio returns appear only when the entry is linked to a complete full-field import and its official result reconciles to verified player actuals.</p>
+        {auditError ? <div className="mt-3"><ErrorBox message={auditError} /></div> : learningAudit ? <>
+          <p className="mt-3 text-[10px] font-bold text-slate-500">{learningAudit.promotionRelease}</p>
+          <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 p-3"><p className="text-xs font-black uppercase text-cyan-950">Rollout controls</p><p className="mt-1 text-xs text-cyan-900">Production cutover: {learningAudit.rollout.productionCutover} · canary scope: {learningAudit.rollout.canarySportScope} · runtime adapter: {learningAudit.rollout.canaryRuntimeAdapter} · legacy route: {learningAudit.rollout.legacyGenerationRoute}</p><p className="mt-1 text-[10px] text-cyan-900">Rollback flags: {Object.entries(learningAudit.rollout.featureFlags).map(([flag, enabled]) => `${flag}=${enabled ? 'on' : 'off'}`).join(' · ')}</p></div>
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3"><p className="text-xs font-black uppercase text-[#0b1f3a]">NBA House shadow parity</p><p className="mt-1 text-[10px] text-slate-500">Side-by-side saved projection output only; these deltas are not outcome validation.</p>{learningAudit.nbaHouseShadowParity.length ? learningAudit.nbaHouseShadowParity.slice(0, 20).map((row, index) => <p key={String(row.reportId ?? index)} className="mt-2 text-xs text-slate-700">{String(row.createdAt)} · {String(row.trustStatus)} · {String(row.pairedPlayers)} paired / {String(row.changedPlayers)} changed · mean |median delta| {row.meanAbsoluteMedianDelta === null ? '—' : Number(row.meanAbsoluteMedianDelta).toFixed(2)} · {String(row.modelVersion)}</p>) : <p className="mt-2 text-xs text-slate-500">No NBA House shadow reports have been recorded.</p>}</div>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><p className="text-xs font-black uppercase text-[#0b1f3a]">Model versions</p>{learningAudit.registry.length ? learningAudit.registry.map((row, index) => <p key={String(row.id ?? index)} className="mt-2 text-xs text-slate-700">{String(row.sport)} · {String(row.component)} · {String(row.model_version)} · {String(row.status)}</p>) : <p className="mt-2 text-xs text-slate-500">No registered candidate versions.</p>}</div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><p className="text-xs font-black uppercase text-[#0b1f3a]">Portfolio results</p>{learningAudit.portfolioPerformance.length ? learningAudit.portfolioPerformance.map((row, index) => <p key={String(row.id ?? index)} className="mt-2 text-xs text-slate-700">{String(row.objective)} · {String(row.reconciledOfficialEntries)}/{String(row.enteredEntries)} entries reconciled · net {row.realizedNet === null ? '—' : `$${Number(row.realizedNet).toFixed(2)}`} · ROI {row.realizedRoi === null ? '—' : formatPercent(Number(row.realizedRoi))}</p>) : <p className="mt-2 text-xs text-slate-500">No saved portfolios.</p>}</div>
+          </div>
+          <p className="mt-3 text-xs text-slate-500">{learningAudit.evaluations.length} stored evaluation snapshots. Release decisions remain subject to an explicit operator review.</p>
+        </> : <p className="mt-3 text-sm text-slate-500">Loading versioned model evidence…</p>}
       </section>
       <section className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-5">
         <p className="text-[10px] font-black uppercase tracking-wide text-amber-800">Model change control</p>

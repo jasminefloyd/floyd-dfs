@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createHash } from 'node:crypto';
 import { getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../../server/runtime.js';
 import { rawCashLineProbability } from '../../../src/lib/engine/cashLineCalibration.js';
 import { reconcileAndDiagnose } from '../../results/import.js';
@@ -45,9 +46,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const resultPayload = { ...body, retrospectiveRawCashLineProbability: retrospectiveProbability, probabilityReference: 'computed after lock against the actual cash line; diagnostic only, not the archived forecast' };
     const finishPercentileValue = finishPercentile ?? (finishPosition !== null && fieldSize !== null && fieldSize > 1 ? 100 * (1 - (finishPosition - 1) / (fieldSize - 1)) : null);
     const values = { actual_dk_points: actual, cash_line: cashLine, beat_cash_line: cashLine === null ? null : actual >= cashLine, finish_position: finishPosition, finish_percentile: finishPercentileValue, payout, roi: roi ?? (payout !== null && entryFee !== null && entryFee > 0 ? (payout - entryFee) / entryFee : null), result_payload: resultPayload, contest_id: contestId, contest_name: contestName, sport, contest_format: contestFormat, field_size: fieldSize, entry_fee: entryFee, paid_positions: paidPositions, outcome_source: 'MANUAL', external_entry_id: externalEntryId, official_outcome: false, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED' };
-    const previous = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).order('measured_at', { ascending: false }).limit(1).maybeSingle();
+    const sourceSha256 = createHash('sha256').update(stableJson({ lineupId, ...values })).digest('hex');
+    const previous = await context.db.from('floyd_dfs_contest_results').select('*').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).eq('source_sha256', sourceSha256).maybeSingle();
     if (previous.error) throw previous.error;
-    const result = previous.data ? await context.db.from('floyd_dfs_contest_results').update(values).eq('id', previous.data.id).eq('tenant_id', context.tenantId).select('*').single() : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...values }).select('*').single();
+    const result = previous.data ? { data: previous.data, error: null } : await context.db.from('floyd_dfs_contest_results').insert({ tenant_id: context.tenantId, generated_lineup_id: lineupId, ...values, source_sha256: sourceSha256 }).select('*').single();
     if (result.error) throw result.error;
     const selectionRunId = String(lineup.data.selection_run_id ?? '');
     await reconcileAndDiagnose({ context, resultId: String(result.data.id), lineupId, lineupPayload: lineup.data.lineup_payload, selectionRunId, enteredScore: actual, contestKey: contestId ?? contestName ?? `result:${lineupId}`, officialOutcome: false });
@@ -57,3 +59,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(201).json({ result: reconciled.data, cashLineOutcome: cashLine === null ? null : { actualPoints: actual, cashLine, beatCashLine: actual >= cashLine }, retrospectiveRawCashLineProbability: retrospectiveProbability, diagnostic });
   } catch (error) { respondError(req, res, error); }
 }
+
+function stableJson(value: unknown): string { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`; return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`; }

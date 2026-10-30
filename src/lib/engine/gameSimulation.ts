@@ -1,6 +1,6 @@
 import type { PlayerProjection, ProjectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
 
-export const GAME_SIMULATION_MODEL_VERSION = 'connected-game-events.nfl-nba.v1';
+export const GAME_SIMULATION_MODEL_VERSION = 'connected-game-events.nfl-nba.v2';
 export type SimulationMode = 'baseline' | 'game_simulation' | 'compare';
 type Rng = () => number;
 type TeamScenario = { gameId: string; team: string; opponent: string; players: SlatePlayer[]; projections: Map<string, PlayerProjection> };
@@ -13,9 +13,10 @@ type GameScenarioRecord = { gameId: string; trial: number; teamScores: Record<st
  * rushing volume/yards/TDs, and game-score path. These scenarios remain provisional until
  * prospective actuals validate their distributions.
  */
-export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionPackage, mode: SimulationMode): ProjectionPackage {
+export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionPackage, mode: SimulationMode, requestedSeed?: string): ProjectionPackage {
+  const seed = requestedSeed?.trim() || slate.slateId;
   if (!['NBA', 'NFL'].includes(slate.sport) || mode === 'baseline') {
-    return { ...baseline, gameSimulation: { mode: 'BASELINE', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed: slate.slateId, trials: baseline.simulationRuns, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: [] } };
+    return { ...baseline, gameSimulation: { mode: 'BASELINE', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials: baseline.simulationRuns, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: [], diagnostics: { mappedGames: 0, incompleteGames: 0, simulatedPlayers: 0, baselineFallbackPlayers: 0, overtimeTrials: 0, overtimeInputs: 'NOT_APPLICABLE' } } };
   }
   const trials = baseline.simulationRuns;
   const projections = new Map(baseline.players.map((projection) => [projection.playerId, projection]));
@@ -24,16 +25,22 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
   const simulatedPlayerIds = new Set<string>();
   const gameScores: GameScenarioRecord[] = [];
   const warnings: string[] = [];
+  let overtimeTrials = 0;
+  let overtimeInputs: 'SUPPLIED' | 'MISSING' | 'CONFLICTING' = 'MISSING';
   const games = groupBy(scenarios, (scenario) => scenario.gameId);
   for (const [gameId, teams] of games) {
     if (teams.length !== 2) warnings.push(`${gameId}: expected two team pools but found ${teams.length}; game score and opposing-team dependencies are incomplete.`);
     for (let trial = 0; trial < trials; trial += 1) {
-      const random = rng(`${slate.slateId}:${GAME_SIMULATION_MODEL_VERSION}:${gameId}:${trial}`);
+      const random = rng(`${seed}:${GAME_SIMULATION_MODEL_VERSION}:${gameId}:${trial}`);
       const sharedPace = clamp(1 + normal(random) * (slate.sport === 'NBA' ? 0.045 : 0.055), 0.82, 1.18);
       const sharedScript = normal(random);
       const gameTotal = { [teams[0]?.team ?? 'UNKNOWN']: 0, [teams[1]?.team ?? 'UNKNOWN']: 0 } as Record<string, number>;
       if (slate.sport === 'NBA') {
-        for (const team of teams) gameTotal[team.team] = simulateBasketballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, warnings, slate.scoringRules);
+        const overtime = overtimeParameters(teams);
+        overtimeInputs = overtime.status;
+        const hasOvertime = overtime.status === 'SUPPLIED' && random() < overtime.probability;
+        if (hasOvertime) overtimeTrials += 1;
+        for (const team of teams) gameTotal[team.team] = simulateBasketballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, warnings, slate.scoringRules, hasOvertime ? overtime.periods : 0);
       } else {
         for (const team of teams) gameTotal[team.team] = simulateFootballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, sharedScript, warnings, slate.scoringRules);
         for (const defenseTeam of teams) {
@@ -79,7 +86,7 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
     players,
     status: 'PARTIAL',
     gaps: [...baseline.gaps, { reason: 'Connected NBA/NFL game simulations are experimental. Prospective actual-data validation and independent model review are required before any release promotion.' }, ...warnings.map((reason) => ({ reason }))],
-    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed: slate.slateId, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores },
+    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs } },
   };
 }
 
@@ -97,12 +104,12 @@ function createTeamScenarios(slate: ValidatedSlate, projections: Map<string, Pla
   return [...map.values()].sort((a, b) => a.gameId.localeCompare(b.gameId) || a.team.localeCompare(b.team));
 }
 
-function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<string, number[]>, simulatedPlayerIds: Set<string>, random: Rng, pace: number, warnings: string[], scoringRules: ValidatedSlate['scoringRules']): number {
+function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<string, number[]>, simulatedPlayerIds: Set<string>, random: Rng, pace: number, warnings: string[], scoringRules: ValidatedSlate['scoringRules'], overtimePeriods: number): number {
   const eligible = team.players.filter((player) => !['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'].includes(String(player.availability?.status)));
   const structured = eligible.filter((player) => team.projections.get(player.playerId)?.modelPath === 'SPORT_STRUCTURED');
   if (structured.length !== eligible.length) warnings.push(`${team.gameId}/${team.team}: one or more NBA player projections use fallback distributions, so player-stat totals are only partially reconciled to the simulated team score.`);
   if (structured.length < 5) warnings.push(`${team.gameId}/${team.team}: fewer than five structured player projections; the game score and player stat allocation may be incomplete.`);
-  const minutes = sampleTeamMinutes(eligible, team.projections, random, warnings, `${team.gameId}/${team.team}`);
+  const minutes = sampleTeamMinutes(eligible, team.projections, random, warnings, `${team.gameId}/${team.team}`, overtimePeriods);
   const pointWeights = eligible.map((player) => {
     const projection = team.projections.get(player.playerId);
     const rate = projection?.adjustedOpportunity.pointsPerMinute ?? 0;
@@ -112,7 +119,10 @@ function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<s
   });
   const expectedPoints = eligible.reduce((sum, player) => sum + Math.max(0, (minutes.get(player.playerId) ?? 0) * (team.projections.get(player.playerId)?.adjustedOpportunity.pointsPerMinute ?? 0)), 0);
   const market = eligible.map((player) => player.marketContext?.impliedTeamTotal).find((value) => Number.isFinite(value) && value! > 60 && value! < 170);
-  const teamPointsMean = market ?? clamp(expectedPoints, 75, 150);
+  const regulationTeamPointsMean = market ?? clamp(expectedPoints, 75, 150);
+  // Each explicit overtime period adds one quarter of the supplied regulation team total.
+  // This is a transparent scenario scaling assumption, not a calibrated NBA overtime model.
+  const teamPointsMean = regulationTeamPointsMean * (1 + overtimePeriods / 4);
   const teamPoints = Math.max(50, Math.round(normalAround(teamPointsMean * pace, Math.max(7, teamPointsMean * 0.095), random)));
   const allocatedPoints = multinomial(teamPoints, pointWeights, random);
   const expectedByStat = new Map<string, number[]>();
@@ -151,7 +161,7 @@ function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<s
   return teamPoints || Math.round(teamFantasyScore / Math.max(1, eligible.length));
 }
 
-function sampleTeamMinutes(players: SlatePlayer[], projections: Map<string, PlayerProjection>, random: Rng, warnings: string[], label: string): Map<string, number> {
+function sampleTeamMinutes(players: SlatePlayer[], projections: Map<string, PlayerProjection>, random: Rng, warnings: string[], label: string, overtimePeriods = 0): Map<string, number> {
   const active = players.filter((player) => projections.get(player.playerId)?.modelPath === 'SPORT_STRUCTURED');
   const raw = active.map((player) => {
     const inputs = projections.get(player.playerId)?.adjustedOpportunity ?? {};
@@ -159,12 +169,15 @@ function sampleTeamMinutes(players: SlatePlayer[], projections: Map<string, Play
     const p10 = inputs.minutesP10; const p90 = inputs.minutesP90;
     const sd = Number.isFinite(p10) && Number.isFinite(p90) ? Math.max(1, (p90! - p10!) / 2.563) : Math.max(1, expected * 0.14);
     const restrictedRisk = inputs.limitedMinutesRisk ?? 0;
-    return { id: player.playerId, value: Math.max(0, Math.min(48, random() < restrictedRisk ? (p10 ?? expected * 0.25) : normalAround(expected, sd, random))) };
+    const regulation = random() < restrictedRisk ? (p10 ?? expected * 0.25) : normalAround(expected, sd, random);
+    const overtimeShare = Number(player.sportContext?.nba?.minutesP50);
+    const teamShare = Number.isFinite(overtimeShare) && overtimeShare > 0 ? clamp(overtimeShare / 240, 0, 1) : Math.max(0, expected) / Math.max(1, active.reduce((sum, item) => sum + (projections.get(item.playerId)?.adjustedOpportunity.expectedMinutes ?? 0), 0));
+    return { id: player.playerId, value: Math.max(0, Math.min(48 + overtimePeriods * 5, regulation + overtimePeriods * 25 * teamShare)) };
   });
   const minutesTotal = raw.reduce((sum, value) => sum + value.value, 0);
   if (active.length >= 8 && minutesTotal > 200) {
     const scaledTotal = raw.reduce((sum, value) => sum + value.value, 0);
-    if (scaledTotal > 0) for (const value of raw) value.value = Math.min(48, value.value * 240 / scaledTotal);
+    if (scaledTotal > 0) for (const value of raw) value.value = Math.min(48 + overtimePeriods * 5, value.value * (240 + overtimePeriods * 25) / scaledTotal);
   } else if (active.length && minutesTotal < 200) warnings.push(`${label}: rotation pool does not cover 200 expected minutes; minutes are not forced to 240.`);
   return new Map(raw.map(({ id, value }) => [id, value]));
 }
@@ -175,8 +188,8 @@ function simulateFootballTeam(team: TeamScenario, trial: number, output: Map<str
   const qbs = structured.filter((player) => /^QB$/i.test(String(player.position)));
   const skills = structured.filter((player) => !/^QB$/i.test(String(player.position)) && !/^(DST|DEF)$/i.test(String(player.position)));
   if (!qbs.length || !skills.length) warnings.push(`${team.gameId}/${team.team}: complete structured QB and skill-player inputs are missing; affected player samples fall back to baseline where no connected events can be generated.`);
-  const expectedPlays = average(players.map((player) => player.sportContext?.nfl?.expectedPlays).filter(finite)) || 64;
-  const passRate = average(players.map((player) => player.sportContext?.nfl?.passRate).filter(finite)) || inferPassRate(qbs, team.projections);
+  const expectedPlays = mean(players.map((player) => player.sportContext?.nfl?.expectedPlays).filter(finite)) || 64;
+  const passRate = mean(players.map((player) => player.sportContext?.nfl?.passRate).filter(finite)) || inferPassRate(qbs, team.projections);
   const script = sharedScript * (team.team === [...team.gameId.split(':')].sort()[0] ? 1 : -1);
   for (const player of players.filter((item) => team.projections.get(item.playerId)?.modelPath !== 'SPORT_STRUCTURED')) {
     const projection = team.projections.get(player.playerId);
@@ -190,8 +203,8 @@ function simulateFootballTeam(team: TeamScenario, trial: number, output: Map<str
   const runAttempts = Math.max(0, plays - passAttempts);
   if (!qbs.length) return 20;
   const qbInputs = qbs.map((player) => team.projections.get(player.playerId)!.adjustedOpportunity);
-  const qbWeights = qbInputs.map((input) => Math.max(0, input.passAttempts ?? 0));
-  if (qbWeights.every((weight) => weight === 0)) qbWeights[0] = 1;
+  const qbWeights: number[] = qbInputs.map((input) => Math.max(0, input.passAttempts ?? 0));
+  if (qbWeights.reduce((sum, weight) => sum + weight, 0) === 0) qbWeights[0] = 1;
   const qbAttempts = multinomial(passAttempts, qbWeights, random);
   const completionRate = weighted(qbInputs.map((input) => input.completionRate ?? 0.62), qbWeights);
   const completions = binomial(passAttempts, clamp(completionRate, 0.3, 0.85), random);
@@ -212,8 +225,8 @@ function simulateFootballTeam(team: TeamScenario, trial: number, output: Map<str
   const passTdWeights = skills.map((player, index) => targets[index] * Math.max(0.001, team.projections.get(player.playerId)!.adjustedOpportunity.touchdownProbability ?? 0.03));
   const receiverTds = multinomial(passTds, [...passTdWeights, 0.3], random).slice(0, skills.length);
   const carryPlayers = structured.filter((player) => !/^(WR|TE|DST|DEF)$/i.test(String(player.position)));
-  const carryWeights = carryPlayers.map((player) => Math.max(0, team.projections.get(player.playerId)!.adjustedOpportunity.carries ?? 0));
-  if (carryWeights.every((weight) => weight === 0)) carryWeights[0] = 1;
+  const carryWeights: number[] = carryPlayers.map((player) => Math.max(0, team.projections.get(player.playerId)!.adjustedOpportunity.carries ?? 0));
+  if (carryWeights.reduce((sum, weight) => sum + weight, 0) === 0) carryWeights[0] = 1;
   const carryResidual = Math.max(0, runAttempts - carryWeights.reduce((sum, value) => sum + value, 0));
   const carries = multinomial(runAttempts, [...carryWeights, carryResidual], random).slice(0, carryPlayers.length);
   const rushYards = carryPlayers.map((player, index) => Math.max(0, Math.round(normalAround(carries[index] * (team.projections.get(player.playerId)!.adjustedOpportunity.yardsPerCarry ?? 4), Math.max(1, Math.sqrt(carries[index]) * 2.2), random))));
@@ -295,6 +308,14 @@ function inferPassRate(qbs: SlatePlayer[], projections: Map<string, PlayerProjec
   return clamp(attempts / 64, 0.3, 0.8);
 }
 function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> { const groups = new Map<string, T[]>(); for (const item of items) { const id = key(item); groups.set(id, [...(groups.get(id) ?? []), item]); } return groups; }
+function overtimeParameters(teams: TeamScenario[]): { status: 'SUPPLIED' | 'MISSING' | 'CONFLICTING'; probability: number; periods: number } {
+  const values = teams.flatMap((team) => team.players.map((player) => player.sportContext?.nba)).filter((value) => value && (finite(value.overtimeProbability) || finite(value.expectedOvertimePeriods)));
+  if (!values.length) return { status: 'MISSING', probability: 0, periods: 0 };
+  const probabilities = values.map((value) => value!.overtimeProbability).filter(finite);
+  const periods = values.map((value) => value!.expectedOvertimePeriods).filter(finite);
+  if (!probabilities.length || probabilities.some((value) => value !== probabilities[0]) || periods.some((value) => value !== periods[0])) return { status: 'CONFLICTING', probability: 0, periods: 0 };
+  return { status: 'SUPPLIED', probability: clamp(probabilities[0], 0, 1), periods: Math.max(0, Math.min(3, Math.floor(periods[0] ?? 1))) };
+}
 function normalize(value: unknown): string { return String(value ?? '').trim().toUpperCase(); }
 function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function mean(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createHash } from 'node:crypto';
 import { getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../../server/runtime.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
@@ -40,6 +41,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (result.error) throw result.error;
       const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id').eq('tenant_id', context.tenantId).eq('id', result.data.selection_run_id).single();
       if (selection.error) throw selection.error;
+      await appendEnteredRevision(context.db, context.tenantId, id, String(selection.data.generation_run_id), result.data.lineup_payload, savedSlate);
       const stages = await context.db.from('engine_stage_runs').select('stage,version,output_payload').eq('tenant_id', context.tenantId).eq('generation_run_id', selection.data.generation_run_id).in('stage', ['RESEARCH', 'SPORT_ADJUSTMENT', 'PROJECTION', 'OPTIMIZE', 'SELECTION']);
       if (stages.error) throw stages.error;
       const output = new Map((stages.data ?? []).map((stage) => [stage.stage, stage]));
@@ -55,3 +57,35 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 }
 
 function text(value: unknown): string { return typeof value === 'string' ? value.trim().slice(0, 300) : ''; }
+async function appendEnteredRevision(db: Awaited<ReturnType<typeof tenantContext>>['db'], tenantId: string, lineupId: string, generationRunId: string, payload: unknown, slate: Awaited<ReturnType<typeof getOwnedLineupSlate>>): Promise<void> {
+  const latest = await db.from('floyd_dfs_lineup_revisions').select('revision').eq('tenant_id', tenantId).eq('lineup_id', lineupId).order('revision', { ascending: false }).limit(1).maybeSingle();
+  if (latest.error) throw latest.error;
+  const parent = latest.data ? Number(latest.data.revision) : null;
+  const revision = (parent ?? 0) + 1;
+  const generatedAt = new Date().toISOString();
+  const lineup = asRecord(payload) ?? {};
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const inserted = await db.from('floyd_dfs_lineup_revisions').insert({
+    tenant_id: tenantId,
+    lineup_id: lineupId,
+    revision,
+    parent_revision: parent,
+    generation_run_id: generationRunId,
+    input_sha256: digest({ slateId: slate?.slateId, contestId: slate?.contest.draftKingsContestId }),
+    model_sha256: digest({ modelVersion: lineup.modelVersion, candidateId: lineup.candidateId }),
+    rules_sha256: digest({ salaryCap: slate?.salaryCap, scoringRules: slate?.scoringRules, rosterRules: slate?.rosterRules }),
+    slot_assignments: lineup.rosterSlots ?? {},
+    generated_at: generatedAt,
+    state: 'USER_CONFIRMED_ENTERED',
+    submission_confirmed_at: generatedAt,
+    content_sha256: digest({ lineupId, revision, payload, generatedAt, state: 'USER_CONFIRMED_ENTERED' }),
+  });
+  if (inserted.error) throw inserted.error;
+  const portfolios = await db.from('floyd_dfs_lineup_portfolios').select('id').eq('tenant_id', tenantId).eq('generation_run_id', generationRunId);
+  if (portfolios.error) throw portfolios.error;
+  for (const portfolio of portfolios.data ?? []) {
+    const member = await db.from('floyd_dfs_portfolio_members').insert({ tenant_id: tenantId, portfolio_id: portfolio.id, lineup_id: lineupId, lineup_revision: revision, entry_status: 'ENTERED', estimated_payout: null, actual_payout: null, entry_fee: slate?.contest.entryFee ?? null });
+    if (member.error) throw member.error;
+  }
+}
+function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }

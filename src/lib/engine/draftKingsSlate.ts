@@ -53,13 +53,14 @@ export function buildValidatedSlateFromBundle(bundle: DraftKingsApiBundle, conte
   };
   const validationErrors = validateSlate(slate);
   if (bundle.contestIdentityVerified !== true) validationErrors.push('Contest ID, sport, format, draft group, lock time, and lobby metadata were not authoritatively bound; this slate is discovery-only and cannot generate lineups.');
+  if (bundle.accessFallback) validationErrors.push('DraftKings live game-type rules were unavailable; the player CSV is discovery-only and cannot verify this contest roster or scoring template.');
   validationErrors.push(...validateAuthoritativeRosterRules(rules, context.contestFormat, rosterRules, context.sport));
   if (fallbackUsed && rules.profileVerified !== true) validationErrors.push(`No reviewed DraftKings roster profile is configured for ${context.sport} ${context.contestFormat}.`);
   if (fallbackUsed && rules.profileVerified === true && bundle.contestIdentityVerified !== true) validationErrors.push(`The reviewed ${context.sport} ${context.contestFormat} rules could not be applied because the exact DraftKings contest identity was not verified.`);
   if (!scoringVerified) validationErrors.push('Authoritative DraftKings scoring values are unavailable; provisional scoring templates cannot be used to generate an entry-ready lineup.');
   if (missingScoringRules.length) validationErrors.push(`DraftKings scoring rules are incomplete for this model: ${missingScoringRules.join(', ')}.`);
   if (scoringConflicts.length) validationErrors.push(`DraftKings scoring values conflict with the reviewed official scoring profile: ${scoringConflicts.join(', ')}.`);
-  const sourceWarnings = fallbackUsed ? [profileVerified ? 'DraftKings detailed endpoints returned HTTP 403. The live public lobby and salary CSV were identity-bound to this contest; roster rules and scoring use the published, reviewed profile. Model validation is still required before real-money use.' : `DraftKings detailed endpoint returned HTTP ${bundle.accessFallback?.status ?? 'unknown'}; identity-bound public lobby and salary CSV were used for discovery only because no verified ${context.sport} ${context.contestFormat} roster profile is configured. Lineup generation remains blocked; this access restriction does not establish that the endpoint moved.`] : [];
+  const sourceWarnings = fallbackUsed ? [`DraftKings detailed endpoint returned HTTP ${bundle.accessFallback?.status ?? 'unknown'}. The live public lobby and salary CSV were identity-bound to this contest for discovery; exact live roster and scoring metadata were unavailable, so lineup generation remains blocked.`] : [];
   return { ...slate, validation: { status: validationErrors.length ? 'BLOCKED' : 'VALID', warnings: [...sourceWarnings, ...mappedDraftables.warnings, ...scoringWarnings, `DraftKings photo coverage: ${photoCount}/${playerPool.length} players; only exact provider identities and explicitly allowed HTTPS hosts are accepted.`], errors: validationErrors } };
 }
 
