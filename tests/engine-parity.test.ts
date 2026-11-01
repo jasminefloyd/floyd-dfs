@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { applyAvailabilitySnapshot, normalizeTeamCode, parseAvailabilityRecords, withDegradedAvailability } from '../src/lib/engine/availability';
 import { adjustSlate } from '../src/lib/engine/adjustment';
 import { buildRunTrust } from '../src/lib/engine/runTrust';
@@ -107,6 +108,47 @@ const testOptimizerParity = (): void => {
   illegal.playerPool = illegal.playerPool.map((player) => ({ ...player, team: 'HOME' }));
   const showdown = optimizeLineups({ validatedSlate: illegal, projectionPackage: { ...projection, players: projection.players.map((player) => ({ ...player, playerId: player.playerId.replace('p', 'home-') })) } });
   assert.equal(showdown.status, 'BLOCKED');
+};
+
+const testG0NbaClassicAndShowdownLegacyFixtureOutputs = (): void => {
+  const generatedAt = '2026-09-30T18:00:00.000Z';
+  const legacyBaseline = JSON.parse(readFileSync('tests/fixtures/legacy-output-baselines.json', 'utf8')) as { engineExpectedPointsTolerance: number; fixtures: Record<string, { output: { rosterSlots: Record<string, string>; salaryUsed: number; engineExpectedPoints: number } }> };
+  const makeSlate = (format: 'CLASSIC' | 'SHOWDOWN'): ValidatedSlate => {
+    const showdown = format === 'SHOWDOWN';
+    const playerRows: ValidatedSlate['playerPool'] = showdown
+      ? [
+        { playerId: 'nba-cpt-001', playerName: 'Fixture Captain', team: 'NBA-HOME-1', salary: 9000, captainSalary: 13500, utilitySalary: 9000, providerFppg: 40, eligibility: { CPT: true, UTIL: true } },
+        { playerId: 'nba-util-002', playerName: 'Fixture Utility', team: 'NBA-AWAY-1', salary: 7000, captainSalary: 10500, utilitySalary: 7000, providerFppg: 31, eligibility: { CPT: true, UTIL: true } },
+        { playerId: 'nba-util-003', playerName: 'Fixture Bench', team: 'NBA-HOME-1', salary: 6000, captainSalary: 9000, utilitySalary: 6000, providerFppg: 26, eligibility: { CPT: true, UTIL: true } },
+      ]
+      : [
+        { playerId: 'nba-pg-001', playerName: 'Fixture Guard', team: 'NBA-HOME-1', salary: 7000, providerFppg: 38, eligibility: { G: true } },
+        { playerId: 'nba-c-002', playerName: 'Fixture Center', team: 'NBA-AWAY-2', salary: 6200, providerFppg: 32, eligibility: { C: true } },
+        { playerId: 'nba-g-003', playerName: 'Fixture Guard Two', team: 'NBA-AWAY-1', salary: 5400, providerFppg: 27, eligibility: { G: true } },
+      ];
+    return {
+      ...baseSlate,
+      slateId: `g0-${format.toLowerCase()}`,
+      event: { eventId: 'g0-game', name: 'G0 fixture', eventDate: generatedAt, participants: ['NBA-HOME-1', 'NBA-AWAY-1', 'NBA-AWAY-2'] },
+      contest: { ...baseSlate.contest, format, userEntryCount: 1, requestedEntryCount: 1 },
+      salaryCap: 50_000,
+      rosterRules: showdown
+        ? { rosterSize: 2, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 1 } }, uniquePlayersRequired: true }
+        : { rosterSize: 2, slots: { G: { count: 1 }, C: { count: 1 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } },
+      playerPool: playerRows,
+    };
+  };
+  const verify = (format: 'CLASSIC' | 'SHOWDOWN', expected: { rosterSlots: Record<string, string>; salaryUsed: number; engineExpectedPoints: number }): void => {
+    const slate = makeSlate(format);
+    const adjustmentPackage: AdjustmentPackage = { slateId: slate.slateId, tenantId: slate.tenantId, sport: 'NBA', version: 1, generatedAt, adjustments: [], researchGaps: [], status: 'COMPLETE' };
+    const projectionPackage = projectSlate(slate, adjustmentPackage, new Date(generatedAt));
+    const optimized = optimizeLineups({ validatedSlate: slate, projectionPackage }, { lineupMode: 'max_fpts', maxCandidates: 1, fieldSimulations: 16 }, new Date(generatedAt));
+    assert.deepEqual(optimized.candidates[0]?.rosterSlots, expected.rosterSlots, `${format} engine output must preserve the pinned legacy fixture lineup`);
+    assert.equal(optimized.candidates[0]?.salaryUsed, expected.salaryUsed, `${format} engine output must preserve the pinned salary result`);
+    assert.ok(Math.abs((optimized.candidates[0]?.expectedPoints ?? 0) - expected.engineExpectedPoints) <= legacyBaseline.engineExpectedPointsTolerance, `${format} engine output must preserve expected points within ${legacyBaseline.engineExpectedPointsTolerance}; got ${optimized.candidates[0]?.expectedPoints}`);
+  };
+  verify('CLASSIC', legacyBaseline.fixtures['nba-classic-multi-game'].output);
+  verify('SHOWDOWN', legacyBaseline.fixtures['nba-showdown'].output);
 };
 
 const testOptimizerBoundAndEquivalentSlotHandling = (): void => {
@@ -249,8 +291,10 @@ const testSalarySlotParity = (): void => {
   const legal = result.candidates.find((item) => item.rosterSlots.CPT === 'p1' && item.salaryUsed === 10500);
   assert.ok(legal);
   assert.deepEqual(validateLineupCandidate(legal!, { ...slate, playerPool, salaryCap: 15000 }), []);
+  assert.throws(() => assertSlate({ ...slate, playerPool: [{ ...slate.playerPool[0], salary: Number.NaN }, ...slate.playerPool.slice(1)] }), /invalid identity or salary/);
   assert.ok(validateLineupCandidate({ ...legal!, salaryUsed: 1 }, { ...slate, playerPool, salaryCap: 15000 }).some((error) => /recomputed salary/.test(error)), 'final validation must recalculate, not trust, reported salary');
   assert.ok(validateLineupCandidate({ ...legal!, rosterSlots: { ...legal!.rosterSlots, CPT: 'p3' } }, { ...slate, playerPool, salaryCap: 15000 }).some((error) => /do not match/.test(error)), 'candidate identity list must match roster assignments');
+  assert.ok(validateLineupCandidate({ ...legal!, playerIds: ['p1', 'p1'], rosterSlots: { CPT: 'p1', UTIL: 'p1' } }, { ...slate, playerPool, salaryCap: 15000 }).length > 0, 'a duplicated player entry must fail independent lineup validation');
 };
 
 const testCashGameSelectionParity = (): void => {
@@ -1413,7 +1457,9 @@ const testGate3ContestSimulationParity = (): void => {
   assert.equal(ownershipBacked.contestSimulation?.status, 'COMPLETE', 'independent legal opponent lineups should be simulated when provider ownership and player outcome distributions exist');
   assert.equal(ownershipBacked.contestSimulation?.fieldModel, 'PROJECTED_OWNERSHIP');
   assert.equal(ownershipBacked.contestSimulation?.fieldEntries, 9);
-  assert.ok(ownershipBacked.candidates.every((candidate) => candidate.contestMetricProvenance === 'JOINT_FIELD_SIMULATION'));
+  assert.equal(ownershipBacked.contestSimulation?.readiness, 'UNVALIDATED');
+  assert.ok(ownershipBacked.candidates.every((candidate) => candidate.contestMetricProvenance === 'UNAVAILABLE'));
+  assert.ok(ownershipBacked.candidates.every((candidate) => candidate.expectedPayout === undefined && candidate.expectedProfit === undefined && candidate.cashFrequency === undefined && candidate.winFrequency === undefined), 'experimental opponent-field probabilities and financial outputs cannot leak onto candidate decision records');
 
   const oneCandidate: LineupCandidate = { id: 'same-lineup', playerIds: ['p1', 'p2'], rosterSlots: { G: 'p1', F: 'p2' }, salaryUsed: 9000, salaryRemaining: 1000, expectedPoints: 20, median: 20, ceiling: 20, simulatedScoreSamples: [20], correlationScore: 0, medianRank: 1, ceilingRank: 1, candidateTypes: [], gameScriptCluster: 'TEST', strategicSimilarity: 0, riskFlags: [] };
   const tieSlate: ValidatedSlate = { ...ownershipSlate, contest: { ...ownershipSlate.contest, contestSize: 3, paidPositions: 2, entryFee: 10, payoutStructure: [{ rank: 1, payout: 100 }, { rank: 2, payout: 50 }] } };
@@ -1427,7 +1473,7 @@ const testGate3ContestSimulationParity = (): void => {
   const captainSlate: ValidatedSlate = { ...showdownSlate(), salaryCap: 50_000, contest: { ...baseSlate.contest, format: 'SHOWDOWN', contestSize: 2, paidPositions: 1, entryFee: 1, payoutStructure: [{ rank: 1, payout: 2 }] }, playerPool: showdownSlate().playerPool.map((player) => ({ ...player, projectedOwnership: { classic: 0.5, utility: 0.5, captain: 0.5, source: 'PROVIDER' as const } })) };
   const captainProjections: ProjectionPackage['players'] = captainSlate.playerPool.map((player) => ({ ...projection.players[0], playerId: player.playerId, salary: player.salary, simulatedFantasyPointSamples: [10], projectedOutcomes: { floorP20: 10, medianP50: 10, ceilingP90: 10 } }));
   const captainCandidate: LineupCandidate = { id: 'captain-tie', playerIds: ['home-1', 'away-1'], rosterSlots: { CPT: 'home-1', UTIL: 'away-1' }, salaryUsed: 10_500, salaryRemaining: 39_500, expectedPoints: 25, median: 25, ceiling: 25, simulatedScoreSamples: [25], correlationScore: 0, medianRank: 1, ceilingRank: 1, candidateTypes: [], gameScriptCluster: 'TEST', strategicSimilarity: 0, riskFlags: [] };
-  const crossingTie = simulateContestField(captainSlate, [captainCandidate], { simulations: 16, seed: 'two-way-first-place-tie' }, captainProjections);
+  const crossingTie = simulateContestField(captainSlate, [captainCandidate], { simulations: 16, seed: 'two-way-first-place-tie', fieldModelReadiness: 'CALIBRATED' }, captainProjections);
   const tieMetrics = crossingTie.metrics.get(captainCandidate.id);
   assert.equal(crossingTie.status, 'COMPLETE');
   assert.equal(crossingTie.dependenceModel, 'INDEPENDENT_PLAYER_SAMPLES', 'diagnostics disclose independent player sample dependence assumptions');
@@ -1439,17 +1485,17 @@ const testGate3ContestSimulationParity = (): void => {
   assert.equal(tieMetrics?.positivePayoutFrequency, 1);
   assert.equal(tieMetrics?.winFrequencyStandardError, 0, 'sample error is reported for simulated event rates');
   assert.equal(tieMetrics?.expectedPayoutStandardError, 0, 'constant tied payouts have zero sampling error');
-  const budgetedField = simulateContestField(captainSlate, [captainCandidate, { ...captainCandidate, id: 'captain-tie-2' }], { simulations: 16, seed: 'bounded-field', maxScoreComparisons: 16 }, captainProjections);
+  const budgetedField = simulateContestField(captainSlate, [captainCandidate, { ...captainCandidate, id: 'captain-tie-2' }], { simulations: 16, seed: 'bounded-field', maxScoreComparisons: 16, fieldModelReadiness: 'CALIBRATED' }, captainProjections);
   assert.equal(budgetedField.status, 'PARTIAL', 'field metric comparisons are capped across candidates, samples, and opponent entries');
   assert.ok(budgetedField.metrics.has(captainCandidate.id), 'the deterministic candidate prefix receives the computed diagnostic');
   assert.equal(budgetedField.metrics.has('captain-tie-2'), false, 'candidates beyond the explicit comparison budget receive no extrapolated metric');
   assert.equal(averagePayoutForTie(1, 2, 1, new Map([[1, 2]])), 1, 'a paid/unpaid two-way tie shares only the prize but divides by both entries');
   assert.equal(averagePayoutForTie(1, 2, 2, new Map([[1, 2], [2, 1]])), 1.5, 'an all-paid tie conserves the prizes for all occupied ranks');
   assert.equal(averagePayoutForTie(4, 2, 3, new Map([[1, 2], [2, 1], [3, 0.5]])), 0, 'an all-unpaid tie receives no prize');
-  const missingFee = simulateContestField({ ...captainSlate, contest: { ...captainSlate.contest, entryFee: undefined } }, [captainCandidate], { simulations: 16, seed: 'missing-fee' }, captainProjections);
+  const missingFee = simulateContestField({ ...captainSlate, contest: { ...captainSlate.contest, entryFee: undefined } }, [captainCandidate], { simulations: 16, seed: 'missing-fee', fieldModelReadiness: 'CALIBRATED' }, captainProjections);
   assert.equal(missingFee.metrics.get(captainCandidate.id)?.expectedPayout, undefined, 'financial metrics stay absent without an entry fee');
   assert.equal(missingFee.metrics.get(captainCandidate.id)?.roi, undefined);
-  const duplicatePayoutRanks = simulateContestField({ ...captainSlate, contest: { ...captainSlate.contest, payoutStructure: [{ rank: 1, payout: 2 }, { rank: 1, payout: 1 }] } }, [captainCandidate], { simulations: 16 }, captainProjections);
+  const duplicatePayoutRanks = simulateContestField({ ...captainSlate, contest: { ...captainSlate.contest, payoutStructure: [{ rank: 1, payout: 2 }, { rank: 1, payout: 1 }] } }, [captainCandidate], { simulations: 16, fieldModelReadiness: 'CALIBRATED' }, captainProjections);
   assert.equal(duplicatePayoutRanks.payoutModel, 'UNAVAILABLE', 'duplicate rank rows invalidate payout calculations');
   const multiEntry = simulateContestField({ ...captainSlate, contest: { ...captainSlate.contest, userEntryCount: 2 } }, [captainCandidate], { simulations: 16 }, captainProjections);
   assert.equal(multiEntry.status, 'UNAVAILABLE', 'field results are withheld until the user portfolio can be included in a multi-entry field');
@@ -1651,6 +1697,10 @@ const testDraftKingsRetryAndHtmlBlockValidation = async (): Promise<void> => {
   } });
   assert.equal((await retrying.listContests('NBA')).length, 0);
   assert.equal(attempts, 2, 'transient server errors get a bounded retry');
+  const timedOut = new DraftKingsClient({ sportCodes: { NBA: 'NBA' }, timeoutMs: 2, maxAttempts: 1, fetcher: async (_input, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new Error('aborted')), { once: true });
+  }) });
+  await assert.rejects(() => timedOut.listContests('NBA'), /request timed out/);
   let htmlRequests = 0;
   const blocked = new DraftKingsClient({ sportCodes: { NBA: 'NBA' }, maxAttempts: 3, fetcher: async () => { htmlRequests += 1; return new Response('<html>blocked</html>', { status: 200, headers: { 'content-type': 'text/html' } }); } });
   await assert.rejects(() => blocked.listContests('NBA'), /non-JSON content type/);
@@ -1704,7 +1754,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
 (async () => {
   testMlbRelieverWorkloadGuardParity(); testPairedBaselineHoldoutParity(); testP05EffectSequenceAndDeduplication(); testP04EvidenceResolutionBeforeUse(); await testResearchPromptInjectionAndIdentityGuard();
   testOptimizerBoundAndEquivalentSlotHandling(); testMaxFptsUsesExpectedPointsAndPortfolioLimits();
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testPerLineupDecisionTraceParity(); testProviderBackedGameLockParity(); testOptimizerLockedRosterParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testDraftKingsBasketballGameAndPhotoIdentityMapping(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
+  testOptimizerParity(); testG0NbaClassicAndShowdownLegacyFixtureOutputs(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testPerLineupDecisionTraceParity(); testProviderBackedGameLockParity(); testOptimizerLockedRosterParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testDraftKingsBasketballGameAndPhotoIdentityMapping(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
   await testWnbaAvailabilityUsesNumericEventTeamIds();

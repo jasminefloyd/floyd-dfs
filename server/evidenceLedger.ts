@@ -4,6 +4,7 @@ import { resolveObservations } from '../src/lib/engine/factResolution.js';
 import { buildRunTrust } from '../src/lib/engine/runTrust.js';
 import { buildLineupDecisionTrace } from '../src/lib/engine/decisionTrace.js';
 import type { AdjustmentPackage, OptimizerPackage, ProjectionPackage, ResearchPackage, SelectionPackage, SourceObservation, ValidatedSlate } from '../src/lib/engine/contracts.js';
+import { assertRunLineageConsistency, buildProjectionArtifactRows, buildRunLineageRecord, sha256Json } from './runLineage.js';
 
 export async function persistEvidenceLedger(db: SupabaseClient, input: {
   tenantId: string;
@@ -12,11 +13,17 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   rawSlate: ValidatedSlate;
   research: ResearchPackage;
   adjustment: AdjustmentPackage;
+  baselineProjection: ProjectionPackage;
   projection: ProjectionPackage;
   optimizer: OptimizerPackage;
   selection: SelectionPackage;
+  nbaHouse?: unknown;
+  intelSnapshotId?: string;
+  intelSnapshotHash?: string;
+  pinnedRunConfig?: Record<string, unknown>;
 }): Promise<void> {
-  const { tenantId, runId, slate, rawSlate, research, adjustment, projection, optimizer, selection } = input;
+  const { tenantId, runId, slate, rawSlate, research, adjustment, baselineProjection, projection, optimizer, selection } = input;
+  const ingestedAt = new Date().toISOString();
   const snapshots = [
     { snapshot_type: 'VALIDATED_DRAFTKINGS_SLATE', source: 'DRAFTKINGS', payload: rawSlate, source_retrieved_at: rawSlate.receivedAt },
     { snapshot_type: 'ENRICHED_RUN_SLATE', source: 'ENGINE', payload: slate, source_retrieved_at: slate.receivedAt },
@@ -78,19 +85,25 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
     });
   }
   if (observations.length) {
-    const observationRows = observations.map((item) => ({
-      id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId, game_id: item.gameId ?? null,
-      source: item.source, source_record_id: item.sourceRecordId ?? null, source_url: item.sourceUrl ?? null,
-      subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value, value_unit: item.valueUnit ?? null,
-      published_at: item.publishedAt ?? null, duplicate_cluster_id: item.duplicateClusterId ?? null,
-      effective_at: item.effectiveAt ?? null, observed_at: item.observedAt, retrieved_at: item.retrievedAt, expires_at: item.expiresAt ?? null,
-      observation_status: item.status, identity_confidence: item.identityConfidence, raw_payload_ref: item.rawPayloadRef,
-      raw_payload: { normalized_claim: item.value, observed_time_basis: item.observedTimeBasis ?? 'SOURCE_TIMESTAMP', effective_at: item.effectiveAt ?? null }, content_sha256: digest(item),
-    }));
+    const observationRows = observations.map((item) => {
+      const rawPayload = { normalized_claim: item.value, observed_time_basis: item.observedTimeBasis ?? 'SOURCE_TIMESTAMP', effective_at: item.effectiveAt ?? null };
+      return {
+        id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId, game_id: item.gameId ?? null,
+        source: item.source, source_record_id: item.sourceRecordId ?? null, source_url: item.sourceUrl ?? null,
+        subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value, value_unit: item.valueUnit ?? null,
+        published_at: item.publishedAt ?? null, duplicate_cluster_id: item.duplicateClusterId ?? null,
+        effective_at: item.effectiveAt ?? null, observed_at: item.observedAt, retrieved_at: item.retrievedAt, ingested_at: ingestedAt, expires_at: item.expiresAt ?? null,
+        observation_status: item.status, identity_confidence: item.identityConfidence, raw_payload_ref: item.rawPayloadRef,
+        raw_payload: rawPayload, raw_payload_sha256: digest(rawPayload), schema_version: 2, content_sha256: digest(item),
+      };
+    });
     const inserted = await db.from('floyd_dfs_source_observations').upsert(observationRows, { onConflict: 'tenant_id,generation_run_id,content_sha256', ignoreDuplicates: true });
     if (inserted.error) throw inserted.error;
     const facts = research.resolvedFacts?.length ? research.resolvedFacts : resolveObservations(observations, new Date(research.generatedAt));
-    const factRows = facts.map((fact) => ({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, event_id: fact.eventId, subject_id: fact.subjectId, fact_type: fact.factType, fact_value: fact.value ?? null, resolution_state: fact.state, observation_ids: fact.observationIds, supporting_observation_ids: fact.supportingObservationIds ?? [], rejected_observation_ids: fact.rejectedObservationIds ?? [], canonical_fact_key: fact.canonicalFactKey ?? null, decision_at: fact.decisionAt ?? fact.resolvedAt, resolved_at: fact.resolvedAt, rule_version: fact.ruleVersion, rationale: fact.rationale, content_sha256: digest(fact) }));
+    const factRows = facts.map((fact) => {
+      const evidenceTimes = [...new Set(observations.filter((observation) => fact.observationIds.includes(observation.id) && observation.effectiveAt).map((observation) => observation.effectiveAt!))];
+      return { tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, event_id: fact.eventId, subject_id: fact.subjectId, fact_type: fact.factType, fact_value: fact.value ?? null, resolution_state: fact.state, observation_ids: fact.observationIds, supporting_observation_ids: fact.supportingObservationIds ?? [], rejected_observation_ids: fact.rejectedObservationIds ?? [], canonical_fact_key: fact.canonicalFactKey ?? null, decision_at: fact.decisionAt ?? fact.resolvedAt, effective_at: evidenceTimes.length === 1 ? evidenceTimes[0] : null, resolved_at: fact.resolvedAt, ingested_at: ingestedAt, rule_version: fact.ruleVersion, rationale: fact.rationale, content_sha256: digest(fact) };
+    });
     const resolved = await db.from('floyd_dfs_resolved_facts').upsert(factRows, { onConflict: 'tenant_id,generation_run_id,event_id,subject_id,fact_type,content_sha256', ignoreDuplicates: true });
     if (resolved.error) throw resolved.error;
   }
@@ -136,9 +149,34 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
   const trust = buildRunTrust({ slate, research, projection, optimizer, selection, expiredFindingIds: expired });
   const trustSaved = await db.from('floyd_dfs_run_trust').insert({ tenant_id: tenantId, generation_run_id: runId, slate_id: slate.slateId, revision: Number(revisionResult.data?.revision ?? 0) + 1, trust_payload: trust });
   if (trustSaved.error) throw trustSaved.error;
+
+  const nbaHouse = recordOf(input.nbaHouse);
+  const snapshotId = stringOrNull(nbaHouse?.intelSnapshotId) ?? input.intelSnapshotId ?? null;
+  const fieldModelVersion = optimizer.contestSimulation?.fieldModel === 'PROJECTED_OWNERSHIP' ? 'ownership-field.experimental.v1' : null;
+  const lineageInputs = { rawSlate, slate, research, adjustment, baselineProjection, projection, optimizer, selection, house: nbaHouse ?? null, pinnedRunConfig: input.pinnedRunConfig ?? null };
+  const priorLineage = await db.from('floyd_dfs_generation_run_lineage').select('revision,content_sha256').eq('tenant_id', tenantId).eq('generation_run_id', runId).order('revision', { ascending: false }).limit(1).maybeSingle();
+  if (priorLineage.error) throw priorLineage.error;
+  const contestTermsHash = sha256Json({ contest: slate.contest, salaryCap: slate.salaryCap, rosterRules: slate.rosterRules, scoringRules: slate.scoringRules });
+  const candidate = buildRunLineageRecord({ tenantId, generationRunId: runId, revision: Number(priorLineage.data?.revision ?? 0) + 1, sport: slate.sport, intelSnapshotId: snapshotId, snapshotHash: snapshotId ? input.intelSnapshotHash ?? null : null, slateId: slate.slateId, contestId: slate.contest.draftKingsContestId, eventCutoff: slate.contest.lockTime, knowledgeCutoff: projection.generatedAt, baselineModelVersion: baselineProjection.modelVersion, houseModelVersion: typeof nbaHouse?.modelVersion === 'string' ? nbaHouse.modelVersion : null, simulationVersion: projection.gameSimulation?.modelVersion ?? null, optimizerVersion: String(optimizer.version), fieldModelVersion, randomSeed: projection.gameSimulation?.seed ?? optimizer.contestSimulation?.seed ?? null, sourceManifestHash: sha256Json(slate.sourceManifest), driverPolicyVersion: typeof nbaHouse?.driverPolicyVersion === 'string' ? nbaHouse.driverPolicyVersion : slate.sport === 'NBA' ? 'nba-house-driver-policy.v1' : null, contestTermsHash, inputs: lineageInputs });
+  const lineageHash = String(candidate.content_sha256);
+  const existingLineage = await db.from('floyd_dfs_generation_run_lineage').select('revision').eq('tenant_id', tenantId).eq('generation_run_id', runId).eq('content_sha256', lineageHash).maybeSingle();
+  if (existingLineage.error) throw existingLineage.error;
+  let lineageRevision: number;
+  if (existingLineage.data) lineageRevision = Number(existingLineage.data.revision);
+  else {
+    const insertedLineage = await db.from('floyd_dfs_generation_run_lineage').insert(candidate).select('revision').single();
+    if (insertedLineage.error) throw insertedLineage.error;
+    lineageRevision = Number(insertedLineage.data.revision);
+  }
+  const artifactRows = buildProjectionArtifactRows({ tenantId, generationRunId: runId, lineageRevision, sport: slate.sport, slateId: slate.slateId, baselineModelVersion: baselineProjection.modelVersion, adjustedModelVersion: projection.modelVersion, baselineProjection, adjustedProjection: projection, adjustment, extraEvidenceIds: (research.resolvedFacts ?? []).filter((fact) => fact.state === 'ACCEPTED').map((fact) => fact.id) });
+  assertRunLineageConsistency(candidate, artifactRows);
+  const artifactInsert = await db.from('floyd_dfs_run_projection_artifacts').upsert(artifactRows, { onConflict: 'tenant_id,generation_run_id,lineage_revision,artifact_type,content_sha256', ignoreDuplicates: true });
+  if (artifactInsert.error) throw artifactInsert.error;
 }
 
 function unitFor(dimension: string): string { return dimension === 'expectedMinutes' ? 'minutes/game' : dimension === 'expectedPA' ? 'plate appearances/game' : dimension.toLowerCase().includes('per') ? 'rate' : 'opportunities/game'; }
 function digest(value: unknown): string { return createHash('sha256').update(stableJson(value)).digest('hex'); }
 function deterministicUuid(value: string): string { const hex = digest(value).slice(0, 32).split(''); hex[12] = '5'; hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16); const id = hex.join(''); return `${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`; }
 function stableJson(value: unknown): string { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`; return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`; }
+function recordOf(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function stringOrNull(value: unknown): string | null { return typeof value === 'string' && value ? value : null; }

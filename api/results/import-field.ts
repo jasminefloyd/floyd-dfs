@@ -22,13 +22,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const contestId = text(row.contest_id); const externalEntryId = text(row.external_entry_id);
         const sport = text(row.sport).toUpperCase(); const format = text(row.contest_format).toUpperCase();
         const fieldSize = integer(row.field_size); const paidPositions = integer(row.paid_positions); const finishPosition = integer(row.finish_position);
-        const entryFee = numeric(row.entry_fee); const points = numeric(row.actual_dk_points); const payout = numeric(row.payout);
+        const entryFee = numeric(row.entry_fee); const points = numeric(row.actual_dk_points); const payout = numeric(row.payout); const refundAmount = row.refund_amount?.trim() ? numeric(row.refund_amount) : null;
         const playerIds = text(row.player_ids).split(/[;|]/).map((id) => id.trim()).filter(Boolean);
         if (!contestId || !externalEntryId) throw new Error('contest_id and external_entry_id are required.');
         if (!['MLB','WNBA','NFL','CFB','GOLF','NBA'].includes(sport) || !['CLASSIC','SHOWDOWN'].includes(format)) throw new Error('sport or contest_format is unsupported.');
         if (fieldSize < 1 || paidPositions < 1 || paidPositions > fieldSize || finishPosition < 1 || finishPosition > fieldSize) throw new Error('Field size, paid positions, or finish position is out of range.');
-        if (entryFee < 0 || payout < 0 || points < 0 || !playerIds.length) throw new Error('Points, entry fee, and payout must be nonnegative; player_ids must contain DraftKings IDs.');
-        const normalized = { tenant_id: context.tenantId, contest_id: contestId, external_entry_id: externalEntryId, sport, contest_format: format, field_size: fieldSize, entry_fee: entryFee, paid_positions: paidPositions, finish_position: finishPosition, actual_dk_points: points, payout, player_ids: playerIds, outcome_source: 'DRAFTKINGS_STANDINGS_CSV', finality_status: 'FINAL' };
+        if (entryFee < 0 || payout < 0 || (refundAmount !== null && refundAmount < 0) || points < 0 || !playerIds.length) throw new Error('Points, entry fee, payout, and refund must be nonnegative; player_ids must contain DraftKings IDs.');
+        const normalized = { tenant_id: context.tenantId, contest_id: contestId, external_entry_id: externalEntryId, sport, contest_format: format, field_size: fieldSize, entry_fee: entryFee, paid_positions: paidPositions, finish_position: finishPosition, actual_dk_points: points, payout, refund_amount: refundAmount, player_ids: playerIds, outcome_source: 'DRAFTKINGS_STANDINGS_CSV', finality_status: 'FINAL' };
         const source_sha256 = createHash('sha256').update(stableJson(normalized)).digest('hex');
         prepared.push({ rowNo, value: { ...normalized, source_sha256 } }); touchedContests.add(contestId);
       } catch (error) { errors.push({ row: rowNo, error: error instanceof Error ? error.message : 'Invalid standings row.' }); }
@@ -42,7 +42,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     for (const contestId of touchedContests) {
-      const contestRows = await context.db.from('floyd_dfs_contest_field_entries').select('contest_id,external_entry_id,revision,sport,contest_format,field_size,entry_fee,paid_positions,finish_position,actual_dk_points,payout,player_ids').eq('tenant_id', context.tenantId).eq('contest_id', contestId).in('finality_status', ['FINAL','CORRECTED']).limit(50000);
+      const contestRows = await context.db.from('floyd_dfs_contest_field_entries').select('contest_id,external_entry_id,revision,sport,contest_format,field_size,entry_fee,paid_positions,finish_position,actual_dk_points,payout,refund_amount,player_ids').eq('tenant_id', context.tenantId).eq('contest_id', contestId).in('finality_status', ['FINAL','CORRECTED']).limit(50000);
       if (contestRows.error) throw contestRows.error;
       const latestByEntry = new Map<string, Record<string, unknown>>();
       for (const row of contestRows.data ?? []) { const key = String(row.external_entry_id); const prior = latestByEntry.get(key); if (!prior || Number(row.revision ?? 0) > Number(prior.revision ?? 0)) latestByEntry.set(key, row as Record<string, unknown>); }
@@ -67,7 +67,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (lineupResult.error) throw lineupResult.error; if (!lineupResult.data || lineupResult.data.status !== 'ENTERED') continue;
         const actual = Number(entry.actual_dk_points); const finish = Number(entry.finish_position); const fieldSize = Number(entry.field_size); const fee = Number(entry.entry_fee); const payout = Number(entry.payout);
         const fieldSnapshotHash = createHash('sha256').update(stableJson(field.map((item) => [item.external_entry_id,item.finish_position,item.actual_dk_points,item.payout]))).digest('hex');
-        const values = { actual_dk_points: actual, cash_line: cashLine, beat_cash_line: actual >= cashLine, finish_position: finish, finish_percentile: 100 * (1 - (finish - 1) / Math.max(1, fieldSize - 1)), payout, roi: fee > 0 ? (payout - fee) / fee : null, contest_id: contestId, contest_name: text(body.contestName) || null, sport: entry.sport, contest_format: entry.contest_format, field_size: fieldSize, entry_fee: fee, paid_positions: Number(entry.paid_positions), outcome_source: 'DRAFTKINGS_STANDINGS_CSV', external_entry_id: entry.external_entry_id, official_outcome: true, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED', result_payload: { source: 'DRAFTKINGS_STANDINGS_CSV', fullFieldImport: true, fieldRows: field.length, fieldSnapshotHash, cashLine } };
+        const refund = entry.refund_amount === null || entry.refund_amount === undefined ? null : Number(entry.refund_amount);
+        const values = { actual_dk_points: actual, cash_line: cashLine, beat_cash_line: actual >= cashLine, finish_position: finish, finish_percentile: 100 * (1 - (finish - 1) / Math.max(1, fieldSize - 1)), payout, refund_amount: refund, roi: null, contest_id: contestId, contest_name: text(body.contestName) || null, sport: entry.sport, contest_format: entry.contest_format, field_size: fieldSize, entry_fee: fee, paid_positions: Number(entry.paid_positions), outcome_source: 'DRAFTKINGS_STANDINGS_CSV', external_entry_id: entry.external_entry_id, official_outcome: true, model_evaluation_eligible: false, reconciliation_status: 'UNVERIFIED', result_payload: { source: 'DRAFTKINGS_STANDINGS_CSV', fullFieldImport: true, fieldRows: field.length, fieldSnapshotHash, cashLine, refundEvidenceProvided: refund !== null } };
         const sourceSha256 = createHash('sha256').update(stableJson({ lineupId, ...values })).digest('hex');
         const existingResult = await context.db.from('floyd_dfs_contest_results').select('id').eq('tenant_id', context.tenantId).eq('generated_lineup_id', lineupId).eq('source_sha256', sourceSha256).maybeSingle();
         if (existingResult.error) throw existingResult.error;

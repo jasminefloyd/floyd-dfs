@@ -1,10 +1,11 @@
 import type { PlayerProjection, ProjectionPackage, SlatePlayer, ValidatedSlate } from './contracts.js';
 
-export const GAME_SIMULATION_MODEL_VERSION = 'connected-game-events.nfl-nba.v2';
+export const GAME_SIMULATION_MODEL_VERSION = 'connected-game-events.nfl-nba.v3';
 export type SimulationMode = 'baseline' | 'game_simulation' | 'compare';
 type Rng = () => number;
 type TeamScenario = { gameId: string; team: string; opponent: string; players: SlatePlayer[]; projections: Map<string, PlayerProjection> };
 type GameScenarioRecord = { gameId: string; trial: number; teamScores: Record<string, number> };
+export interface GameSimulationOptions { trials?: number; batchSize?: number; maxComputeMs?: number; now?: () => number; }
 
 /**
  * Simulates coherent per-trial player outcomes inside each game. NBA trial scores are allocated
@@ -13,24 +14,33 @@ type GameScenarioRecord = { gameId: string; trial: number; teamScores: Record<st
  * rushing volume/yards/TDs, and game-score path. These scenarios remain provisional until
  * prospective actuals validate their distributions.
  */
-export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionPackage, mode: SimulationMode, requestedSeed?: string): ProjectionPackage {
+export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionPackage, mode: SimulationMode, requestedSeed?: string, options: GameSimulationOptions = {}): ProjectionPackage {
   const seed = requestedSeed?.trim() || slate.slateId;
   if (!['NBA', 'NFL'].includes(slate.sport) || mode === 'baseline') {
     return { ...baseline, gameSimulation: { mode: 'BASELINE', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials: baseline.simulationRuns, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: [], diagnostics: { mappedGames: 0, incompleteGames: 0, simulatedPlayers: 0, baselineFallbackPlayers: 0, overtimeTrials: 0, overtimeInputs: 'NOT_APPLICABLE', scoreMarginDistributions: [] } } };
   }
-  const trials = baseline.simulationRuns;
+  const trials = boundedOption(options.trials ?? baseline.simulationRuns, 1, 4096, 'trials');
+  const batchSize = boundedOption(options.batchSize ?? 16, 1, 256, 'batchSize');
+  const maxComputeMs = boundedOption(options.maxComputeMs ?? 10_000, 1, 60_000, 'maxComputeMs');
+  const now = options.now ?? Date.now;
+  const startedAt = now();
   const projections = new Map(baseline.players.map((projection) => [projection.playerId, projection]));
   const scenarios = createTeamScenarios(slate, projections);
   const samples = new Map(baseline.players.map((projection) => [projection.playerId, Array.from({ length: trials }, () => 0)]));
   const simulatedPlayerIds = new Set<string>();
   const gameScores: GameScenarioRecord[] = [];
   const warnings: string[] = [];
+  if (slate.sport === 'NBA') warnings.push('Blowout-driven minutes adjustments are disabled pending empirical calibration; game score-margin diagnostics are retained for evaluation.');
   let overtimeTrials = 0;
+  const trialInvariantViolations = { count: 0 };
   let overtimeInputs: 'SUPPLIED' | 'MISSING' | 'CONFLICTING' = 'MISSING';
   const games = groupBy(scenarios, (scenario) => scenario.gameId);
   for (const [gameId, teams] of games) {
     if (teams.length !== 2) warnings.push(`${gameId}: expected two team pools but found ${teams.length}; game score and opposing-team dependencies are incomplete.`);
-    for (let trial = 0; trial < trials; trial += 1) {
+    for (let batchStart = 0; batchStart < trials; batchStart += batchSize) {
+      if (now() - startedAt >= maxComputeMs) return incompleteSimulation(baseline, mode, seed, trials, batchSize, maxComputeMs, startedAt, now, `${gameId}: computation budget expired before the next deterministic batch.`);
+      const batchEnd = Math.min(trials, batchStart + batchSize);
+      for (let trial = batchStart; trial < batchEnd; trial += 1) {
       const random = rng(`${seed}:${GAME_SIMULATION_MODEL_VERSION}:${gameId}:${trial}`);
       const sharedPace = clamp(1 + normal(random) * (slate.sport === 'NBA' ? 0.045 : 0.055), 0.82, 1.18);
       const sharedScript = normal(random);
@@ -40,7 +50,7 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
         overtimeInputs = overtime.status;
         const hasOvertime = overtime.status === 'SUPPLIED' && random() < overtime.probability;
         if (hasOvertime) overtimeTrials += 1;
-        for (const team of teams) gameTotal[team.team] = simulateBasketballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, warnings, slate.scoringRules, hasOvertime ? overtime.periods : 0);
+        for (const team of teams) gameTotal[team.team] = simulateBasketballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, warnings, slate.scoringRules, hasOvertime ? overtime.periods : 0, trialInvariantViolations);
       } else {
         for (const team of teams) gameTotal[team.team] = simulateFootballTeam(team, trial, samples, simulatedPlayerIds, random, sharedPace, sharedScript, warnings, slate.scoringRules);
         for (const defenseTeam of teams) {
@@ -56,6 +66,8 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
         }
       }
       gameScores.push({ gameId, trial, teamScores: gameTotal });
+      }
+      if (now() - startedAt >= maxComputeMs) return incompleteSimulation(baseline, mode, seed, trials, batchSize, maxComputeMs, startedAt, now, `${gameId}: computation budget expired before the batch was fully finalized.`);
     }
   }
   // Projection rows with no resolvable team/game are not silently replaced by zero samples.
@@ -63,8 +75,10 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
     const target = samples.get(projection.playerId)!;
     if (simulatedPlayerIds.has(projection.playerId)) continue;
     const original = projection.simulatedFantasyPointSamples ?? [];
-    for (let i = 0; i < trials; i += 1) target[i] = original[i] ?? projection.projectedOutcomes.medianP50;
-    warnings.push(`${projection.playerId}: no complete game/team mapping; retained the independent baseline distribution.`);
+    const inactive = slate.sport === 'NBA' && slate.playerPool.some((player) => player.playerId === projection.playerId && isInactive(player));
+    for (let i = 0; i < trials; i += 1) target[i] = inactive ? 0 : original[i] ?? projection.projectedOutcomes.medianP50;
+    if (inactive) simulatedPlayerIds.add(projection.playerId);
+    else warnings.push(`${projection.playerId}: no complete game/team mapping; retained the independent baseline distribution.`);
   }
   const players = baseline.players.map((projection) => {
     const values = samples.get(projection.playerId) ?? projection.simulatedFantasyPointSamples ?? [];
@@ -73,7 +87,7 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
     return {
       ...projection,
       modelVersion: `${projection.modelVersion}+${GAME_SIMULATION_MODEL_VERSION}`,
-      baselineSimulatedFantasyPointSamples: projection.simulatedFantasyPointSamples ?? [],
+      baselineSimulatedFantasyPointSamples: Array.from({ length: trials }, (_, index) => projection.simulatedFantasyPointSamples?.[index] ?? projection.projectedOutcomes.medianP50),
       simulatedFantasyPointSamples: values,
       projectedOutcomes: { floorP20: quantile(sorted, 0.2), medianP50: median, ceilingP90: quantile(sorted, 0.9) },
       salaryEfficiency: { medianPer1k: projection.salary ? median / (projection.salary / 1000) : 0, ceilingPer1k: projection.salary ? quantile(sorted, 0.9) / (projection.salary / 1000) : 0 },
@@ -82,14 +96,41 @@ export function applyGameSimulation(slate: ValidatedSlate, baseline: ProjectionP
   });
   const scoreMarginDistributions = summarizeScoreMargins(gameScores);
   const covarianceChecks = summarizePlayerCovariance(games, samples, simulatedPlayerIds, trials);
+  const invariantViolations = validateScenarioOutput(slate, baseline, samples, trials, gameScores) + trialInvariantViolations.count;
+  if (invariantViolations > 0) return incompleteSimulation(baseline, mode, seed, trials, batchSize, maxComputeMs, startedAt, now, `Simulation output validation found ${invariantViolations} invariant violation(s).`);
   return {
     ...baseline,
+    simulationRuns: trials,
     modelVersion: `${baseline.modelVersion}+${GAME_SIMULATION_MODEL_VERSION}`,
     players,
     status: 'PARTIAL',
     gaps: [...baseline.gaps, { reason: 'Connected NBA/NFL game simulations are experimental. Prospective actual-data validation and independent model review are required before any release promotion.' }, ...warnings.map((reason) => ({ reason }))],
-    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, overtimeTrials, overtimeInputs, scoreMarginDistributions, covarianceChecks } },
+    gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials, gameScenarioCount: trials, batchSize, maxComputeMs, computeDurationMs: Math.max(0, now() - startedAt), completedTrials: trials, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'UNVALIDATED', gameScenarios: gameScores, diagnostics: { mappedGames: games.size, incompleteGames: warnings.filter((warning) => warning.includes('expected two team pools')).length, simulatedPlayers: simulatedPlayerIds.size, baselineFallbackPlayers: baseline.players.length - simulatedPlayerIds.size, excludedInactivePlayers: slate.sport === 'NBA' ? slate.playerPool.filter(isInactive).length : 0, invariantViolations, overtimeTrials, overtimeInputs, scoreMarginDistributions, covarianceChecks } },
   };
+}
+
+function incompleteSimulation(baseline: ProjectionPackage, mode: SimulationMode, seed: string, requestedTrials: number, batchSize: number, maxComputeMs: number, startedAt: number, now: () => number, reason: string): ProjectionPackage {
+  const elapsed = Math.max(0, now() - startedAt);
+  return { ...baseline, status: 'PARTIAL', gaps: [...baseline.gaps, { reason: `Connected game simulation incomplete; baseline distribution retained without partial quantiles. ${reason}` }], gameSimulation: { mode: mode === 'compare' ? 'COMPARE' : 'GAME_SIMULATION', modelVersion: GAME_SIMULATION_MODEL_VERSION, seed, trials: baseline.simulationRuns, gameScenarioCount: requestedTrials, batchSize, maxComputeMs, computeDurationMs: elapsed, completedTrials: 0, dependence: 'CONNECTED_GAME_EVENTS', releaseStatus: 'INCOMPLETE', gameScenarios: [], diagnostics: { mappedGames: 0, incompleteGames: 0, simulatedPlayers: 0, baselineFallbackPlayers: baseline.players.length, excludedInactivePlayers: 0, invariantViolations: 0, overtimeTrials: 0, overtimeInputs: 'NOT_APPLICABLE', scoreMarginDistributions: [], covarianceChecks: [] } } };
+}
+
+function isInactive(player: SlatePlayer): boolean { return ['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER', 'NOT_IN_CONFIRMED_LINEUP'].includes(String(player.availability?.status ?? '').toUpperCase()); }
+
+function validateScenarioOutput(slate: ValidatedSlate, baseline: ProjectionPackage, samples: Map<string, number[]>, trials: number, scenarios: GameScenarioRecord[]): number {
+  let violations = 0;
+  for (const projection of baseline.players) {
+    const values = samples.get(projection.playerId) ?? [];
+    if (values.length !== trials || values.some((value) => !Number.isFinite(value))) violations += 1;
+    const player = slate.playerPool.find((item) => item.playerId === projection.playerId);
+    if (slate.sport === 'NBA' && player && isInactive(player) && values.some((value) => value !== 0)) violations += 1;
+  }
+  for (const scenario of scenarios) if (Object.keys(scenario.teamScores).length !== 2 || Object.values(scenario.teamScores).some((score) => !Number.isFinite(score) || score < (slate.sport === 'NBA' ? 50 : 0) || !Number.isInteger(score))) violations += 1;
+  return violations;
+}
+
+function boundedOption(value: number, minimum: number, maximum: number, label: string): number {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`${label} must be an integer from ${minimum} to ${maximum}.`);
+  return value;
 }
 
 /** Descriptive within-simulation pairwise dependence; this is not empirical validation. */
@@ -166,12 +207,16 @@ function createTeamScenarios(slate: ValidatedSlate, projections: Map<string, Pla
   return [...map.values()].sort((a, b) => a.gameId.localeCompare(b.gameId) || a.team.localeCompare(b.team));
 }
 
-function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<string, number[]>, simulatedPlayerIds: Set<string>, random: Rng, pace: number, warnings: string[], scoringRules: ValidatedSlate['scoringRules'], overtimePeriods: number): number {
-  const eligible = team.players.filter((player) => !['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'].includes(String(player.availability?.status)));
+function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<string, number[]>, simulatedPlayerIds: Set<string>, random: Rng, pace: number, warnings: string[], scoringRules: ValidatedSlate['scoringRules'], overtimePeriods: number, invariantViolations: { count: number }): number {
+  const eligible = team.players.filter((player) => !isInactive(player));
   const structured = eligible.filter((player) => team.projections.get(player.playerId)?.modelPath === 'SPORT_STRUCTURED');
   if (structured.length !== eligible.length) warnings.push(`${team.gameId}/${team.team}: one or more NBA player projections use fallback distributions, so player-stat totals are only partially reconciled to the simulated team score.`);
   if (structured.length < 5) warnings.push(`${team.gameId}/${team.team}: fewer than five structured player projections; the game score and player stat allocation may be incomplete.`);
-  const minutes = sampleTeamMinutes(eligible, team.projections, random, warnings, `${team.gameId}/${team.team}`, overtimePeriods);
+  const minutes = sampleTeamMinutes(eligible, team.projections, random, warnings, `${team.gameId}/${team.team}`, overtimePeriods, invariantViolations);
+  const minuteValues = [...minutes.values()];
+  if (minuteValues.some((value) => !Number.isFinite(value) || value < 0 || value > 48 + overtimePeriods * 5 + 1e-9)) invariantViolations.count += 1;
+  if (eligible.some((player) => { const cap = team.projections.get(player.playerId)?.adjustedOpportunity.minutesCap; const sampled = minutes.get(player.playerId) ?? 0; return cap !== undefined && (!Number.isFinite(cap) || cap < 0 || sampled > cap + 1e-9); })) invariantViolations.count += 1;
+  if (minuteValues.reduce((sum, value) => sum + value, 0) > 240 + overtimePeriods * 25 + 1e-9) invariantViolations.count += 1;
   const pointWeights = eligible.map((player) => {
     const projection = team.projections.get(player.playerId);
     const rate = projection?.adjustedOpportunity.pointsPerMinute ?? 0;
@@ -187,6 +232,7 @@ function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<s
   const teamPointsMean = regulationTeamPointsMean * (1 + overtimePeriods / 4);
   const teamPoints = Math.max(50, Math.round(normalAround(teamPointsMean * pace, Math.max(7, teamPointsMean * 0.095), random)));
   const allocatedPoints = multinomial(teamPoints, pointWeights, random);
+  if (allocatedPoints.length !== eligible.length || allocatedPoints.some((value) => !Number.isInteger(value) || value < 0) || allocatedPoints.reduce((sum, value) => sum + value, 0) !== teamPoints) invariantViolations.count += 1;
   const expectedByStat = new Map<string, number[]>();
   for (const stat of ['threePointersMade', 'rebounds', 'assists', 'steals', 'blocks', 'turnovers']) {
     const weights = eligible.map((player) => (minutes.get(player.playerId) ?? 0) * Math.max(0, team.projections.get(player.playerId)?.adjustedOpportunity[`${stat}PerMinute`] ?? 0) * pace);
@@ -194,6 +240,7 @@ function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<s
   }
   const statAllocations = new Map<string, number[]>();
   for (const [stat, weights] of expectedByStat) statAllocations.set(stat, multinomial(poisson(weights.reduce((a, b) => a + b, 0), random), weights, random));
+  for (const allocation of statAllocations.values()) if (allocation.length !== eligible.length || allocation.some((value) => !Number.isInteger(value) || value < 0)) invariantViolations.count += 1;
   const teamPointsByPlayer = allocatedPoints;
   let teamFantasyScore = 0;
   for (let index = 0; index < eligible.length; index += 1) {
@@ -223,23 +270,32 @@ function simulateBasketballTeam(team: TeamScenario, trial: number, output: Map<s
   return teamPoints || Math.round(teamFantasyScore / Math.max(1, eligible.length));
 }
 
-function sampleTeamMinutes(players: SlatePlayer[], projections: Map<string, PlayerProjection>, random: Rng, warnings: string[], label: string, overtimePeriods = 0): Map<string, number> {
+function sampleTeamMinutes(players: SlatePlayer[], projections: Map<string, PlayerProjection>, random: Rng, warnings: string[], label: string, overtimePeriods = 0, invariantViolations: { count: number } = { count: 0 }): Map<string, number> {
   const active = players.filter((player) => projections.get(player.playerId)?.modelPath === 'SPORT_STRUCTURED');
   const raw = active.map((player) => {
     const inputs = projections.get(player.playerId)?.adjustedOpportunity ?? {};
     const expected = inputs.expectedMinutes ?? 0;
+    const cap = inputs.minutesCap;
     const p10 = inputs.minutesP10; const p90 = inputs.minutesP90;
     const sd = Number.isFinite(p10) && Number.isFinite(p90) ? Math.max(1, (p90! - p10!) / 2.563) : Math.max(1, expected * 0.14);
     const restrictedRisk = inputs.limitedMinutesRisk ?? 0;
     const regulation = random() < restrictedRisk ? (p10 ?? expected * 0.25) : normalAround(expected, sd, random);
     const overtimeShare = Number(player.sportContext?.nba?.minutesP50);
     const teamShare = Number.isFinite(overtimeShare) && overtimeShare > 0 ? clamp(overtimeShare / 240, 0, 1) : Math.max(0, expected) / Math.max(1, active.reduce((sum, item) => sum + (projections.get(item.playerId)?.adjustedOpportunity.expectedMinutes ?? 0), 0));
-    return { id: player.playerId, value: Math.max(0, Math.min(48 + overtimePeriods * 5, regulation + overtimePeriods * 25 * teamShare)) };
+    let value = Math.max(0, Math.min(48 + overtimePeriods * 5, regulation + overtimePeriods * 25 * teamShare));
+    if (cap !== undefined) {
+      if (!Number.isFinite(cap) || cap < 0 || cap > 48) invariantViolations.count += 1;
+      else value = Math.min(value, cap);
+    }
+    return { id: player.playerId, value };
   });
   const minutesTotal = raw.reduce((sum, value) => sum + value.value, 0);
   if (active.length >= 8 && minutesTotal > 200) {
     const scaledTotal = raw.reduce((sum, value) => sum + value.value, 0);
-    if (scaledTotal > 0) for (const value of raw) value.value = Math.min(48 + overtimePeriods * 5, value.value * (240 + overtimePeriods * 25) / scaledTotal);
+    if (scaledTotal > 0) for (const value of raw) {
+      const cap = projections.get(value.id)?.adjustedOpportunity.minutesCap;
+      value.value = Math.min(48 + overtimePeriods * 5, Number.isFinite(cap) ? cap! : Number.POSITIVE_INFINITY, value.value * (240 + overtimePeriods * 25) / scaledTotal);
+    }
   } else if (active.length && minutesTotal < 200) warnings.push(`${label}: rotation pool does not cover 200 expected minutes; minutes are not forced to 240.`);
   return new Map(raw.map(({ id, value }) => [id, value]));
 }

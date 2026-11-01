@@ -163,4 +163,12 @@ export function salaryForRosterSlot(player: Pick<SlatePlayer, 'salary' | 'captai
   if (base === 'UTIL') return player.utilitySalary ?? player.salary;
   return rule?.salaryMultiplier ? Math.round(player.salary * rule.salaryMultiplier) : player.salary;
 }
-export function assertSelection(value: SelectionPackage, optimizer: OptimizerPackage): void { const ids = new Set(optimizer.candidates.map((candidate) => candidate.id)); const errors = value.selectedLineups.filter((lineup) => !ids.has(lineup.candidateId)).map((lineup) => `selection references missing optimizer candidate ${lineup.candidateId}.`); if (errors.length) throw new EngineContractError('SELECTION', errors); }
+export function assertSelection(value: SelectionPackage, optimizer: OptimizerPackage, slate?: ValidatedSlate, lockedRosterSlots?: Record<string, string>): void {
+  const ids = new Set(optimizer.candidates.map((candidate) => candidate.id));
+  const errors = value.selectedLineups.flatMap((lineup) => {
+    const issues = ids.has(lineup.candidateId) ? [] : [`selection references missing optimizer candidate ${lineup.candidateId}.`];
+    if (slate) issues.push(...validateLineupCandidate({ playerIds: lineup.playerIds, rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed }, slate, { lockedSlotAssignments: lockedRosterSlots }).map((error) => `${lineup.candidateId}: ${error}`));
+    return issues;
+  });
+  if (errors.length) throw new EngineContractError('SELECTION', errors);
+}

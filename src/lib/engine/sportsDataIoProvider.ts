@@ -1,7 +1,8 @@
 import type { ResearchArticle, ResearchPlan, ResearchSourceProvider, SourceTier, Sport, ValidatedSlate } from './contracts.js';
 import { normalizeProviderName, normalizeTeamCode, parseAvailabilityRecords, type AvailabilityRecord, type AvailabilitySnapshot } from './availability.js';
 
-export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; timeoutMs?: number; maxAttempts?: number; }
+export interface SportsDataIoQuotaState { limit?: number; remaining?: number; resetAt?: string; retryAfterAt?: string; rateLimited: boolean; observedAt: string; }
+export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; availability?: Partial<Record<Sport, { feed: string; resource: string }>>; timeoutMs?: number; maxAttempts?: number; requestBudget?: number; onQuotaState?: (state: SportsDataIoQuotaState) => void; }
 export interface GolfProjectionRefresh { rows: Record<string, unknown>[]; tournamentName?: string; warning?: string; }
 export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; homeProbablePitcherId?: string; awayProbablePitcherId?: string; homeProbablePitcher?: string; awayProbablePitcher?: string; homeOpener?: boolean; awayOpener?: boolean; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
 export interface WnbaRecentPlayerMinutes { playerId?: string; name?: string; team?: string; minutes: number[]; }
@@ -13,11 +14,15 @@ export class SportsDataIoClient {
   private readonly options: SportsDataIoClientOptions;
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
+  private quotaState: SportsDataIoQuotaState | undefined;
+  private providerCallCount = 0;
   constructor(options: SportsDataIoClientOptions) { this.options = options; this.fetcher = options.fetcher ?? fetch; this.baseUrl = (options.baseUrl ?? 'https://api.sportsdata.io/v3').replace(/\/+$/, ''); this.timeoutMs = options.timeoutMs ?? 12_000; this.maxAttempts = options.maxAttempts ?? 3; if (!options.apiKey) throw new Error('SportsDataIO API key is required.'); }
   async get<T>(sport: Sport, feed: string, resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
     const path = this.sourceUrl(sport, feed, resource, parameter);
     return await this.fetchJson<T>(path, `SportsDataIO ${sport} ${feed}/${resource}`, signal);
   }
+  get latestQuotaState(): SportsDataIoQuotaState | undefined { return this.quotaState ? { ...this.quotaState } : undefined; }
+  get requestsMade(): number { return this.providerCallCount; }
   sourceUrl(sport: Sport, feed: string, resource: string, parameter?: string): string { return [this.baseUrl, sport.toLowerCase(), feed, 'json', resource, parameter].filter(Boolean).join('/'); }
   private async getGolf<T>(resource: string, parameter?: string, signal?: AbortSignal): Promise<T> {
     const golfBaseUrl = this.baseUrl.replace(/\/v3$/, '');
@@ -27,15 +32,17 @@ export class SportsDataIoClient {
   private async fetchJson<T>(path: string, label: string, signal?: AbortSignal): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      if (this.options.requestBudget !== undefined && this.providerCallCount >= this.options.requestBudget) throw new Error('SportsDataIO request budget exhausted before the next provider call.');
       const controller = new AbortController();
       const abortFromCaller = () => controller.abort(signal?.reason);
       signal?.addEventListener('abort', abortFromCaller, { once: true });
       const timeout = setTimeout(() => controller.abort(new Error(`${label} request timed out.`)), this.timeoutMs);
       let response: Response | undefined;
-      try { response = await this.fetcher(path, { signal: controller.signal, headers: { accept: 'application/json', 'Ocp-Apim-Subscription-Key': this.options.apiKey } }); }
+      try { this.providerCallCount += 1; response = await this.fetcher(path, { signal: controller.signal, headers: { accept: 'application/json', 'Ocp-Apim-Subscription-Key': this.options.apiKey } }); }
       catch (error) { lastError = error; }
       finally { clearTimeout(timeout); signal?.removeEventListener('abort', abortFromCaller); }
       if (response) {
+        this.recordQuotaHeaders(response.headers, response.status === 429);
         if (!response.ok) {
           const detail = await response.text().catch(() => '');
           if (response.status === 401 || response.status === 403) throw new Error(`${label} access denied (HTTP ${response.status}). Check subscription feed permissions.`);
@@ -43,7 +50,11 @@ export class SportsDataIoClient {
           if (response.status < 500 && response.status !== 408 && response.status !== 429) throw lastError;
           if (attempt < this.maxAttempts) {
             const retryAfter = response.headers.get('retry-after');
-            const retryMs = retryAfter && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : 200 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 150);
+            const retryAfterSeconds = retryAfter && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : undefined;
+            const retryAfterDate = retryAfter && retryAfterSeconds === undefined ? Date.parse(retryAfter) - Date.now() : undefined;
+            const serverRetryMs = retryAfterSeconds ?? (retryAfterDate !== undefined && Number.isFinite(retryAfterDate) ? Math.max(0, retryAfterDate) : undefined);
+            if (response.status === 429 && serverRetryMs !== undefined && serverRetryMs > 5_000) throw lastError;
+            const retryMs = serverRetryMs ?? 200 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 150);
             await new Promise((resolve) => setTimeout(resolve, Math.min(5_000, retryMs)));
           }
           continue;
@@ -57,6 +68,40 @@ export class SportsDataIoClient {
       if (attempt < this.maxAttempts) await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 200 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 150))));
     }
     throw lastError instanceof Error ? lastError : new Error(`${label} request failed.`);
+  }
+  private recordQuotaHeaders(headers: Headers, rateLimited: boolean): void {
+    const observedAt = new Date().toISOString();
+    const numberHeader = (...names: string[]): number | undefined => {
+      for (const name of names) { const value = headers.get(name); if (value !== null && /^\d+(?:\.\d+)?$/.test(value.trim())) return Number(value); }
+      return undefined;
+    };
+    const dateHeader = (value: string | null): string | undefined => {
+      if (!value) return undefined;
+      const seconds = Number(value);
+      const time = Number.isFinite(seconds) ? Date.now() + Math.max(0, seconds) * 1000 : Date.parse(value);
+      return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+    };
+    const vendorReset = numberHeader('x-ratelimit-reset');
+    const standardReset = numberHeader('ratelimit-reset');
+    const vendorResetAt = vendorReset === undefined ? undefined : new Date(vendorReset > 1_000_000_000 ? vendorReset * 1000 : Date.now() + vendorReset * 1000).toISOString();
+    const standardResetAt = standardReset === undefined ? undefined : new Date(Date.now() + standardReset * 1000).toISOString();
+    const retryAfter = headers.get('retry-after');
+    const retryAfterAt = dateHeader(retryAfter);
+    const candidate: SportsDataIoQuotaState = {
+      ...(numberHeader('x-ratelimit-limit', 'ratelimit-limit') !== undefined ? { limit: numberHeader('x-ratelimit-limit', 'ratelimit-limit') } : {}),
+      ...(numberHeader('x-ratelimit-remaining', 'ratelimit-remaining') !== undefined ? { remaining: numberHeader('x-ratelimit-remaining', 'ratelimit-remaining') } : {}),
+      ...(vendorResetAt ?? standardResetAt ?? dateHeader(headers.get('x-ratelimit-reset') ?? headers.get('ratelimit-reset')) ? { resetAt: vendorResetAt ?? standardResetAt ?? dateHeader(headers.get('x-ratelimit-reset') ?? headers.get('ratelimit-reset')) } : {}),
+      ...(retryAfterAt ? { retryAfterAt } : {}), rateLimited, observedAt,
+    };
+    // Missing headers mean quota is unknown for this response; keep an unresolved 429 circuit
+    // open until the provider supplies a reset signal and that time has passed.
+    const priorBlocked = this.quotaState?.rateLimited === true;
+    const priorReset = Math.max(Date.parse(this.quotaState?.resetAt ?? '') || 0, Date.parse(this.quotaState?.retryAfterAt ?? '') || 0);
+    const suppliedQuota = candidate.remaining !== undefined || candidate.limit !== undefined || candidate.resetAt !== undefined;
+    this.quotaState = !rateLimited && priorBlocked && !suppliedQuota && (!priorReset || priorReset > Date.now())
+      ? { ...candidate, ...this.quotaState, observedAt }
+      : candidate;
+    this.options.onQuotaState?.({ ...this.quotaState });
   }
   async getAvailabilitySnapshot(slate: ValidatedSlate, signal?: AbortSignal): Promise<AvailabilitySnapshot> {
     const date = sportsDataDate(slate);

@@ -2,7 +2,7 @@ import type { AdjustmentPackage, PlayerAdjustment, PlayerProjection, ProjectionP
 import { golfFinishPositionBonus } from '../dkScoring.js';
 import { isPitcher, isQuarterback } from './projectionInputs.js';
 
-const MODEL_VERSION = 'projection.deterministic.v3';
+export const PROJECTION_MODEL_VERSION = 'projection.deterministic.v3';
 const SIMULATION_RUNS = 256;
 type ProjectionEffectOutcome = Omit<NonNullable<ProjectionPackage['effectOutcomes']>[number], 'playerId'>;
 
@@ -117,7 +117,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
   // entry-ready Golf projection. Keep the candidate path available for QA and comparison while
   // the run trust gate continues to require model validation and complete sport context.
   const status = players.length === 0 ? 'BLOCKED' : gaps.length || adjustmentPackage.status !== 'COMPLETE' || golfFallbackCount > 0 ? 'PARTIAL' : 'COMPLETE';
-  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, effectOutcomes, gaps, status };
+  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: PROJECTION_MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, effectOutcomes, gaps, status };
 }
 
 // No projectionInputs are available for this player (either the sport has no rate-stat
@@ -142,7 +142,7 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const ceiling = quantile(orderedSamples, 0.9);
   const confidence = adjustment?.roleCertainty ?? 'LOW';
   const uncertaintyFactors = ['Projection uses DraftKings provider FPPG because component-level opportunity inputs were unavailable.', 'Research adjustments are context only on this fallback path; no unsupported percentage change was applied.', `Floor/ceiling reflect aggregate performance variance (noise band ±${Math.round(noiseWidth * 50)}%); role certainty is reported separately.`, ...(rawMedian < 0 ? ['Provider FPPG was negative and was clamped to zero for the non-negative fallback distribution.'] : [])];
-  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
+  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: { providerFppg: player.providerFppg ?? 0 }, adjustedOpportunity: { providerFppg: median }, opportunityDelta: { providerFppg: median - (player.providerFppg ?? 0) }, componentProjection: { fantasyPoints: median }, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence, uncertaintyFactors, watchDependencies: ['Component-level opportunity inputs'], modelVersion: PROJECTION_MODEL_VERSION, modelPath: 'PROVIDER_FPPG_FALLBACK', distribution: { family: 'AGGREGATE_FPPG', drivers: ['provider FPPG', 'aggregate performance variance'] } };
 }
 
 function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Record<string, number>, adjustment: PlayerAdjustment | undefined, valuesArePrepared = false, baselineValues: Record<string, number> = values): ProjectionPackage['players'][number] {
@@ -166,7 +166,7 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
   const opportunityDelta = Object.fromEntries(Object.keys({ ...baselineValues, ...adjusted }).map((key) => [key, (adjusted[key] ?? 0) - (baselineValues[key] ?? 0)]));
-  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: baselineValues, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
+  return { playerId: player.playerId, salary: player.salary, ...(Number.isFinite(player.providerFppg) ? { baselineFppg: player.providerFppg } : {}), baselineOpportunity: baselineValues, adjustedOpportunity: adjusted, opportunityDelta, componentProjection: components, projectedOutcomes: { floorP20: floor, medianP50: median, ceilingP90: ceiling }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: player.salary ? median / (player.salary / 1000) : 0, ceilingPer1k: player.salary ? ceiling / (player.salary / 1000) : 0 }, confidence: adjustment?.roleCertainty ?? 'LOW', uncertaintyFactors, watchDependencies: adjustment?.keyDeltas ?? [], modelVersion: PROJECTION_MODEL_VERSION, modelPath: 'SPORT_STRUCTURED', distribution: distributionFor(slate.sport, player) };
 }
 
 function componentsFor(slate: ValidatedSlate, player: SlatePlayer, v: Record<string, number>): Record<string, number> {
@@ -255,6 +255,10 @@ function sampleBasketball(sport: Sport, player: SlatePlayer, components: Record<
     const regulationTeamMinutes = sport === 'WNBA' ? 200 : 240;
     const teamPlayerMinutesPerOvertime = sport === 'WNBA' ? 20 : 25;
     minutes += minutesMean / regulationTeamMinutes * teamPlayerMinutesPerOvertime * overtimePeriods;
+  }
+  if (inputs.minutesCap !== undefined) {
+    if (!Number.isFinite(inputs.minutesCap) || inputs.minutesCap < 0 || inputs.minutesCap > 48) throw new Error('minutesCap must be a finite NBA minute limit from 0 to 48.');
+    minutes = Math.min(minutes, inputs.minutesCap);
   }
   const minuteRatio = inputs.expectedMinutes ? minutes / inputs.expectedMinutes : 1;
   const sampled = Object.fromEntries(Object.entries(components).map(([key, value]) => {

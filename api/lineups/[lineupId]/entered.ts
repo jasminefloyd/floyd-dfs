@@ -1,5 +1,10 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getOwnedLineupSlate, method, parseBody, requireOwnedLineup, respondError, tenantContext } from '../../../server/runtime.js';
+import { validateLineupCandidate } from '../../../src/lib/engine/validation.js';
+import type { ValidatedSlate } from '../../../src/lib/engine/contracts.js';
+import { getStreetTeamSnapshot } from '../../../server/streetTeam.js';
+import { validateNbaLineupAtEntry } from '../../../server/streetTeam/slateGate.js';
+import { validateFinalLineupIndependently } from '../../../server/lineupAgent/entryValidator.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (!method(req, res, ['POST'])) return;
@@ -27,9 +32,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const selection = await context.db.from('floyd_dfs_selection_runs').select('generation_run_id').eq('tenant_id', context.tenantId).eq('id', current.data.selection_run_id).single();
     if (selection.error) throw selection.error;
-    const stages = await context.db.from('engine_stage_runs').select('stage,version,output_payload').eq('tenant_id', context.tenantId).eq('generation_run_id', selection.data.generation_run_id).in('stage', ['RESEARCH', 'SPORT_ADJUSTMENT', 'PROJECTION', 'OPTIMIZE', 'SELECTION']);
+    const stages = await context.db.from('engine_stage_runs').select('stage,version,output_payload').eq('tenant_id', context.tenantId).eq('generation_run_id', selection.data.generation_run_id).in('stage', ['SLATE', 'RESEARCH', 'SPORT_ADJUSTMENT', 'PROJECTION', 'OPTIMIZE', 'SELECTION']);
     if (stages.error) throw stages.error;
     const output = new Map((stages.data ?? []).map((stage) => [stage.stage, stage]));
+    const frozenSlate = (output.get('SLATE')?.output_payload as ValidatedSlate | undefined) ?? savedSlate;
+    const lineupPayload = current.data.lineup_payload as Record<string, unknown>;
+    if (!frozenSlate || frozenSlate.tenantId !== context.tenantId || frozenSlate.contest.draftKingsContestId !== contestId) throw new Error('The exact generation contest/slate snapshot could not be verified; refresh and regenerate before recording this entry.');
+    const rosterSlots = lineupPayload.rosterSlots && typeof lineupPayload.rosterSlots === 'object' && !Array.isArray(lineupPayload.rosterSlots) ? lineupPayload.rosterSlots as Record<string, string> : {};
+    const playerIds = Array.isArray(lineupPayload.playerIds) ? lineupPayload.playerIds.map(String) : [];
+    const salaryUsed = Number(lineupPayload.salaryUsed);
+    const legalityErrors = validateLineupCandidate({ playerIds, rosterSlots, salaryUsed }, frozenSlate);
+    if (legalityErrors.length) throw new Error(`Entry confirmation failed the saved DraftKings rules check: ${legalityErrors.slice(0, 4).join(' ')}`);
+    const independentLegalityErrors = validateFinalLineupIndependently({ playerIds, rosterSlots, salaryUsed }, frozenSlate);
+    if (independentLegalityErrors.length) throw new Error(`Entry confirmation failed an independent DraftKings rules check: ${independentLegalityErrors.slice(0, 4).join(' ')}`);
+    if (frozenSlate.sport === 'NBA') {
+      const currentSnapshot = await getStreetTeamSnapshot(context.db, context.tenantId);
+      if (!currentSnapshot) throw new Error('NBA entry confirmation is blocked until a current identity and availability snapshot is available.');
+      const identityErrors = validateNbaLineupAtEntry(frozenSlate, currentSnapshot, playerIds);
+      if (identityErrors.length) throw new Error(`NBA entry confirmation is blocked: ${identityErrors.join(' ')}`);
+    }
     const projection = output.get('PROJECTION')?.output_payload as Record<string, unknown> | undefined;
     const selectionPackage = output.get('SELECTION')?.output_payload as Record<string, unknown> | undefined;
     const confirmation = await context.db.rpc('floyd_dfs_confirm_lineup_entry', {

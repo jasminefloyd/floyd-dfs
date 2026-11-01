@@ -5,6 +5,10 @@ import { parseStreetTeamSnapshot } from '../src/lib/engine/boundaryContracts.js'
 import { SportsDataIoNbaStreetTeamProvider } from './nbaStreetTeamProvider.js';
 import { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
 import { deriveStreetTeamBehaviorSignals, toStreetTeamBehaviorSignalRows } from './streetTeam/behavior.js';
+import { meaningfulEvidenceHash } from './streetTeam/changeDetection.js';
+import { detectStreetTeamMaterialChanges, markUnlockedLineupsForRecheck } from './streetTeam/recheck.js';
+import { mergeStreetTeamRefresh } from './streetTeam/refreshMerge.js';
+import type { NbaRefreshKind } from './streetTeam/scheduler.js';
 
 const LEASE_MS = 10 * 60_000;
 /** The daily NBA collection cadence establishes the default current-state TTL. */
@@ -22,11 +26,16 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
   now?: () => Date;
   fetcher?: typeof fetch;
   idempotencyKey?: string;
-}): Promise<{ status: string; snapshotId?: string; asOf?: string; providerDiagnostics?: unknown[]; unknowns?: unknown[] }> {
+  refreshKind?: NbaRefreshKind;
+  providerCallBudget?: number;
+  scheduleContext?: { gameIds?: string[]; slateIds?: string[] };
+}): Promise<{ status: string; snapshotId?: string; asOf?: string; providerDiagnostics?: unknown[]; providerCallCount?: number; providerQuotaState?: unknown; unknowns?: unknown[] }> {
   const now = options.now ?? (() => new Date());
   const startedAt = now();
   const dayKey = startedAt.toISOString().slice(0, 10);
-  const idempotencyKey = options.idempotencyKey ? `street-team:nba:manual:${options.idempotencyKey}` : `street-team:nba:${dayKey}`;
+  const idempotencyKey = options.idempotencyKey
+    ? options.refreshKind ? `street-team:nba:${options.refreshKind}:${options.idempotencyKey}` : `street-team:nba:manual:${options.idempotencyKey}`
+    : `street-team:nba:${dayKey}`;
   const claimed = await claimCollectionRun(db, tenantId, idempotencyKey, startedAt);
   if (claimed.status !== 'CLAIMED') return claimed;
 
@@ -36,21 +45,27 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       const reason = 'Verified SportsDataIO production NBA data tier is not configured; no provider request was made.';
       const blocked = await db.from('floyd_dfs_intel_collection_runs').update({
         status: 'FAILED', finished_at: finishedAt, lease_expires_at: null,
+        source_count: 0, changed_count: 0, error_code: 'DATA_TIER_UNVERIFIED', retry_count: 0, provider_request_id: null,
         result: { providerDiagnostics: [{ provider: 'SportsDataIO NBA', status: 'FAILED', retrievedAt: finishedAt, freshness: 'UNKNOWN', error: 'Production NBA data tier is not verified.' }], unknowns: [{ subject: { kind: 'LEAGUE', id: 'nba:league' }, question: 'Verified NBA roster and availability data source is unavailable.', reason }] },
         error: { message: reason },
       }).eq('id', claimed.runId).eq('tenant_id', tenantId);
       if (blocked.error) throw blocked.error;
       return { status: 'FAILED', providerDiagnostics: [{ provider: 'SportsDataIO NBA', status: 'FAILED', retrievedAt: finishedAt, freshness: 'UNKNOWN', error: 'Production NBA data tier is not verified.' }], unknowns: [{ reason }] };
     }
-    const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2 });
+    const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2, requestBudget: options.providerCallBudget });
     const provider = new SportsDataIoNbaStreetTeamProvider(client, now, options.fetcher);
-    const providerResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS) });
+    const previousSnapshot = await db.from('floyd_dfs_intel_snapshots').select('id,evidence_hash,snapshot_payload')
+      .eq('tenant_id', tenantId).eq('sport', 'NBA').order('as_of', { ascending: false }).limit(1).maybeSingle();
+    if (previousSnapshot.error) throw previousSnapshot.error;
+    const previousPayload = previousSnapshot.data?.snapshot_payload ? parseStreetTeamSnapshot(previousSnapshot.data.snapshot_payload, tenantId) : null;
+    const freshProviderResult = await provider.collect({ windowStart: new Date(startedAt.getTime() - NBA_STREET_TEAM_SNAPSHOT_TTL_MS), refreshKind: options.refreshKind ?? 'FULL' });
+    const providerResult = mergeStreetTeamRefresh(previousPayload, freshProviderResult, options.refreshKind ?? 'FULL', startedAt);
     const asOf = now().toISOString();
     const resolvedFacts = providerResult.resolvedFacts.map((fact) => ({
       ...fact,
       tenantId,
       sport: 'NBA' as const,
-      state: 'ACCEPTED' as const,
+      state: fact.state ?? 'ACCEPTED',
     }));
     const observations = providerResult.observations.map((observation) => ({
       ...observation,
@@ -60,11 +75,16 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       subject: { kind: observation.subjectKind, id: observation.subjectId },
       contentSha256: sha256(stableJson({ ...observation, retrievedAt: observation.retrievedAt })),
     }));
-    const evidenceHash = sha256(stableJson(observations.map((observation) => observation.contentSha256).sort()));
+    const retainedObservations = providerResult.retainedObservations.map((observation) => {
+      const raw = observation as unknown as Record<string, unknown>;
+      return { id: observation.id, provider: String(raw.provider ?? observation.source), sourceRecordId: observation.sourceRecordId, sourceUrl: observation.sourceUrl ?? '', subjectKind: observation.subject.kind, subjectId: observation.subject.id, claim: observation.claim, classification: observation.classification, confidence: observation.confidence, publishedAt: observation.publishedAt, effectiveAt: observation.effectiveAt, observedAt: observation.observedAt, retrievedAt: observation.retrievedAt, payload: asRecord(raw.payload) ?? {} };
+    });
+    const snapshotObservations = [...retainedObservations, ...observations];
+    const evidenceHash = meaningfulEvidenceHash(snapshotObservations);
     const hardFailure = !providerResult.rosterAvailable;
     if (hardFailure) {
       const completedAt = now().toISOString();
-      const updated = await db.from('floyd_dfs_intel_collection_runs').update({ status: 'FAILED', finished_at: completedAt, lease_expires_at: null, result: { providerDiagnostics: providerResult.providerDiagnostics, unknowns: providerResult.unknowns }, error: { message: 'No usable NBA roster records were collected; latest verified snapshot was retained.' } }).eq('id', claimed.runId).eq('tenant_id', tenantId);
+      const updated = await db.from('floyd_dfs_intel_collection_runs').update({ status: 'FAILED', finished_at: completedAt, lease_expires_at: null, source_count: providerResult.providerDiagnostics.length, changed_count: 0, error_code: 'NO_USABLE_ROSTER', retry_count: 1, provider_request_id: null, result: { providerDiagnostics: providerResult.providerDiagnostics, providerCallCount: providerResult.providerCallCount ?? 0, providerQuotaState: providerResult.providerQuotaState ?? null, unknowns: providerResult.unknowns, retainedLastKnownGood: true }, error: { message: 'No usable NBA roster records were collected; latest verified snapshot was retained.' } }).eq('id', claimed.runId).eq('tenant_id', tenantId);
       if (updated.error) throw updated.error;
       return { status: 'FAILED', providerDiagnostics: providerResult.providerDiagnostics, unknowns: providerResult.unknowns };
     }
@@ -78,16 +98,17 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       asOf,
       createdAt: now().toISOString(),
       evidenceHash,
-      observations,
+      observations: snapshotObservations,
       resolvedFacts,
       rosterState: providerResult.rosterState,
       availability: providerResult.availability,
       transactions: providerResult.transactions,
-      behaviorSignals: deriveStreetTeamBehaviorSignals(tenantId, providerResult.observations),
+      behaviorSignals: deriveStreetTeamBehaviorSignals(tenantId, snapshotObservations),
       unknowns: providerResult.unknowns,
       providerDiagnostics: providerResult.providerDiagnostics,
     };
     const snapshot = parseStreetTeamSnapshot(candidate, tenantId);
+    const changed = previousSnapshot.data?.evidence_hash !== evidenceHash;
     const snapshotRow = {
       id: snapshotId,
       tenant_id: tenantId,
@@ -99,6 +120,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
       snapshot_payload: snapshot,
     };
     if (observations.length) {
+      const ingestedAt = now().toISOString();
       for (const batch of chunks(observations, 250)) {
         const rows = batch.map((observation) => ({
           id: observation.id,
@@ -111,16 +133,22 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
           subject_kind: observation.subject.kind,
           subject_id: observation.subject.id,
           claim: observation.claim,
+          normalized_claim: typeof observation.payload.normalizedClaim === 'string' ? observation.payload.normalizedClaim : observation.claim,
+          source_tier: typeof observation.payload.sourceTier === 'string' ? observation.payload.sourceTier : 'UNKNOWN',
+          quantifiable: observation.payload.quantifiable === true,
           classification: observation.classification,
           confidence: observation.confidence,
           published_at: observation.publishedAt ?? null,
           effective_at: observation.effectiveAt ?? null,
           observed_at: observation.observedAt,
           retrieved_at: observation.retrievedAt,
+          ingested_at: ingestedAt,
           expires_at: null,
           supersedes_observation_id: null,
           content_sha256: observation.contentSha256,
           raw_payload: observation.payload,
+          raw_payload_sha256: sha256(stableJson(observation.payload)),
+          schema_version: 2,
         }));
         const saved = await db.from('floyd_dfs_intel_observations').upsert(rows, { onConflict: 'tenant_id,sport,provider,content_sha256', ignoreDuplicates: true });
         if (saved.error) throw saved.error;
@@ -133,18 +161,30 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
         if (saved.error) throw saved.error;
       }
     }
-    const links = observations.map((observation, ordinal) => ({ observation_id: observation.id, ordinal }));
-    const insertedSnapshot = await db.rpc('floyd_dfs_create_intel_snapshot_with_evidence', { p_snapshot: snapshotRow, p_evidence_links: links });
-    if (insertedSnapshot.error) throw insertedSnapshot.error;
-    if (String(insertedSnapshot.data) !== snapshotId) throw new Error('The database returned an unexpected Street Team snapshot ID.');
+    const links = snapshotObservations.map((observation, ordinal) => ({ observation_id: observation.id, ordinal }));
+    let canonicalSnapshotId: string | undefined = snapshotId;
+    let recheckRequiredLineupCount = 0;
+    if (freshnessState === 'PARTIAL') {
+      canonicalSnapshotId = previousSnapshot.data?.id ? String(previousSnapshot.data.id) : undefined;
+    } else if (changed) {
+      const materialChanges = detectStreetTeamMaterialChanges(snapshot, previousPayload ?? undefined);
+      recheckRequiredLineupCount = await markUnlockedLineupsForRecheck(db, tenantId, materialChanges, snapshotId, now());
+      const insertedSnapshot = await db.rpc('floyd_dfs_create_intel_snapshot_with_evidence', { p_snapshot: snapshotRow, p_evidence_links: links });
+      if (insertedSnapshot.error) throw insertedSnapshot.error;
+      if (String(insertedSnapshot.data) !== snapshotId) throw new Error('The database returned an unexpected Street Team snapshot ID.');
+    } else {
+      canonicalSnapshotId = String(previousSnapshot.data!.id);
+    }
     const completedAt = now().toISOString();
     const status = hardFailure ? 'FAILED' : freshnessState === 'FRESH' ? 'COMPLETE' : 'PARTIAL';
-    const updated = await db.from('floyd_dfs_intel_collection_runs').update({ status, finished_at: completedAt, lease_expires_at: null, result: { snapshotId, asOf, freshnessState, providerDiagnostics: providerResult.providerDiagnostics, unknowns: providerResult.unknowns }, error: hardFailure ? { message: 'No NBA provider feed returned a usable result.' } : null }).eq('id', claimed.runId).eq('tenant_id', tenantId);
+    const hasProviderFailure = providerResult.providerDiagnostics.some((item) => item.status === 'FAILED' || item.status === 'RATE_LIMITED');
+    const partialMessage = hasProviderFailure ? 'A provider feed was incomplete; the latest verified snapshot was retained.' : 'Unresolved evidence was found; the latest verified snapshot was retained.';
+    const updated = await db.from('floyd_dfs_intel_collection_runs').update({ status, finished_at: completedAt, lease_expires_at: null, source_count: providerResult.providerDiagnostics.length, changed_count: freshnessState === 'FRESH' && changed ? observations.length : 0, error_code: hardFailure ? 'NO_USABLE_ROSTER' : hasProviderFailure ? providerResult.providerDiagnostics.some((item) => item.status === 'RATE_LIMITED') ? 'RATE_LIMITED' : 'PARTIAL_SOURCE_FAILURE' : freshnessState === 'PARTIAL' ? 'UNRESOLVED_EVIDENCE' : null, retry_count: hasProviderFailure ? 1 : 0, provider_request_id: null, result: { snapshotId: canonicalSnapshotId ?? null, asOf, freshnessState, changed, recheckRequiredLineupCount, retainedLastKnownGood: freshnessState === 'PARTIAL', scheduleContext: normalizeScheduleContext(options.scheduleContext), providerDiagnostics: providerResult.providerDiagnostics, providerCallCount: providerResult.providerCallCount ?? 0, providerQuotaState: providerResult.providerQuotaState ?? null, unknowns: providerResult.unknowns }, error: freshnessState === 'PARTIAL' ? { message: partialMessage } : null }).eq('id', claimed.runId).eq('tenant_id', tenantId);
     if (updated.error) throw updated.error;
-    return { status, snapshotId, asOf, providerDiagnostics: providerResult.providerDiagnostics, unknowns: providerResult.unknowns };
+    return { status, snapshotId: canonicalSnapshotId, asOf, providerDiagnostics: providerResult.providerDiagnostics, providerCallCount: providerResult.providerCallCount ?? 0, providerQuotaState: providerResult.providerQuotaState, unknowns: providerResult.unknowns };
   } catch (error) {
     const finishedAt = now().toISOString();
-    await db.from('floyd_dfs_intel_collection_runs').update({ status: 'FAILED', finished_at: finishedAt, lease_expires_at: null, error: { message: safeFailure(error) } }).eq('id', claimed.runId).eq('tenant_id', tenantId);
+    await db.from('floyd_dfs_intel_collection_runs').update({ status: 'FAILED', finished_at: finishedAt, lease_expires_at: null, error_code: errorCode(error), retry_count: 1, error: { message: safeFailure(error) } }).eq('id', claimed.runId).eq('tenant_id', tenantId);
     throw error;
   }
 }
@@ -171,6 +211,15 @@ export async function getStreetTeamSnapshot(db: SupabaseClient, tenantId: string
   if (snapshotId) query = query.eq('id', snapshotId);
   else query = query.order('as_of', { ascending: false }).limit(1);
   const result = await query.maybeSingle();
+  if (result.error) throw result.error;
+  if (!result.data) return null;
+  return parseStreetTeamSnapshot(result.data.snapshot_payload, tenantId);
+}
+
+export async function getStreetTeamSnapshotAsOf(db: SupabaseClient, tenantId: string, asOf: string): Promise<StreetTeamSnapshot | null> {
+  const cutoff = Date.parse(asOf);
+  if (!Number.isFinite(cutoff)) throw new Error('asOf must be a valid timestamp.');
+  const result = await db.from('floyd_dfs_intel_snapshots').select('id,snapshot_payload').eq('tenant_id', tenantId).eq('sport', 'NBA').lte('as_of', new Date(cutoff).toISOString()).order('as_of', { ascending: false }).limit(1).maybeSingle();
   if (result.error) throw result.error;
   if (!result.data) return null;
   return parseStreetTeamSnapshot(result.data.snapshot_payload, tenantId);
@@ -209,3 +258,5 @@ function stableJson(value: unknown): string { if (value === null || typeof value
 function asRecord(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 function stringValue(value: unknown): string | undefined { return typeof value === 'string' ? value : undefined; }
 function safeFailure(error: unknown): string { const message = error instanceof Error ? error.message : 'Street Team collection failed.'; return message.replace(/https?:\/\/[^\s?]+\?[^\s]+/g, '[provider URL]').slice(0, 300); }
+function normalizeScheduleContext(value: { gameIds?: string[]; slateIds?: string[] } | undefined): { gameIds: string[]; slateIds: string[] } { return { gameIds: [...new Set((value?.gameIds ?? []).filter((item) => typeof item === 'string' && item.length <= 128))].sort(), slateIds: [...new Set((value?.slateIds ?? []).filter((item) => typeof item === 'string' && item.length <= 128))].sort() }; }
+function errorCode(error: unknown): string { const message = error instanceof Error ? error.message : ''; const status = /HTTP (\d{3})/.exec(message)?.[1]; return status ? `HTTP_${status}` : /timed? ?out|abort/i.test(message) ? 'TIMEOUT' : 'COLLECTION_FAILED'; }

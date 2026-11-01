@@ -15,12 +15,15 @@ export type StoredEvaluation = {
 export function promotionEvidence(evaluation: StoredEvaluation): { eligible: boolean; reasons: string[]; independentSlates: number; playerRows: number } {
   const metrics = record(evaluation.metrics);
   const evidence = record(metrics?.promotionGate);
+  const manifest = record(evaluation.data_manifest);
   const independentSlates = number(evidence?.independentSlates);
   const playerRows = number(evidence?.playerRows ?? evaluation.sample_count);
   const reasons: string[] = [];
   if (evaluation.gate_decision !== 'PROMOTE') reasons.push('Evaluation has not received an explicit PROMOTE review decision.');
   if (!evaluation.reviewed_by || !evaluation.reviewed_at || !evaluation.review_note?.trim()) reasons.push('A named operator review with a note is required.');
   if (!evidence || evidence.eligible !== true) reasons.push(String(evidence?.reason ?? 'Stored evaluation does not contain a passing pre-registered promotion gate.'));
+  if (!/^[a-f0-9]{64}$/i.test(String(manifest?.holdoutDatasetSha256 ?? ''))) reasons.push('A frozen holdout dataset SHA-256 is required.');
+  if (!String(manifest?.holdoutWindow ?? '').trim() || manifest?.holdoutSplit !== 'CHRONOLOGICAL_SLATE_LOCK_TIME') reasons.push('A time-separated chronological holdout window and split manifest are required.');
   if (independentSlates < 30) reasons.push(`At least 30 independent holdout slates are required; recorded=${independentSlates}.`);
   if (playerRows < 100) reasons.push(`At least 100 paired holdout player rows are required; recorded=${playerRows}.`);
   return { eligible: reasons.length === 0, reasons, independentSlates, playerRows };

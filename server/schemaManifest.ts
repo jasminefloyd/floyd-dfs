@@ -1,9 +1,11 @@
+import { FDS_SCHEMA_VERSION } from '../src/lib/engine/contracts.js';
+
 /** Database ownership map for the FDS transport and persistence boundary.
  * Tenant-specific data is always keyed by tenant_id; service-role queries must still filter
  * tenant_id explicitly. Shared provider metadata is intentionally absent from this manifest.
  */
 export const FDS_SCHEMA_MANIFEST = {
-  version: 'fds.schema.v1',
+  version: FDS_SCHEMA_VERSION,
   tenant: 'public.tenants.id where slug = floyd-dfs',
   mappings: {
     canonicalPlayerProviderId: { table: 'floyd_dfs_player_provider_mappings', key: ['tenant_id', 'sport', 'provider', 'provider_player_id'], canonical: 'canonical_player_id', providerIdsAreStrings: true },

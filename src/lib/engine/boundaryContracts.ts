@@ -1,4 +1,4 @@
-import { ENGINE_CONTRACT_VERSION, FDS_TRANSPORT_CONTRACT_VERSION, isSupportedEngineContractVersion } from './contracts.js';
+import { ENGINE_CONTRACT_VERSION, FDS_ERROR_CODES, FDS_SCHEMA_VERSION, FDS_TRANSPORT_CONTRACT_VERSION, SUPPORTED_FDS_SCHEMA_VERSIONS, isSupportedEngineContractVersion } from './contracts.js';
 import type { ContestPayoutReadiness, FdsApiError, ModelEvaluation, NbaHouseReport, PortfolioSelection, SlateGame, StreetTeamSnapshot, ValidatedSlate } from './contracts.js';
 
 export class BoundaryContractError extends Error {
@@ -14,12 +14,16 @@ const supportedSport = (value: unknown): boolean => ['NBA', 'WNBA', 'MLB', 'NFL'
 
 function currentContract(value: Record<string, unknown>, path = 'contractVersion'): void {
   if (value.contractVersion !== ENGINE_CONTRACT_VERSION) throw new BoundaryContractError(path, `expected ${ENGINE_CONTRACT_VERSION}`);
+  assertCompatibleSchemaVersion(value.schemaVersion);
+}
+function assertCompatibleSchemaVersion(value: unknown): void {
+  if (value !== undefined && value !== null && (typeof value !== 'string' || !(SUPPORTED_FDS_SCHEMA_VERSIONS as readonly string[]).includes(value))) throw new BoundaryContractError('schemaVersion', `unsupported version ${String(value)}`);
 }
 function requireText(value: unknown, path: string): asserts value is string {
   if (!text(value)) throw new BoundaryContractError(path, 'required non-empty string');
 }
 function requireTime(value: unknown, path: string): asserts value is string {
-  if (!iso(value)) throw new BoundaryContractError(path, 'must be a valid timestamp');
+  if (!iso(value) || !/(?:Z|\+00:00)$/i.test(value)) throw new BoundaryContractError(path, 'must be a valid UTC ISO timestamp');
 }
 function requireTenant(value: Record<string, unknown>, expectedTenantId?: string, path = 'tenantId'): void {
   requireText(value.tenantId, path);
@@ -156,7 +160,7 @@ export function parseStreetTeamSnapshot(value: unknown, expectedTenantId?: strin
     if (Date.parse(raw.retrievedAt) > Date.parse(value.asOf)) throw new BoundaryContractError(`${path}.retrievedAt`, 'cannot be later than snapshot asOf');
     if (!['SUCCEEDED', 'EMPTY', 'FAILED', 'RATE_LIMITED'].includes(String(raw.status)) || !['FRESH', 'STALE', 'UNKNOWN'].includes(String(raw.freshness))) throw new BoundaryContractError(path, 'invalid provider status or freshness');
   }
-  return value as unknown as StreetTeamSnapshot;
+  return { ...value, schemaVersion: FDS_SCHEMA_VERSION } as unknown as StreetTeamSnapshot;
 }
 
 export interface NbaHouseBoundaryOptions {
@@ -205,7 +209,7 @@ export function parseNbaHouseReport(value: unknown, expected: NbaHouseBoundaryOp
     requireUniqueStrings(raw.evidenceIds, `${path}.evidenceIds`);
     if (expected.intelSnapshot && raw.evidenceIds.some((id) => !evidenceIds.has(id))) throw new BoundaryContractError(`${path}.evidenceIds`, 'references evidence outside the supplied intelligence snapshot');
   }
-  return value as unknown as NbaHouseReport;
+  return { ...value, schemaVersion: FDS_SCHEMA_VERSION } as unknown as NbaHouseReport;
 }
 
 export function parseContestPayoutReadiness(value: unknown, expectedTenantId?: string): ContestPayoutReadiness {
@@ -215,6 +219,7 @@ export function parseContestPayoutReadiness(value: unknown, expectedTenantId?: s
   for (const key of ['slateId', 'contestId']) requireText(value[key], key);
   requireTime(value.asOf, 'asOf');
   if (!['READY', 'PARTIAL', 'UNAVAILABLE'].includes(String(value.status))) throw new BoundaryContractError('status', 'invalid payout readiness');
+  if (!['READY', 'PROJECTION_ONLY', 'NEEDS_PAYOUTS', 'NEEDS_FIELD_CALIBRATION', 'INVALID'].includes(String(value.decisionStatus))) throw new BoundaryContractError('decisionStatus', 'invalid contest readiness status');
   if (!['VERIFIED', 'INCOMPLETE', 'UNAVAILABLE'].includes(String(value.payoutStatus))) throw new BoundaryContractError('payoutStatus', 'invalid payout status');
   if (!['CALIBRATED', 'EXPERIMENTAL', 'UNAVAILABLE'].includes(String(value.fieldModelStatus))) throw new BoundaryContractError('fieldModelStatus', 'invalid field model status');
   if (!Array.isArray(value.payoutTiers) || !Array.isArray(value.warnings)) throw new BoundaryContractError('$', 'payoutTiers and warnings must be arrays');
@@ -229,7 +234,7 @@ export function parseContestPayoutReadiness(value: unknown, expectedTenantId?: s
   if (value.fieldSize !== undefined && (!Number.isInteger(value.fieldSize) || (value.fieldSize as number) < 1)) throw new BoundaryContractError('fieldSize', 'must be a positive integer');
   if (value.fieldModelVersion !== undefined) requireText(value.fieldModelVersion, 'fieldModelVersion');
   if (value.status === 'READY' && (value.payoutStatus !== 'VERIFIED' || value.payoutTiers.length === 0 || value.fieldModelStatus !== 'CALIBRATED' || !text(value.fieldModelVersion) || !finite(value.entryFee) || !finite(value.fieldSize))) throw new BoundaryContractError('status', 'READY requires verified payout tiers, entry fee, field size, and a calibrated versioned field model');
-  return value as unknown as ContestPayoutReadiness;
+  return { ...value, schemaVersion: FDS_SCHEMA_VERSION } as unknown as ContestPayoutReadiness;
 }
 
 export interface PortfolioBoundaryOptions { expectedTenantId?: string; expectedSlateId?: string; expectedContestId?: string; expectedHouseReportId?: string; }
@@ -284,7 +289,7 @@ export function parsePortfolioSelection(value: unknown, expected: PortfolioBound
   if (value.cashProbability !== undefined && ((value.cashProbability as number) < 0 || (value.cashProbability as number) > 1)) throw new BoundaryContractError('cashProbability', 'must be between 0 and 1');
   if (value.fieldModelVersion !== undefined) requireText(value.fieldModelVersion, 'fieldModelVersion');
   if (readiness.status === 'READY' && value.fieldModelVersion !== readiness.fieldModelVersion) throw new BoundaryContractError('fieldModelVersion', 'must match the calibrated payout-readiness field model');
-  return value as unknown as PortfolioSelection;
+  return { ...value, schemaVersion: FDS_SCHEMA_VERSION } as unknown as PortfolioSelection;
 }
 
 export function parseModelEvaluation(value: unknown, expectedTenantId?: string): ModelEvaluation {
@@ -306,12 +311,13 @@ export function parseModelEvaluation(value: unknown, expectedTenantId?: string):
   if (!record(value.dataManifest)) throw new BoundaryContractError('dataManifest', 'expected an object');
   if (!['PROMOTE', 'HOLD', 'INSUFFICIENT_DATA'].includes(String(value.gateDecision))) throw new BoundaryContractError('gateDecision', 'invalid gate decision');
   if (value.gateDecision === 'PROMOTE' && Object.values(value.sampleCounts).every((count) => count === 0)) throw new BoundaryContractError('gateDecision', 'cannot promote an evaluation with no samples');
-  return value as unknown as ModelEvaluation;
+  return { ...value, schemaVersion: FDS_SCHEMA_VERSION } as unknown as ModelEvaluation;
 }
 
 /** Validate untrusted JSON before transport data enters the engine domain. */
 export function parseValidatedSlate(value: unknown, expectedTenantId?: string): ValidatedSlate {
   if (!record(value)) throw new BoundaryContractError('$', 'expected an object');
+  assertCompatibleSchemaVersion(value.schemaVersion);
   if (value.contractVersion !== undefined && !isSupportedEngineContractVersion(value.contractVersion)) throw new BoundaryContractError('contractVersion', `unsupported version ${String(value.contractVersion)}`);
   if (value.transportContractVersion !== undefined && value.transportContractVersion !== FDS_TRANSPORT_CONTRACT_VERSION) throw new BoundaryContractError('transportContractVersion', `unsupported version ${String(value.transportContractVersion)}`);
   for (const key of ['tenantId', 'slateId', 'requestId'] as const) if (!text(value[key])) throw new BoundaryContractError(key, 'required non-empty string');
@@ -328,7 +334,7 @@ export function parseValidatedSlate(value: unknown, expectedTenantId?: string): 
       if (player.photo.url !== null && (typeof player.photo.url !== 'string' || !player.photo.url.startsWith('https://'))) throw new BoundaryContractError(`playerPool[${i}].photo.url`, 'must be null or HTTPS');
     }
   }
-  return { ...value, games, transportContractVersion: FDS_TRANSPORT_CONTRACT_VERSION } as unknown as ValidatedSlate;
+  return { ...value, games, schemaVersion: FDS_SCHEMA_VERSION, transportContractVersion: FDS_TRANSPORT_CONTRACT_VERSION } as unknown as ValidatedSlate;
 }
 
 /** Compatibility adapter: old one-event payloads become a one-game games[] slate. */
@@ -349,8 +355,7 @@ export function normalizeSlateGames(slate: Pick<ValidatedSlate, 'event' | 'games
 }
 
 export function isFdsApiError(value: unknown): value is FdsApiError {
-  const codes = ['EMPTY_PLAYER_POOL','NO_LEGAL_LINEUP','PROVIDER_UNAVAILABLE','STALE_DATA','BOUNDED_SEARCH','UNAUTHORIZED','TENANT_MISMATCH','CONFLICT','VALIDATION_FAILED','INTERNAL_ERROR'];
-  if (!record(value) || !codes.includes(String(value.code)) || !text(value.safeMessage) || !text(value.requestId) || typeof value.retriable !== 'boolean' || !Array.isArray(value.reasons)) return false;
+  if (!record(value) || !(FDS_ERROR_CODES as readonly string[]).includes(String(value.code)) || !text(value.safeMessage) || !text(value.requestId) || typeof value.retriable !== 'boolean' || !Array.isArray(value.reasons)) return false;
   return value.reasons.every((reason) => record(reason) && text(reason.code) && text(reason.message));
 }
 
@@ -365,6 +370,7 @@ export function sanitizeProviderRoute(route: string): string {
 }
 
 /** JSON transport must preserve absent/null/zero distinctly; do not use truthy defaults. */
-export function serializeContract<T extends { contractVersion?: string; transportContractVersion?: string }>(value: T): string {
-  return JSON.stringify({ ...value, contractVersion: value.contractVersion ?? ENGINE_CONTRACT_VERSION, transportContractVersion: value.transportContractVersion ?? FDS_TRANSPORT_CONTRACT_VERSION });
+export function serializeContract<T extends { contractVersion?: string; transportContractVersion?: string; schemaVersion?: string }>(value: T): string {
+  assertCompatibleSchemaVersion(value.schemaVersion);
+  return JSON.stringify({ ...value, contractVersion: value.contractVersion ?? ENGINE_CONTRACT_VERSION, schemaVersion: FDS_SCHEMA_VERSION, transportContractVersion: value.transportContractVersion ?? FDS_TRANSPORT_CONTRACT_VERSION });
 }

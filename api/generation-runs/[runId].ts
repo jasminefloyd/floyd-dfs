@@ -25,6 +25,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (trust.error) throw trust.error;
     const traces = await context.db.from('floyd_dfs_lineup_decision_traces').select('lineup_candidate_key,trace_payload,content_sha256').eq('tenant_id', context.tenantId).eq('generation_run_id', id);
     if (traces.error) throw traces.error;
-    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [], trust: trust.data ?? null, decisionTraces: traces.data ?? [] });
+    const lineage = await context.db.from('floyd_dfs_generation_run_lineage').select('*').eq('tenant_id', context.tenantId).eq('generation_run_id', id).order('revision', { ascending: false }).limit(1).maybeSingle();
+    if (lineage.error) throw lineage.error;
+    const projectionArtifacts = lineage.data
+      ? await context.db.from('floyd_dfs_run_projection_artifacts').select('*').eq('tenant_id', context.tenantId).eq('generation_run_id', id).eq('lineage_revision', lineage.data.revision).order('artifact_type', { ascending: true })
+      : { data: [], error: null };
+    if (projectionArtifacts.error) throw projectionArtifacts.error;
+    const lineupRevisions = await context.db.from('floyd_dfs_lineup_revisions').select('*').eq('tenant_id', context.tenantId).eq('generation_run_id', id).order('generated_at', { ascending: true });
+    if (lineupRevisions.error) throw lineupRevisions.error;
+    res.status(200).json({ run: run.data, stages: stages.data ?? [], lineups: selection.data?.floyd_dfs_generated_lineups ?? [], trust: trust.data ?? null, decisionTraces: traces.data ?? [], lineage: lineage.data ?? null, projectionArtifacts: projectionArtifacts.data ?? [], lineupRevisions: lineupRevisions.data ?? [] });
   } catch (error) { respondError(req, res, error); }
 }

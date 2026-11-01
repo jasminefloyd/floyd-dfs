@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { SPORTS, CONTEST_TYPES } from '../lib/productConstants';
 import { listDraftKingsGameGroups, listDraftKingsSlates, type DraftKingsGameGroup, type DraftKingsSlate } from '../lib/draftkingsSlateClient';
 import { validateScanInput } from '../lib/validation';
+import { deriveMaxPlayerExposure } from '../lib/portfolioDefaults';
 
 export interface ScanParams {
   sport: string;
@@ -23,6 +24,7 @@ export interface ScanParams {
   lateSwapMode: boolean;
   entryCount: number;
   fieldSize: number;
+  manualContestTerms?: { confirmed: true; entryFee?: number; entryLimit?: number; payoutTiers?: Array<{ rank: number; payout: number }> };
   maxEntriesPerUser: number;
   payoutShape: string;
   ownershipWeight: number;
@@ -102,6 +104,10 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
   const [lineupMode, setLineupMode] = useState(DEFAULT_SCAN_OPTIONS.lineupMode);
   const [simulationMode, setSimulationMode] = useState<'baseline' | 'game_simulation' | 'compare'>('baseline');
   const [maxSharedPlayers, setMaxSharedPlayers] = useState<number | ''>('');
+  const [manualTermsConfirmed, setManualTermsConfirmed] = useState(false);
+  const [manualEntryFee, setManualEntryFee] = useState('');
+  const [manualEntryLimit, setManualEntryLimit] = useState('');
+  const [manualPayoutTiers, setManualPayoutTiers] = useState('');
   const [configLoaded, setConfigLoaded] = useState(false);
 
   useEffect(() => {
@@ -218,10 +224,36 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
       return;
     }
 
+    let manualContestTerms: ScanParams['manualContestTerms'];
+    if (manualTermsConfirmed) {
+      const terms: NonNullable<ScanParams['manualContestTerms']> = { confirmed: true };
+      if (manualEntryFee.trim()) {
+        const value = Number(manualEntryFee);
+        if (!Number.isFinite(value) || value <= 0) { onValidationError?.(['Manual entry fee must be a positive amount.']); return; }
+        terms.entryFee = value;
+      }
+      if (manualEntryLimit.trim()) {
+        const value = Number(manualEntryLimit);
+        if (!Number.isInteger(value) || value < 1 || value > 5000) { onValidationError?.(['Manual entry limit must be an integer from 1 to 5,000.']); return; }
+        terms.entryLimit = value;
+      }
+      if (manualPayoutTiers.trim()) {
+        const parsed = manualPayoutTiers.split(/[\n,]+/).map((part) => part.trim()).filter(Boolean).map((part) => {
+          const match = part.match(/^(\d+)\s*:\s*(\d+(?:\.\d{1,2})?)$/);
+          return match ? { rank: Number(match[1]), payout: Number(match[2]) } : null;
+        });
+        if (!parsed.length || parsed.some((item) => !item) || new Set(parsed.map((item) => item!.rank)).size !== parsed.length) { onValidationError?.(['Enter payout tiers as unique rank:amount pairs, separated by commas or new lines (for example, 1:1000, 2:500).']); return; }
+        terms.payoutTiers = parsed as Array<{ rank: number; payout: number }>;
+      }
+      if (terms.entryFee === undefined && terms.entryLimit === undefined && terms.payoutTiers === undefined) { onValidationError?.(['Enter at least one manual contest term before confirming.']); return; }
+      manualContestTerms = terms;
+    }
+
     const derived = deriveScanOptions({
       contestType,
       entryCount,
       fieldSize,
+      ...(manualContestTerms ? { manualContestTerms } : {}),
     payoutShape,
     lineupMode,
     maxSharedPlayers,
@@ -347,6 +379,26 @@ export function MIOS_FantasyScanner({ onScan, loading, loadingLabel, onValidatio
           ))}
         </select>
       </div>
+
+      <details className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <summary className="cursor-pointer text-sm font-bold text-[#0b1f3a]">Manual contest terms (optional)</summary>
+        <p className="mt-2 text-xs text-slate-600">Enter terms from the official contest page. Payout estimates remain unavailable until the field model is independently calibrated.</p>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <label className="text-xs font-semibold text-slate-700">Entry fee
+            <input type="number" min="0.01" step="0.01" value={manualEntryFee} onChange={(event) => setManualEntryFee(event.target.value)} disabled={loading} className={fieldClass} />
+          </label>
+          <label className="text-xs font-semibold text-slate-700">Contest entry limit
+            <input type="number" min="1" max="5000" step="1" value={manualEntryLimit} onChange={(event) => setManualEntryLimit(event.target.value)} disabled={loading} className={fieldClass} />
+          </label>
+        </div>
+        <label className="mt-2 block text-xs font-semibold text-slate-700">Payout tiers (rank:amount)
+          <textarea rows={3} value={manualPayoutTiers} onChange={(event) => setManualPayoutTiers(event.target.value)} disabled={loading} placeholder="1:1000, 2:500" className={`${fieldClass} mt-1`} />
+        </label>
+        <label className="mt-3 flex items-start gap-2 text-xs text-slate-700">
+          <input type="checkbox" checked={manualTermsConfirmed} onChange={(event) => setManualTermsConfirmed(event.target.checked)} disabled={loading} />
+          <span>I confirmed these terms against the official contest page.</span>
+        </label>
+      </details>
 
       <div className="grid grid-cols-2 gap-2">
         <label>
@@ -777,15 +829,12 @@ interface DerivedScanInput {
 function deriveScanOptions(input: DerivedScanInput) {
   const lineupMode = input.lineupMode;
   const maxEntriesPerUser = Math.min(150, Math.max(1, input.entryCount));
-  const maxPlayerExposure = input.entryCount <= 1
-    ? 1
-    : input.payoutShape === 'double_up'
-      ? 1
-      : input.payoutShape === 'flat'
-        ? 0.8
-        : input.entryCount <= 5
-          ? 0.6
-          : 0.5;
+  // With only two entries, a 60% cap floors to one allowed appearance per player.
+  // On a thin Showdown candidate set that can make a legal two-lineup portfolio
+  // impossible even when the overlap bound and distinct-captain rule are satisfied.
+  // Leave player reuse available for 1–2 entries; larger portfolios use the configured
+  // payout-shape exposure policy below.
+  const maxPlayerExposure = deriveMaxPlayerExposure(input.entryCount, input.payoutShape);
   const contestStrategy = deriveContestStrategy(input.fieldSize, input.payoutShape, maxEntriesPerUser, lineupMode);
   const simulationIterations = input.sport === 'mlb' && input.contestType === 'classic'
     ? input.entryCount > 1 ? 500 : 650

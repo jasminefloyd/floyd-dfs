@@ -88,6 +88,7 @@ const readinessInput = {
   contestId,
   asOf: cutoff,
   status: 'READY',
+  decisionStatus: 'READY',
   payoutStatus: 'VERIFIED',
   payoutTiers: [{ rank: 1, payout: 100 }],
   entryFee: 10,
@@ -131,7 +132,7 @@ assert.throws(() => parseModelEvaluation({ ...evaluationInput, evaluationWindow:
 assert.throws(() => parseModelEvaluation({ ...evaluationInput, gateDecision: 'PROMOTE', sampleCounts: { independentSlates: 0, playerRows: 0, lineupRows: 0, contestEntries: 0 } }), /no samples/);
 
 const flags = readFeatureFlags({});
-assert.deepEqual(flags, { STREET_TEAM_V2: false, NBA_HOUSE_V1: false, PORTFOLIO_EV_V1: false, LEARNING_V2: false });
+assert.deepEqual(flags, { STREET_TEAM_V2: false, NBA_HOUSE_V1: false, NBA_HOUSE_READ_V1: false, NBA_HOUSE_SHADOW_V1: false, NBA_HOUSE_CANARY_V1: false, NBA_HOUSE_ACTIVE_V1: false, NBA_HOUSE_KILL_SWITCH_V1: false, PORTFOLIO_EV_V1: false, LEARNING_V2: false });
 assert.equal(readFeatureFlags({ NBA_HOUSE_V1: 'true' }).NBA_HOUSE_V1, true);
 assert.equal(readFeatureFlags({ NBA_HOUSE_V1: '1' }).NBA_HOUSE_V1, false);
 assert.equal(readFeatureFlags({ NBA_HOUSE_V1: 'false' }).NBA_HOUSE_V1, false);

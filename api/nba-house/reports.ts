@@ -17,7 +17,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (typeof req.query.reportId === 'string' && req.query.reportId.trim()) query.eq('id', req.query.reportId.trim());
     const result = await query;
     if (result.error) throw result.error;
+    const runIds = [...new Set((result.data ?? []).flatMap((report) => report.generation_run_id ? [String(report.generation_run_id)] : []))];
+    const lineageByRun = new Map<string, Record<string, unknown>>();
+    for (let offset = 0; offset < runIds.length; offset += 300) {
+      const runs = await context.db.from('generation_runs').select('id,lineage').eq('tenant_id', context.tenantId).in('id', runIds.slice(offset, offset + 300));
+      if (runs.error) throw runs.error;
+      for (const run of runs.data ?? []) { const lineage = record(run.lineage); const assignment = record(lineage?.nbaHouseRolloutAssignment); if (assignment) lineageByRun.set(String(run.id), assignment); }
+    }
     cors(req, res);
-    res.status(200).json({ sport: 'NBA', reports: result.data ?? [] });
+    res.status(200).json({ sport: 'NBA', reports: (result.data ?? []).map((report) => ({ ...report, runtimeAssignment: report.generation_run_id ? lineageByRun.get(String(report.generation_run_id)) ?? null : null })) });
   } catch (error) { respondError(req, res, error); }
 }
+function record(value: unknown): Record<string, unknown> | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }

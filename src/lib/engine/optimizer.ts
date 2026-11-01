@@ -138,6 +138,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   applyFieldHeuristic(allRanked); // must run before field simulation, which weights construction
   const contestSimulation = simulateContestField(input.validatedSlate, allRanked, { seed: `${input.validatedSlate.slateId}:${input.validatedSlate.contest.draftKingsContestId}`, simulations: options.fieldSimulations, maxScoreComparisons: options.fieldMaxScoreComparisons }, input.projectionPackage.players);
   applyContestMetrics(allRanked, contestSimulation);
+  if (contestSimulation.readiness === 'UNVALIDATED') warnings.push('Projected-ownership field simulation is diagnostic only; win/cash probabilities, payout, profit, and ROI are withheld until contest-field validation passes.');
   const ranked = rankCandidates(allRanked, maxCandidates);
   const cashLineEstimate = computeCashLineEstimate(input.validatedSlate);
   if (cashLineEstimate) for (const candidate of ranked) candidate.cashLineProbability = rawCashLineProbability({ median: candidate.median, floor: candidate.floor, ceiling: candidate.ceiling, cashLine: cashLineEstimate.value }) ?? undefined;
@@ -148,7 +149,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const best = allRanked[0];
   const maxFptsUpperBound = maxFptsObjective && best ? exhaustive ? (best.expectedPoints ?? best.median) : maxFptsUpperBoundForSlots(workingInput) : undefined;
   const objectiveGap = maxFptsUpperBound === undefined || !best ? undefined : Math.max(0, maxFptsUpperBound - (best.expectedPoints ?? best.median));
-  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' || !exhaustive || contestSimulation.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED', searchCompleteness: exhaustive ? 'EXHAUSTIVE' : 'BOUNDED', ...(exhaustive ? { optimalityGap: 0 } : {}), searchDiagnostics: { algorithm: maxFptsObjective ? 'DETERMINISTIC_BRANCH_AND_BOUND' : 'DETERMINISTIC_VALUE_ORDERED_DFS', terminationReason: !exhaustive ? 'NODE_BUDGET' : searchControl.prunedBranches ? 'OBJECTIVE_BOUND_PROVEN' : 'SEARCH_SPACE_EXHAUSTED', nodesVisited: searchControl.visited, elapsedMilliseconds: Math.max(0, Date.now() - startedAt), candidatesEvaluated: searchControl.candidatesEvaluated, uniqueLineups: uniqueGenerated.length, bestIncumbentObjective: best ? objectiveScore(best, profile) : undefined, ...(maxFptsUpperBound !== undefined ? { validUpperBound: maxFptsUpperBound, objectiveGap } : {}) }, ...(options.portfolioConstraints ? { portfolioConstraints: options.portfolioConstraints } : {}), contestSimulation: { status: contestSimulation.status, simulations: contestSimulation.simulations, fieldEntries: contestSimulation.fieldEntries, fieldModel: contestSimulation.fieldModel, payoutModel: contestSimulation.payoutModel, reason: contestSimulation.reason, seed: contestSimulation.seed, ownershipProvenance: contestSimulation.ownershipProvenance, dependenceModel: contestSimulation.dependenceModel, rulesVersion: contestSimulation.rulesVersion }, ...(cashLineEstimate ? { cashLineEstimate } : {}) };
+  return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' || !exhaustive || contestSimulation.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED', searchCompleteness: exhaustive ? 'EXHAUSTIVE' : 'BOUNDED', ...(exhaustive ? { optimalityGap: 0 } : {}), searchDiagnostics: { algorithm: maxFptsObjective ? 'DETERMINISTIC_BRANCH_AND_BOUND' : 'DETERMINISTIC_VALUE_ORDERED_DFS', terminationReason: !exhaustive ? 'NODE_BUDGET' : searchControl.prunedBranches ? 'OBJECTIVE_BOUND_PROVEN' : 'SEARCH_SPACE_EXHAUSTED', nodesVisited: searchControl.visited, elapsedMilliseconds: Math.max(0, Date.now() - startedAt), candidatesEvaluated: searchControl.candidatesEvaluated, uniqueLineups: uniqueGenerated.length, bestIncumbentObjective: best ? objectiveScore(best, profile) : undefined, ...(maxFptsUpperBound !== undefined ? { validUpperBound: maxFptsUpperBound, objectiveGap } : {}) }, ...(options.portfolioConstraints ? { portfolioConstraints: options.portfolioConstraints } : {}), contestSimulation: { status: contestSimulation.status, simulations: contestSimulation.simulations, fieldEntries: contestSimulation.fieldEntries, fieldModel: contestSimulation.fieldModel, payoutModel: contestSimulation.payoutModel, readiness: contestSimulation.readiness, reason: contestSimulation.reason, seed: contestSimulation.seed, ownershipProvenance: contestSimulation.ownershipProvenance, dependenceModel: contestSimulation.dependenceModel, rulesVersion: contestSimulation.rulesVersion }, ...(cashLineEstimate ? { cashLineEstimate } : {}) };
 }
 
 function isExplicitlyUnavailable(player: SlatePlayer): boolean {
@@ -462,9 +463,12 @@ function meanOf(values: number[], fallback: number): number { return values.leng
 
 function applyContestMetrics(candidates: LineupCandidate[], simulation: ReturnType<typeof simulateContestField>): void {
   for (const candidate of candidates) {
-    const metrics = simulation.metrics.get(candidate.id);
-    if (!metrics) { candidate.contestMetricProvenance = 'UNAVAILABLE'; continue; }
-    Object.assign(candidate, metrics, { contestMetricProvenance: 'JOINT_FIELD_SIMULATION' });
+    // These opponent-field frequencies and payout calculations are exploratory until an
+    // independent chronological validation promotes a versioned field model. Do not attach
+    // them to candidate decision fields where UI or downstream code could treat them as EV.
+    candidate.contestMetricProvenance = simulation.readiness === 'CALIBRATED' && simulation.metrics.has(candidate.id)
+      ? 'JOINT_FIELD_SIMULATION'
+      : 'UNAVAILABLE';
   }
 }
 

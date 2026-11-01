@@ -9,13 +9,15 @@ export function PortfolioResults({ data, error }: { data: RecordValue | null; er
 
   const members = asRecords(data.members);
   const lineups = new Map(asRecords(data.lineups).map((lineup) => [String(lineup.id ?? ''), lineup]));
-  const entered = members.filter((member) => String(member.entry_status).toUpperCase() === 'ENTERED');
-  const settled = entered.filter((member) => finite(member.actual_payout) !== null);
-  const knownPayout = settled.reduce((sum, member) => sum + (finite(member.actual_payout) ?? 0), 0);
+  const cancelled = members.filter((member) => String(member.settlement_status ?? '').toUpperCase() === 'CANCELLED' || String(member.entry_status).toUpperCase() === 'WITHDRAWN');
+  const entered = members.filter((member) => String(member.entry_status).toUpperCase() === 'ENTERED' && String(member.settlement_status ?? '').toUpperCase() !== 'CANCELLED');
+  const settled = entered.filter((member) => String(member.settlement_status ?? '').toUpperCase() === 'VERIFIED' && finite(member.actual_payout) !== null && finite(member.refund_amount) !== null);
+  const knownPayout = settled.reduce((sum, member) => sum + (finite(member.actual_payout) ?? 0) + (finite(member.refund_amount) ?? 0), 0);
   const feesKnown = entered.every((member) => finite(member.entry_fee) !== null);
   const actualsComplete = entered.length > 0 && settled.length === entered.length;
   const entryFees = feesKnown ? entered.reduce((sum, member) => sum + (finite(member.entry_fee) ?? 0), 0) : null;
   const realizedNet = actualsComplete && entryFees !== null ? knownPayout - entryFees : null;
+  const realizedRoi = realizedNet !== null && entryFees !== null && entryFees > 0 ? realizedNet / entryFees : null;
   const financialEstimatesReady = data.financialEstimates === 'CALIBRATED'
     && portfolio.payout_status === 'VERIFIED'
     && portfolio.field_model_status === 'CALIBRATED';
@@ -26,10 +28,12 @@ export function PortfolioResults({ data, error }: { data: RecordValue | null; er
       <Metric label="Payout ladder" value={String(portfolio.payout_status ?? 'UNAVAILABLE')} />
       <Metric label="Opponent field" value={String(portfolio.field_model_status ?? 'UNAVAILABLE')} />
       <Metric label="Entered" value={`${entered.length} / ${members.length}`} />
+      <Metric label="Cancelled" value={String(cancelled.length)} />
       <Metric label="Realized net" value={realizedNet === null ? 'Unavailable' : amount(realizedNet)} />
+      <Metric label="Realized ROI" value={realizedRoi === null ? 'Unavailable' : `${(realizedRoi * 100).toFixed(1)}%`} />
     </div>
     {financialEstimatesReady ? <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 p-3 text-xs text-cyan-950"><p className="font-bold">Calibrated financial estimates</p><p className="mt-1">Estimated net payout: {amountOrUnavailable(portfolio.estimated_net_payout)} · Expected profit: {amountOrUnavailable(portfolio.expected_profit)} · Cash probability: {percentOrUnavailable(portfolio.cash_probability)}</p></div> : <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">Expected payout, profit, and cash probability are unavailable because the payout and calibrated field requirements are not both met.</p>}
-    {entered.length ? <p className="mt-3 text-xs text-slate-600">Verified payout recorded for {settled.length} of {entered.length} entered lineups{!actualsComplete ? '. Net return remains unavailable until every entered lineup has a reconciled payout.' : '.'}</p> : <p className="mt-3 text-xs text-slate-600">Mark a lineup entered to track its contest fee and reconciled result.</p>}
+    {entered.length ? <p className="mt-3 text-xs text-slate-600">Verified payout and refund recorded for {settled.length} of {entered.length} entered lineups{!actualsComplete ? '. Net return remains unavailable until every entered lineup has reconciled payout and refund evidence.' : '.'}</p> : <p className="mt-3 text-xs text-slate-600">Mark a lineup entered to track its contest fee and reconciled result.</p>}
     {members.length ? <ul className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">{members.map((member, index) => {
       const lineupId = String(member.lineup_id ?? '');
       const lineup = lineups.get(lineupId);
@@ -37,7 +41,10 @@ export function PortfolioResults({ data, error }: { data: RecordValue | null; er
       const rank = payload?.bulletNumber ?? lineup?.bullet_number ?? index + 1;
       const actualPayout = finite(member.actual_payout);
       const estimatedPayout = financialEstimatesReady ? finite(member.estimated_payout) : null;
-      return <li key={`${lineupId}:${String(member.lineup_revision ?? index)}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"><span className="font-bold text-[#0b1f3a]">Lineup #{String(rank)} · {String(member.entry_status ?? 'UNKNOWN')}</span><span className="text-right text-slate-600">{actualPayout !== null ? `Verified payout ${amount(actualPayout)}` : estimatedPayout !== null ? `Estimated payout ${amount(estimatedPayout)}` : 'Payout unavailable'}</span></li>;
+      const settlementStatus = String(member.settlement_status ?? (member.entry_status === 'ENTERED' ? 'ENTERED' : 'NOT_ENTERED'));
+      const verifiedPayout = settlementStatus === 'VERIFIED' ? actualPayout : null;
+      const refund = settlementStatus === 'VERIFIED' ? finite(member.refund_amount) : null;
+      return <li key={`${lineupId}:${String(member.lineup_revision ?? index)}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"><span className="font-bold text-[#0b1f3a]">Lineup #{String(rank)} · {settlementStatus.replaceAll('_', ' ')}</span><span className="text-right text-slate-600">{verifiedPayout !== null && refund !== null ? `Verified payout ${amount(verifiedPayout)} + refund ${amount(refund)}` : estimatedPayout !== null ? `Estimated payout ${amount(estimatedPayout)}` : 'Payout/refund unavailable'}</span></li>;
     })}</ul> : null}
   </section>;
 }

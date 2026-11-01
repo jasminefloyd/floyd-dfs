@@ -29,6 +29,18 @@ export type GenerationRunState =
 export const ENGINE_CONTRACT_VERSION = '2026-10-29.1';
 export const SUPPORTED_ENGINE_CONTRACT_VERSIONS = [ENGINE_CONTRACT_VERSION, '2026-10-21.1'] as const;
 export const FDS_TRANSPORT_CONTRACT_VERSION = 'fds.transport.v1';
+/** Shared version for JSON persisted or transported across FDS boundaries. */
+export const FDS_SCHEMA_VERSION = 'fds.schema.v1';
+export const SUPPORTED_FDS_SCHEMA_VERSIONS = [FDS_SCHEMA_VERSION] as const;
+export type ProviderQualifiedPlayerId = `${string}:${string}`;
+export const FDS_ERROR_CODES = [
+  'SOURCE_UNAVAILABLE', 'SOURCE_STALE', 'ENTITY_UNRESOLVED', 'ROSTER_CONFLICT',
+  'SNAPSHOT_NOT_READY', 'MODEL_NOT_APPROVED', 'CONTEST_NOT_READY', 'INVALID_LINEUP',
+  'OUTCOME_UNVERIFIED', 'EMPTY_PLAYER_POOL', 'NO_LEGAL_LINEUP', 'PROVIDER_UNAVAILABLE',
+  'STALE_DATA', 'BOUNDED_SEARCH', 'UNAUTHORIZED', 'TENANT_MISMATCH', 'CONFLICT',
+  'VALIDATION_FAILED', 'FEATURE_DISABLED', 'INVALID_REQUEST', 'INTERNAL_ERROR',
+] as const;
+export type FdsErrorCode = (typeof FDS_ERROR_CODES)[number];
 export type EngineRunMode = 'PRE_LOCK' | 'LIVE';
 
 export function isSupportedEngineContractVersion(value: unknown): value is (typeof SUPPORTED_ENGINE_CONTRACT_VERSIONS)[number] {
@@ -44,7 +56,7 @@ export interface CanonicalIdentity {
   eventId: string;
   gameId: string;
   teamId: string;
-  playerId: string;
+  playerId: ProviderQualifiedPlayerId;
   contestId: string;
   draftGroupId: string;
   gameType: ContestFormat;
@@ -238,7 +250,8 @@ export interface ProviderHealthResult {
 }
 
 export interface FdsApiError {
-  code: 'EMPTY_PLAYER_POOL' | 'NO_LEGAL_LINEUP' | 'PROVIDER_UNAVAILABLE' | 'STALE_DATA' | 'BOUNDED_SEARCH' | 'UNAUTHORIZED' | 'TENANT_MISMATCH' | 'CONFLICT' | 'VALIDATION_FAILED' | 'INTERNAL_ERROR';
+  schemaVersion?: string;
+  code: FdsErrorCode;
   safeMessage: string;
   requestId: string;
   retriable: boolean;
@@ -346,6 +359,7 @@ export interface ValidatedSlate {
   receivedAt: string;
   contractVersion?: string;
   transportContractVersion?: string;
+  schemaVersion?: string;
   games?: SlateGame[];
   runMode?: EngineRunMode;
   liveGameState?: LiveGameState;
@@ -375,6 +389,9 @@ export interface ValidatedSlate {
     paidPositions?: number;
     entryFee?: number;
     payoutStructure?: Array<{ rank: number; payout: number }>;
+    /** Only populated when explicitly supplied by a contest-specific source. */
+    tieHandling?: 'AVERAGE_PAYOUT_ACROSS_TIED_RANKS';
+    lateSwapAllowed?: boolean | null;
   };
   salaryCap: number;
   rosterRules: RosterRules;
@@ -467,6 +484,7 @@ export interface ProjectionPackage {
   version: number;
   generatedAt: string;
   contractVersion?: string;
+  schemaVersion?: string;
   modelVersion: string;
   simulationRuns: number;
   players: PlayerProjection[];
@@ -474,7 +492,7 @@ export interface ProjectionPackage {
   gaps: Array<{ reason: string }>;
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
   /** Scenario samples are experimental until calibrated against prospective actuals. */
-  gameSimulation?: { mode: 'BASELINE' | 'GAME_SIMULATION' | 'COMPARE'; modelVersion: string; seed: string; trials: number; dependence: 'CONNECTED_GAME_EVENTS'; releaseStatus: 'UNVALIDATED'; gameScenarios: Array<{ gameId: string; trial: number; teamScores: Record<string, number> }>; diagnostics?: { mappedGames: number; incompleteGames: number; simulatedPlayers: number; baselineFallbackPlayers: number; overtimeTrials: number; overtimeInputs: 'NOT_APPLICABLE' | 'SUPPLIED' | 'MISSING' | 'CONFLICTING'; scoreMarginDistributions?: Array<{ gameId: string; trials: number; medianAbsoluteMargin: number; p90AbsoluteMargin: number; p95AbsoluteMargin: number; maxAbsoluteMargin: number }>; covarianceChecks?: Array<{ gameId: string; trials: number; sameTeamPairCount: number; sameTeamMeanCovariance?: number; sameTeamMeanCorrelation?: number; sameTeamZeroVariancePairs: number; opposingTeamPairCount: number; opposingTeamMeanCovariance?: number; opposingTeamMeanCorrelation?: number; opposingTeamZeroVariancePairs: number }> }; comparison?: { baselineTopMedian?: number; gameSimulationTopMedian?: number; baselineCandidateCount: number; gameSimulationCandidateCount: number } };
+  gameSimulation?: { mode: 'BASELINE' | 'GAME_SIMULATION' | 'COMPARE'; modelVersion: string; seed: string; trials: number; gameScenarioCount?: number; batchSize?: number; maxComputeMs?: number; computeDurationMs?: number; completedTrials?: number; availabilitySnapshotId?: string; availabilitySnapshotAsOf?: string; projectionInputSha256?: string; dependence: 'CONNECTED_GAME_EVENTS'; releaseStatus: 'UNVALIDATED' | 'INCOMPLETE'; gameScenarios: Array<{ gameId: string; trial: number; teamScores: Record<string, number> }>; diagnostics?: { mappedGames: number; incompleteGames: number; simulatedPlayers: number; baselineFallbackPlayers: number; excludedInactivePlayers?: number; invariantViolations?: number; overtimeTrials: number; overtimeInputs: 'NOT_APPLICABLE' | 'SUPPLIED' | 'MISSING' | 'CONFLICTING'; scoreMarginDistributions?: Array<{ gameId: string; trials: number; medianAbsoluteMargin: number; p90AbsoluteMargin: number; p95AbsoluteMargin: number; maxAbsoluteMargin: number }>; covarianceChecks?: Array<{ gameId: string; trials: number; sameTeamPairCount: number; sameTeamMeanCovariance?: number; sameTeamMeanCorrelation?: number; sameTeamZeroVariancePairs: number; opposingTeamPairCount: number; opposingTeamMeanCovariance?: number; opposingTeamMeanCorrelation?: number; opposingTeamZeroVariancePairs: number }> }; comparison?: { baselineTopMedian?: number; gameSimulationTopMedian?: number; baselineCandidateCount: number; gameSimulationCandidateCount: number } };
   evidenceInputBoundary?: { numericInputs: 'STRUCTURED_PROVIDER_FIELDS'; acceptedEvidenceFactIds: string[]; researchProseUsedAsNumericInput: false; sourceManifest: Array<{ source: string; receivedAt: string; fields: string[] }> };
 }
 
@@ -562,6 +580,7 @@ export interface OptimizerPackage {
   version: number;
   generatedAt: string;
   contractVersion?: string;
+  schemaVersion?: string;
   objectiveProfile: ObjectiveProfile;
   candidates: LineupCandidate[];
   warnings: string[];
@@ -594,7 +613,13 @@ export interface OptimizerPackage {
     seed?: string;
     ownershipProvenance?: 'PROVIDER_SLOT_OWNERSHIP';
     dependenceModel?: 'INDEPENDENT_PLAYER_SAMPLES';
+    readiness?: 'UNVALIDATED' | 'CALIBRATED' | 'UNAVAILABLE';
     rulesVersion?: string;
+    jointFieldScenarios?: {
+      fieldModelVersion: string; datasetSha256: string; simulationVersion: string; seed: string;
+      slateId: string; contestId: string; asOf: string; rulesHash: string; candidateIds: string[];
+      opponentScoresByTrial: number[][]; candidateScoresById: Record<string, number[]>;
+    };
   };
 }
 
@@ -660,6 +685,7 @@ export interface ResearchPackage {
   version: number;
   generatedAt: string;
   contractVersion?: string;
+  schemaVersion?: string;
   freshThrough: string;
   findings: ResearchFinding[];
   observations?: SourceObservation[];
@@ -697,6 +723,7 @@ export interface AdjustmentPackage {
   version: number;
   generatedAt: string;
   contractVersion?: string;
+  schemaVersion?: string;
   adjustments: PlayerAdjustment[];
   researchGaps: unknown[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
@@ -731,7 +758,36 @@ export interface SelectionPackage {
   version: number;
   generatedAt: string;
   contractVersion?: string;
+  schemaVersion?: string;
   selectedLineups: SelectedLineup[];
+  portfolioOptimization?: {
+    modelVersion: string;
+    seed: string;
+    candidateSetSha256: string;
+    requestedCount: number;
+    entryLimit: number;
+    selectedCount: number;
+    objective: 'SAFE_SCORE_UPSIDE' | 'MAX_EXPECTED_NET_RETURN';
+    fieldReadiness: 'CALIBRATED' | 'UNVALIDATED' | 'UNAVAILABLE';
+    fieldReadinessReason?: string | null;
+    constraints: PortfolioConstraints;
+    rejectedConstraintCount: number;
+    status: 'COMPLETE' | 'OPTIMIZATION_PARTIAL';
+    globalOptimalityClaimed: false;
+    search?: { algorithm: 'BOUNDED_COMBINATION_ENUMERATION'; nodesVisited: number; nodeBudget: number; complete: boolean; constraintRejectedBranches: number };
+    fieldScenarioSetSha256?: string | null;
+    fieldScenarioDatasetSha256?: string | null;
+    fieldScenarioSeed?: string | null;
+    fieldScenarioSimulationVersion?: string | null;
+    fieldScenarioAsOf?: string | null;
+    fieldScenarioRulesHash?: string | null;
+    portfolioCashProbability?: number | null;
+    portfolioLossProbability?: number | null;
+    expectedNetReturn?: number | null;
+    expectedNetReturnStandardError?: number | null;
+    expectedNetReturnP10?: number | null;
+    expectedNetReturnP90?: number | null;
+  };
   optimizerGap?: string;
   warnings: string[];
   status: 'COMPLETE' | 'PARTIAL' | 'BLOCKED';
@@ -802,6 +858,7 @@ export interface StreetTeamProviderDiagnostic {
 /** Immutable as-of record shared by sport-specific Houses. */
 export interface StreetTeamSnapshot {
   contractVersion: string;
+  schemaVersion?: string;
   snapshotId: string;
   tenantId: string;
   sport: Sport;
@@ -837,6 +894,7 @@ export interface NbaHouseScenarioDistribution {
 
 export interface NbaHouseReport {
   contractVersion: string;
+  schemaVersion?: string;
   houseReportId: string;
   tenantId: string;
   sport: 'NBA';
@@ -849,6 +907,9 @@ export interface NbaHouseReport {
   baselineProjections: ProjectionPackage;
   adjustedProjections: ProjectionPackage;
   driverAttributions: NbaHouseDriverAttribution[];
+  /** Internal shadow artifacts retained alongside the public House contract. */
+  candidateProjection?: ProjectionPackage;
+  driverDecisions?: unknown;
   scenarioDistributions: NbaHouseScenarioDistribution[];
   trustStatus: 'VALIDATED' | 'UNVALIDATED' | 'PARTIAL' | 'BLOCKED';
   unknowns: string[];
@@ -857,11 +918,13 @@ export interface NbaHouseReport {
 
 export interface ContestPayoutReadiness {
   contractVersion: string;
+  schemaVersion?: string;
   tenantId: string;
   slateId: string;
   contestId: string;
   asOf: string;
   status: 'READY' | 'PARTIAL' | 'UNAVAILABLE';
+  decisionStatus: 'READY' | 'PROJECTION_ONLY' | 'NEEDS_PAYOUTS' | 'NEEDS_FIELD_CALIBRATION' | 'INVALID';
   payoutStatus: 'VERIFIED' | 'INCOMPLETE' | 'UNAVAILABLE';
   payoutTiers: Array<{ rank: number; payout: number }>;
   entryFee?: number;
@@ -873,6 +936,7 @@ export interface ContestPayoutReadiness {
 
 export interface PortfolioSelection {
   contractVersion: string;
+  schemaVersion?: string;
   portfolioId: string;
   tenantId: string;
   slateId: string;
@@ -896,6 +960,7 @@ export interface PortfolioSelection {
 
 export interface ModelEvaluation {
   contractVersion: string;
+  schemaVersion?: string;
   evaluationId: string;
   tenantId: string;
   sport: Sport;

@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider.js';
+import type { SportsDataIoClient, SportsDataIoQuotaState } from '../src/lib/engine/sportsDataIoProvider.js';
 import { DEFAULT_RSS_FEEDS, parseRss } from '../src/lib/engine/rssProvider.js';
+import { scoutWorkUnits } from './streetTeam/scoutAssignments.js';
+import { resolveAvailabilityStatuses } from './streetTeam/conflictResolver.js';
+import type { NbaRefreshKind } from './streetTeam/scheduler.js';
 
 export interface NbaStreetTeamObservationInput {
   id: string;
@@ -20,6 +23,8 @@ export interface NbaStreetTeamObservationInput {
 }
 
 export interface NbaStreetTeamProviderResult {
+  providerQuotaState?: SportsDataIoQuotaState;
+  providerCallCount?: number;
   rosterAvailable: boolean;
   observations: NbaStreetTeamObservationInput[];
   providerDiagnostics: Array<{ provider: string; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED' | 'RATE_LIMITED'; retrievedAt: string; freshness: 'FRESH' | 'STALE' | 'UNKNOWN'; errorCode?: string }>;
@@ -27,7 +32,7 @@ export interface NbaStreetTeamProviderResult {
   rosterState: Array<{ teamId: string; playerId: string; status: string; validFrom: string; evidenceIds: string[] }>;
   availability: Array<{ playerId: string; status: string; observedAt: string; evidenceIds: string[] }>;
   transactions: Array<{ playerId: string; transactionType: string; effectiveAt: string; evidenceIds: string[] }>;
-  resolvedFacts: Array<{ id: string; subject: { kind: 'PLAYER' | 'TEAM' | 'EVENT' | 'LEAGUE'; id: string }; factType: string; value: unknown; observationIds: string[]; confidence: number; effectiveAt?: string; resolvedAt: string; ruleVersion: string }>;
+  resolvedFacts: Array<{ id: string; subject: { kind: 'PLAYER' | 'TEAM' | 'EVENT' | 'LEAGUE'; id: string }; factType: string; value: unknown; observationIds: string[]; confidence: number; effectiveAt?: string; resolvedAt: string; ruleVersion: string; state?: 'ACCEPTED' | 'CONFLICT' | 'UNKNOWN' }>;
 }
 
 type JsonRow = Record<string, unknown>;
@@ -47,24 +52,43 @@ export class SportsDataIoNbaStreetTeamProvider {
     this.fetcher = fetcher;
   }
 
-  async collect(input: { windowStart: Date; asOf?: Date; signal?: AbortSignal }): Promise<NbaStreetTeamProviderResult> {
+  async collect(input: { windowStart: Date; asOf?: Date; signal?: AbortSignal; refreshKind?: NbaRefreshKind }): Promise<NbaStreetTeamProviderResult> {
     const date = easternFeedDate(input.asOf ?? this.now());
     const priorDate = easternFeedDate(input.windowStart);
-    const feedSpecs = [
+    const allFeedSpecs = [
       { name: 'SportsDataIO NBA Players', route: '/nba/scores/json/Players', sourceUrl: this.client.sourceUrl('NBA', 'scores', 'Players'), call: () => this.client.get<unknown>('NBA', 'scores', 'Players', undefined, input.signal) },
       { name: 'SportsDataIO NBA InjuredPlayers', route: '/nba/projections/json/InjuredPlayers', sourceUrl: this.client.sourceUrl('NBA', 'projections', 'InjuredPlayers'), call: () => this.client.get<unknown>('NBA', 'projections', 'InjuredPlayers', undefined, input.signal) },
       { name: 'SportsDataIO NBA StartingLineupsByDate', route: `/nba/projections/json/StartingLineupsByDate/${date}`, sourceUrl: this.client.sourceUrl('NBA', 'projections', 'StartingLineupsByDate', date), call: () => this.client.get<unknown>('NBA', 'projections', 'StartingLineupsByDate', date, input.signal) },
       { name: 'SportsDataIO NBA TransactionsByDate', route: `/nba/scores/json/TransactionsByDate/${date}`, sourceUrl: this.client.sourceUrl('NBA', 'scores', 'TransactionsByDate', date), call: () => this.client.get<unknown>('NBA', 'scores', 'TransactionsByDate', date, input.signal) },
       ...(priorDate === date ? [] : [{ name: 'SportsDataIO NBA TransactionsByDate (prior day)', route: `/nba/scores/json/TransactionsByDate/${priorDate}`, sourceUrl: this.client.sourceUrl('NBA', 'scores', 'TransactionsByDate', priorDate), call: () => this.client.get<unknown>('NBA', 'scores', 'TransactionsByDate', priorDate, input.signal) }]),
     ];
-    const results = await Promise.all(feedSpecs.map(async (feed): Promise<FeedResult> => {
+    const refreshKind = input.refreshKind ?? 'FULL';
+    const feedSpecs = allFeedSpecs.filter((feed) => {
+      if (refreshKind === 'FULL') return true;
+      if (feed.name.endsWith('Players') || feed.name.endsWith('InjuredPlayers')) return true;
+      if ((refreshKind === 'LINEUPS' || refreshKind === 'PRE_LOCK_VERIFY') && feed.name.endsWith('StartingLineupsByDate')) return true;
+      if (refreshKind === 'TRANSACTIONS' && feed.name.includes('TransactionsByDate')) return true;
+      return false;
+    });
+    const results: FeedResult[] = [];
+    let credentialsInvalid = false;
+    let rateLimitCircuitOpen = false;
+    for (const feed of feedSpecs) {
       const retrievedAt = this.now().toISOString();
+      if (credentialsInvalid || rateLimitCircuitOpen) {
+        results.push({ name: feed.name, route: feed.route, sourceUrl: feed.sourceUrl, retrievedAt, error: new Error(credentialsInvalid ? 'Provider requests stopped after invalid credentials were detected.' : 'Provider requests stopped after an HTTP 429 rate-limit response.') });
+        continue;
+      }
       try {
         const payload = await feed.call();
         if (!Array.isArray(payload)) throw new Error('Provider returned a non-array NBA feed.');
-        return { name: feed.name, route: feed.route, sourceUrl: feed.sourceUrl, retrievedAt, rows: payload.flatMap((row) => asRow(row) ? [asRow(row)!] : []) };
-      } catch (error) { return { name: feed.name, route: feed.route, sourceUrl: feed.sourceUrl, retrievedAt, error }; }
-    }));
+        results.push({ name: feed.name, route: feed.route, sourceUrl: feed.sourceUrl, retrievedAt, rows: payload.flatMap((row) => asRow(row) ? [asRow(row)!] : []) });
+      } catch (error) {
+        if (/HTTP 401|HTTP 403/.test(errorText(error))) credentialsInvalid = true;
+        if (/HTTP 429/.test(errorText(error))) rateLimitCircuitOpen = true;
+        results.push({ name: feed.name, route: feed.route, sourceUrl: feed.sourceUrl, retrievedAt, error });
+      }
+    }
 
     const diagnostics = results.map((result) => ({
       provider: result.name,
@@ -102,10 +126,10 @@ export class SportsDataIoNbaStreetTeamProvider {
       unknowns.push({ subjectId: `nba:player:sportsdataio:${id}`, question: 'Resolve conflicting NBA roster identity records.', reason: 'The same SportsDataIO PlayerID was returned with different names or teams; it was quarantined.' });
     }
 
-    const injuryById = new Map<string, JsonRow>();
+    const injuryById = new Map<string, JsonRow[]>();
     for (const row of [...rosterRecords.filter((item) => readText(item.InjuryStatus)), ...(injuriesFeed?.rows ?? [])]) {
       const id = readId(row.PlayerID);
-      if (id && readText(row.InjuryStatus)) injuryById.set(id, row);
+      if (id && readText(row.InjuryStatus)) injuryById.set(id, [...(injuryById.get(id) ?? []), row]);
     }
     const dkPlayerIds = new Map<string, Set<string>>();
     for (const [providerPlayerId, row] of rosterById) {
@@ -131,9 +155,10 @@ export class SportsDataIoNbaStreetTeamProvider {
       facts.push({ id: factId, subject: { kind: 'PLAYER', id: canonicalId }, factType: 'roster.membership', value: { displayName: name, providerPlayerId, teamId: readId(row.TeamID) ? `nba:team:sportsdataio:${readId(row.TeamID)}` : `nba:team:key:${team}`, team, providerStatus: readText(row.Status) ?? 'UNKNOWN', draftKingsPlayerId: draftKingsId ?? null }, observationIds: [rosterObservation.id], confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, resolvedAt: retrievedAt, ruleVersion: 'street-team.identity.v1' });
     }
 
-    for (const [providerPlayerId, injury] of injuryById) {
+    for (const [providerPlayerId, injuryRows] of injuryById) {
       const roster = rosterById.get(providerPlayerId);
       const canonicalId = `nba:player:sportsdataio:${providerPlayerId}`;
+      const injury = injuryRows[injuryRows.length - 1];
       const name = readText(injury.Name) ?? (roster ? readText(roster.Name) ?? joinName(roster) : undefined);
       const team = readText(injury.Team) ?? (roster ? readText(roster.Team) : undefined);
       const status = readText(injury.InjuryStatus);
@@ -141,17 +166,21 @@ export class SportsDataIoNbaStreetTeamProvider {
         unknowns.push({ subjectId: canonicalId, question: 'Resolve NBA injury status to a roster identity.', reason: 'An injury record lacked a stable matching player identity, team, or status and was not applied to current state.' });
         continue;
       }
-      const retrievedAt = injuriesFeed?.rows?.includes(injury) ? injuriesFeed.retrievedAt : rosterFeed?.retrievedAt ?? this.now().toISOString();
-      const observation = makeObservation({
-        provider: 'SportsDataIO', route: injuriesFeed?.rows?.includes(injury) ? injuriesFeed.route : rosterFeed?.route ?? '/nba/scores/json/Players', sourceUrl: injuriesFeed?.rows?.includes(injury) ? injuriesFeed.sourceUrl : rosterFeed?.sourceUrl,
-        sourceRecordId: providerPlayerId, subjectKind: 'PLAYER', subjectId: canonicalId,
-        claim: `${name} has NBA injury status “${status}” in the SportsDataIO feed.`, confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, retrievedAt,
-        payload: { playerId: providerPlayerId, name, team, injuryStatus: status, injuryBodyPart: readText(injury.InjuryBodyPart) ?? null, injuryStartDate: readText(injury.InjuryStartDate) ?? null, injuryNote: readText(injury.InjuryNote) ?? null },
+      const statusObservations = injuryRows.flatMap((row) => {
+        const rawStatus = readText(row.InjuryStatus);
+        if (!rawStatus) return [];
+        const fromInjuriesFeed = injuriesFeed?.rows?.includes(row) ?? false;
+        const retrievedAt = fromInjuriesFeed ? injuriesFeed!.retrievedAt : rosterFeed?.retrievedAt ?? this.now().toISOString();
+        const observation = makeObservation({ provider: 'SportsDataIO', route: fromInjuriesFeed ? injuriesFeed!.route : rosterFeed?.route ?? '/nba/scores/json/Players', sourceUrl: fromInjuriesFeed ? injuriesFeed!.sourceUrl : rosterFeed?.sourceUrl, sourceRecordId: `${providerPlayerId}:${rawStatus}:${retrievedAt}`, subjectKind: 'PLAYER', subjectId: canonicalId, claim: `${name} has NBA injury status “${rawStatus}” in the SportsDataIO feed.`, confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, retrievedAt, payload: { playerId: providerPlayerId, name, team, injuryStatus: rawStatus, injuryBodyPart: readText(row.InjuryBodyPart) ?? null, injuryStartDate: readText(row.InjuryStartDate) ?? null, injuryNote: readText(row.InjuryNote) ?? null } });
+        observations.push(observation);
+        return [{ rawStatus, normalizedStatus: normalizedAvailability(rawStatus), observationId: observation.id, retrievedAt }];
       });
-      observations.push(observation);
-      const availability = normalizedAvailability(status);
-      const factId = stableId(`fact:availability:${providerPlayerId}:${status}:${retrievedAt}`);
-      facts.push({ id: factId, subject: { kind: 'PLAYER', id: canonicalId }, factType: 'availability.injury_status', value: { status, normalizedStatus: availability }, observationIds: [observation.id], confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, resolvedAt: retrievedAt, ruleVersion: 'street-team.availability.v1' });
+      const resolution = resolveAvailabilityStatuses(statusObservations);
+      if (resolution.state === 'CONFLICT') unknowns.push({ subjectId: canonicalId, question: 'Resolve conflicting NBA injury-status observations.', reason: `SportsDataIO returned conflicting normalized availability states (${resolution.rawStatuses.join(', ')}); both observations were retained and current status is UNKNOWN.` });
+      const retrievedAtValues = statusObservations.map((item) => item.retrievedAt).sort();
+      const resolvedAt = retrievedAtValues[retrievedAtValues.length - 1] ?? this.now().toISOString();
+      const factId = stableId(`fact:availability:${providerPlayerId}:${resolution.status}:${resolution.observationIds.join(':')}`);
+      facts.push({ id: factId, subject: { kind: 'PLAYER', id: canonicalId }, factType: 'availability.injury_status', value: { status: resolution.rawStatuses.join(' | ') || status, normalizedStatus: resolution.status, conflictingStatuses: resolution.state === 'CONFLICT' ? resolution.rawStatuses : undefined }, observationIds: resolution.observationIds, confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, resolvedAt, ruleVersion: 'street-team.availability.v1', state: resolution.state });
     }
 
     for (const feed of transactionFeeds) {
@@ -215,7 +244,7 @@ export class SportsDataIoNbaStreetTeamProvider {
     }
 
     const nbaNewsFeeds = DEFAULT_RSS_FEEDS.filter((feed) => feed.tags?.includes('NBA') && ['ESPN NBA', 'RotoWire NBA'].includes(feed.name));
-    const newsResults = await Promise.all(nbaNewsFeeds.map(async (feed) => {
+    const newsResults = refreshKind === 'FULL' ? await Promise.all(nbaNewsFeeds.map(async (feed) => {
       const retrievedAt = this.now().toISOString();
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(new Error('NBA news feed timed out.')), 8_000);
@@ -226,7 +255,8 @@ export class SportsDataIoNbaStreetTeamProvider {
         return { feed, retrievedAt, articles: parseRss(await response.text(), feed, new Date(retrievedAt)), error: undefined };
       } catch (error) { return { feed, retrievedAt, articles: [], error }; }
       finally { clearTimeout(timeout); }
-    }));
+    })) : [];
+    const syndicatedStories = new Map<string, number>();
     for (const result of newsResults) {
       diagnostics.push({ provider: result.feed.name, status: result.error ? /HTTP 429/.test(errorText(result.error)) ? 'RATE_LIMITED' : 'FAILED' : result.articles.length ? 'SUCCEEDED' : 'EMPTY', retrievedAt: result.retrievedAt, freshness: result.error ? 'UNKNOWN' : 'FRESH', ...(result.error ? { errorCode: safeErrorCode(result.error) } : {}) });
       if (result.error) {
@@ -246,9 +276,20 @@ export class SportsDataIoNbaStreetTeamProvider {
         });
         const uniqueMatches = [...new Set(matchingPlayers)];
         if (uniqueMatches.length > 1) unknowns.push({ question: `Resolve multiple player mentions in an NBA news item from ${article.sourceName}.`, reason: 'The item is retained as league-level context because more than one roster identity matched.' });
-        const newsId = stableHash(`${article.sourceName}:${article.url ?? article.title}:${publishedAt ?? ''}`);
         const sourceUrl = article.url?.startsWith('https://') ? article.url : result.feed.url;
-        observations.push(makeObservation({ provider: article.sourceName, route: new URL(sourceUrl).pathname, sourceUrl, sourceRecordId: newsId, subjectKind: uniqueMatches.length === 1 ? 'PLAYER' : 'LEAGUE', subjectId: uniqueMatches.length === 1 ? uniqueMatches[0] : 'nba:league', claim: `${article.title}${article.summary ? ` — ${article.summary}` : ''}`, confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, retrievedAt: result.retrievedAt, publishedAt, payload: { title: article.title, summary: article.summary ?? null, articleUrl: article.url ?? null, publishedAt: publishedAt ?? null } }));
+        const clusterKey = article.url?.startsWith('https://') ? normalizeStoryUrl(article.url) : undefined;
+        if (clusterKey && syndicatedStories.has(clusterKey)) {
+          const existingIndex = syndicatedStories.get(clusterKey)!;
+          const existing = observations[existingIndex]!;
+          const sources = new Set([...(Array.isArray(existing.payload.duplicateSources) ? existing.payload.duplicateSources as string[] : [existing.provider]), article.sourceName]);
+          const urls = new Set([...(Array.isArray(existing.payload.duplicateSourceUrls) ? existing.payload.duplicateSourceUrls as string[] : [existing.sourceUrl]), sourceUrl]);
+          observations[existingIndex] = { ...existing, payload: { ...existing.payload, duplicateSources: [...sources], duplicateSourceUrls: [...urls] } };
+          continue;
+        }
+        const newsId = stableHash(`${article.sourceName}:${article.url ?? article.title}:${publishedAt ?? ''}`);
+        const newsObservation = makeObservation({ provider: article.sourceName, route: new URL(sourceUrl).pathname, sourceUrl, sourceRecordId: newsId, subjectKind: uniqueMatches.length === 1 ? 'PLAYER' : 'LEAGUE', subjectId: uniqueMatches.length === 1 ? uniqueMatches[0] : 'nba:league', claim: `${article.title}${article.summary ? ` — ${article.summary}` : ''}`, confidence: UNCALIBRATED_SINGLE_SOURCE_CONFIDENCE, retrievedAt: result.retrievedAt, publishedAt, payload: { title: article.title, summary: article.summary ?? null, articleUrl: article.url ?? null, publishedAt: publishedAt ?? null, ...(clusterKey ? { duplicateClusterId: stableHash(clusterKey), duplicateSources: [article.sourceName], duplicateSourceUrls: [sourceUrl] } : {}) } });
+        observations.push(newsObservation);
+        if (clusterKey) syndicatedStories.set(clusterKey, observations.length - 1);
       }
     }
 
@@ -267,7 +308,7 @@ export class SportsDataIoNbaStreetTeamProvider {
       if (injuredPlayers.has(lineupFact.subject.id) && /STARTING/i.test(lineup.status)) unknowns.push({ subjectId: lineupFact.subject.id, question: 'Resolve conflicting NBA injury and starting lineup records.', reason: 'SportsDataIO simultaneously reported an OUT/DOUBTFUL injury state and a starting lineup assignment; both source records are preserved.' });
     }
     const transactions = facts.filter((fact) => fact.factType === 'transaction.record').map((fact) => { const value = fact.value as { transactionType: string; fromTeamId?: string; toTeamId?: string; transactionDate: string }; return { playerId: fact.subject.id, transactionType: value.transactionType, effectiveAt: fact.effectiveAt ?? dateOnlyTimestamp(value.transactionDate), evidenceIds: fact.observationIds }; });
-    return { rosterAvailable: rosterById.size > 0, observations, providerDiagnostics: diagnostics, unknowns, rosterState, availability, transactions, resolvedFacts: facts };
+    return { providerQuotaState: this.client.latestQuotaState, providerCallCount: this.client.requestsMade, rosterAvailable: rosterById.size > 0, observations, providerDiagnostics: diagnostics, unknowns, rosterState, availability, transactions, resolvedFacts: facts };
   }
 }
 
@@ -276,11 +317,15 @@ function makeObservation(input: { provider: string; route: string; sourceUrl?: s
   const hex = createHash('sha256').update(`${input.provider}:${input.route}:${input.sourceRecordId ?? input.subjectId}:${hash}:${input.retrievedAt}`).digest('hex').slice(0, 32).split('');
   hex[12] = '5'; hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
   const id = hex.join('');
-  return { ...input, id: `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`, sourceUrl: input.sourceUrl ?? `https://api.sportsdata.io/v3${input.route}`, classification: 'SINGLE_SOURCE_REPORT', observedAt: input.retrievedAt, retrievedAt: input.retrievedAt };
+  const sourceTier = input.provider === 'SportsDataIO' ? 'PRIMARY_PROVIDER' : 'NEWS_PUBLISHER';
+  const workUnits = scoutWorkUnits(input.provider, input.route, input.claim);
+  const quantifiable = workUnits.some((unit) => ['ROSTER', 'INJURY', 'ROTATION', 'STATISTICAL_TREND'].includes(unit));
+  return { ...input, payload: { ...input.payload, sourceTier, rawClaim: input.claim, normalizedClaim: input.claim, quantifiable, scoutWorkUnits: workUnits }, id: `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`, sourceUrl: input.sourceUrl ?? `https://api.sportsdata.io/v3${input.route}`, classification: 'SINGLE_SOURCE_REPORT', observedAt: input.retrievedAt, retrievedAt: input.retrievedAt };
 }
-function normalizedAvailability(value: string): string { return ({ probable: 'PROBABLE', questionable: 'QUESTIONABLE', doubtful: 'DOUBTFUL', out: 'OUT' } as Record<string, string>)[value.trim().toLowerCase()] ?? 'UNKNOWN'; }
+function normalizedAvailability(value: string): string { return ({ probable: 'AVAILABLE', active: 'AVAILABLE', available: 'AVAILABLE', healthy: 'AVAILABLE', questionable: 'QUESTIONABLE', doubtful: 'DOUBTFUL', out: 'OUT' } as Record<string, string>)[value.trim().toLowerCase()] ?? 'UNKNOWN'; }
 function dateOnlyTimestamp(value: string): string { return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00.000Z` : Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : value; }
 function stableHash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+function normalizeStoryUrl(value: string): string { const url = new URL(value); url.hash = ''; url.search = ''; url.hostname = url.hostname.replace(/^www\./, '').toLowerCase(); url.pathname = url.pathname.replace(/\/+$/, '') || '/'; return url.toString(); }
 function includesFullName(text: string, name: string): boolean { const textWords = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/); const nameWords = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/); return nameWords.join('').length >= 6 && textWords.some((_, start) => nameWords.every((word, offset) => textWords[start + offset] === word)); }
 function easternFeedDate(value: Date): string { const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'short', day: '2-digit' }).formatToParts(value); const part = (type: string) => parts.find((item) => item.type === type)?.value ?? ''; return `${part('year')}-${part('month').toUpperCase()}-${part('day')}`; }
 function asRow(value: unknown): JsonRow | undefined { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRow : undefined; }
@@ -289,4 +334,4 @@ function readId(value: unknown): string | undefined { return typeof value === 's
 function joinName(row: JsonRow): string | undefined { const first = readText(row.FirstName); const last = readText(row.LastName); return first && last ? `${first} ${last}` : undefined; }
 function stableId(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : 'provider request failed'; }
-function safeErrorCode(error: unknown): string { const message = errorText(error); const status = /HTTP (\d{3})/.exec(message)?.[1]; return status ? `HTTP_${status}` : /timed? ?out|abort/i.test(message) ? 'TIMEOUT' : 'PROVIDER_ERROR'; }
+function safeErrorCode(error: unknown): string { const message = errorText(error); if (/HTTP 401|HTTP 403/.test(message)) return 'CREDENTIALS_INVALID'; const status = /HTTP (\d{3})/.exec(message)?.[1]; return status ? `HTTP_${status}` : /timed? ?out|abort/i.test(message) ? 'TIMEOUT' : 'PROVIDER_ERROR'; }

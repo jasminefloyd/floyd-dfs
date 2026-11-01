@@ -1,9 +1,10 @@
 import type { LineupCandidate, PlayerProjection, SlatePlayer, ValidatedSlate } from './contracts.js';
 import { salaryForRosterSlot, validateLineupCandidate } from './validation.js';
 
-export interface ContestSimulationOptions { simulations?: number; fieldEntries?: number; seed?: string; maxScoreComparisons?: number; }
+export interface ContestSimulationOptions { simulations?: number; fieldEntries?: number; seed?: string; maxScoreComparisons?: number; fieldModelReadiness?: 'CALIBRATED' | 'UNVALIDATED'; }
 export interface ContestSimulationResult {
   status: 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE'; simulations: number; fieldEntries?: number;
+  readiness: 'UNVALIDATED' | 'CALIBRATED' | 'UNAVAILABLE';
   fieldModel: 'PROJECTED_OWNERSHIP' | 'UNAVAILABLE'; payoutModel: 'CONTEST_PAYOUT_STRUCTURE' | 'UNAVAILABLE';
   reason?: string;
   seed?: string; ownershipProvenance?: 'PROVIDER_SLOT_OWNERSHIP'; dependenceModel?: 'INDEPENDENT_PLAYER_SAMPLES'; rulesVersion?: string;
@@ -47,6 +48,10 @@ export function simulateContestField(slate: ValidatedSlate, candidates: LineupCa
     const lineup = sampleLegalLineup(slate, random);
     if (!lineup) return unavailable(`Could not construct legal ownership-weighted opponent lineup ${index + 1}/${fieldEntries}; the field model is incomplete.`);
     field.push({ rosterSlots: lineup, playerIds: Object.values(lineup) });
+  }
+
+  if (options.fieldModelReadiness !== 'CALIBRATED') {
+    return { status: 'COMPLETE', readiness: 'UNVALIDATED', simulations, fieldEntries, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: 'UNAVAILABLE', reason: 'Ownership-weighted opponent field is experimental; win/cash probabilities, payout, profit, and ROI are withheld pending chronological field validation.', seed, ownershipProvenance: 'PROVIDER_SLOT_OWNERSHIP', dependenceModel: 'INDEPENDENT_PLAYER_SAMPLES', rulesVersion: stableHash(JSON.stringify({ sport: slate.sport, format: slate.contest.format, scoringRules: slate.scoringRules, rosterRules: slate.rosterRules })), metrics: new Map() };
   }
 
   // Bound work across candidate × sample × opponent comparisons. Metrics beyond the
@@ -101,7 +106,7 @@ export function simulateContestField(slate: ValidatedSlate, candidates: LineupCa
     ...(candidatesToSimulate < candidates.length ? [`Field-comparison budget limited metrics to the top ${candidatesToSimulate} of ${candidates.length} candidates; remaining candidate metrics are unavailable.`] : []),
     ...(!payoutComplete ? [`Payout and financial metrics are unavailable because ${!payoutInputValid ? 'payout rows are invalid' : !feeValid ? 'entry fee is missing/invalid' : 'paid ranks are incomplete'}.`] : []),
   ];
-  return { status: candidatesToSimulate < candidates.length ? 'PARTIAL' : 'COMPLETE', simulations, fieldEntries, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: payoutComplete ? 'CONTEST_PAYOUT_STRUCTURE' : 'UNAVAILABLE', ...(reasons.length ? { reason: reasons.join(' ') } : {}), seed, ownershipProvenance: 'PROVIDER_SLOT_OWNERSHIP', dependenceModel: 'INDEPENDENT_PLAYER_SAMPLES', rulesVersion: stableHash(JSON.stringify({ sport: slate.sport, format: slate.contest.format, scoringRules: slate.scoringRules, rosterRules: slate.rosterRules })), metrics };
+  return { status: candidatesToSimulate < candidates.length ? 'PARTIAL' : 'COMPLETE', readiness: 'CALIBRATED', simulations, fieldEntries, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: payoutComplete ? 'CONTEST_PAYOUT_STRUCTURE' : 'UNAVAILABLE', reason: reasons.join(' ') || undefined, seed, ownershipProvenance: 'PROVIDER_SLOT_OWNERSHIP', dependenceModel: 'INDEPENDENT_PLAYER_SAMPLES', rulesVersion: stableHash(JSON.stringify({ sport: slate.sport, format: slate.contest.format, scoringRules: slate.scoringRules, rosterRules: slate.rosterRules })), metrics };
 }
 
 /** Split prizes across every rank occupied by a tie; unpaid ranks contribute zero but remain in the divisor. */
@@ -193,4 +198,4 @@ function stableHash(value: string): string { let hashValue = 2166136261; for (le
 function clampInteger(value: number, minimum: number, maximum: number): number { return Math.max(minimum, Math.min(maximum, Math.floor(Number.isFinite(value) ? value : minimum))); }
 function hash(text: string): number { let value = 2166136261; for (const character of text) value = Math.imul(value ^ character.charCodeAt(0), 16777619); return value >>> 0; }
 function next(value: number): number { let result = value; result ^= result << 13; result ^= result >>> 17; result ^= result << 5; return result >>> 0; }
-function unavailable(reason: string): ContestSimulationResult { return { status: 'UNAVAILABLE', simulations: 0, fieldModel: 'UNAVAILABLE', payoutModel: 'UNAVAILABLE', reason, metrics: new Map() }; }
+function unavailable(reason: string): ContestSimulationResult { return { status: 'UNAVAILABLE', readiness: 'UNAVAILABLE', simulations: 0, fieldModel: 'UNAVAILABLE', payoutModel: 'UNAVAILABLE', reason, metrics: new Map() }; }

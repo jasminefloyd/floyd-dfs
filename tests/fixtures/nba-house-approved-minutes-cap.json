@@ -1,0 +1,26 @@
+{
+  "fixtureType": "SYNTHETIC_POLICY_PATH_ONLY",
+  "cutoff": "2026-10-30T18:00:00.000Z",
+  "lockTime": "2026-10-30T23:00:00.000Z",
+  "tenantId": "g3-synthetic-tenant",
+  "snapshotId": "g3-synthetic-snapshot",
+  "policyVersion": "nba-house.driver-policy.v1",
+  "player": {
+    "playerId": "nba:player:sportsdataio:1001",
+    "sportsDataIoId": "1001",
+    "baselineMinutes": 34,
+    "minutesCap": 26,
+    "evidenceId": "g3-synthetic-observation"
+  },
+  "registry": {
+    "modelVersion": "g3-synthetic-minutes-cap.v1",
+    "driverPolicyVersion": "nba-house.driver-policy.v1",
+    "status": "SHADOW",
+    "evaluationStatus": "SYNTHETIC_ONLY_NOT_PROMOTABLE"
+  },
+  "expected": {
+    "proposedMinutes": 26,
+    "delta": -8,
+    "requiresRealReviewedEvaluationForRollout": true
+  }
+}

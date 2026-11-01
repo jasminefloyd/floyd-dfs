@@ -8,6 +8,7 @@ export interface SelectionInput {
   optimizerPackage: Pick<OptimizerPackage, 'candidates' | 'portfolioConstraints' | 'searchCompleteness' | 'searchDiagnostics'>;
   cashLineCalibration?: CashLineCalibration;
   lockedRosterSlots?: Record<string, string>;
+  useFinancialObjective?: boolean;
 }
 
 export function selectLineups(input: SelectionInput, now = new Date()): SelectionPackage {
@@ -24,7 +25,7 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
   const maximum = input.validatedSlate.contest.maxEntriesAllowed ?? requested;
   const count = Math.min(requested, maximum);
   const isCashGame = input.validatedSlate.contest.contestKind === 'CASH';
-  const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration);
+  const ranked = rankForContext(candidates, input.validatedSlate, input.cashLineCalibration, input.useFinancialObjective === true);
   const { selected, underfilled } = choosePortfolio(ranked, count, isCashGame, input.optimizerPackage.portfolioConstraints);
   const warnings = [
     ...(rejected.length ? [`${rejected.length} optimizer candidate(s) were rejected by the authoritative lineup validator; first reason: ${rejected[0].errors[0]}`] : []),
@@ -52,7 +53,8 @@ export function selectLineups(input: SelectionInput, now = new Date()): Selectio
 // being played, so candidates are ranked by cash-line probability instead. This never blocks or
 // shrinks the portfolio: choosePortfolio always fills from this ranking regardless of whether
 // any candidate actually clears the 85% target -- see explain() for how a shortfall is disclosed.
-function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined): LineupCandidate[] {
+function rankForContext(candidates: LineupCandidate[], slate: ValidatedSlate, calibration: CashLineCalibration | undefined, useFinancialObjective: boolean): LineupCandidate[] {
+  if (useFinancialObjective && candidates.every((candidate) => Number.isFinite(candidate.expectedProfit))) return [...candidates].sort((a, b) => b.expectedProfit! - a.expectedProfit!);
   if (slate.contest.objective === 'MAX_FPTS') return [...candidates].sort((a, b) => (b.expectedPoints ?? b.median) - (a.expectedPoints ?? a.median));
   if (slate.contest.contestKind === 'CASH') return [...candidates].sort((a, b) => (cashRankScore(b, slate, calibration) - cashRankScore(a, slate, calibration)));
   // `JOINT_FIELD_SIMULATION` is an unvalidated diagnostic, not an objective input.

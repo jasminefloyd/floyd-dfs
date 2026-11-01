@@ -1,0 +1,20 @@
+{
+  "baselineVersion": "g0.nba-fixtures.v1",
+  "profileNotice": "Synthetic structural baselines only; these reduced contest profiles are not authoritative DraftKings rules and are not production projection or ROI evidence.",
+  "numericTolerance": 0,
+  "engineExpectedPointsTolerance": 0.001,
+  "fixtures": {
+    "nba-classic-multi-game": {
+      "sha256": "bedc863f08bc5524489be75ef2597a37894c71eb5af271dfd5bb1a7bf9871c24",
+      "output": { "rosterSlots": { "G": "nba-pg-001", "C": "nba-c-002" }, "salaryUsed": 13200, "providerFppgSum": 70, "engineExpectedPoints": 69.98195983967742 }
+    },
+    "nba-showdown": {
+      "sha256": "0254c1785e835cebf1ccafc9a65aa28357a9bc8eb9b77c54e4d160b206afd78a",
+      "output": { "rosterSlots": { "CPT": "nba-cpt-001", "UTIL": "nba-util-002" }, "salaryUsed": 20500, "providerFppgSum": 91, "engineExpectedPoints": 90.83091100219173 }
+    },
+    "nfl-classic": {
+      "sha256": "badd547a92a343fd707b0d2aa940875552cc8d0c9550627c3068f035c95b0f90",
+      "output": { "rosterSlots": { "QB": "nfl-qb-001", "FLEX": "nfl-wr-002" }, "salaryUsed": 14000, "providerFppgSum": 44 }
+    }
+  }
+}

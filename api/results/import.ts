@@ -48,6 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const finishPosition = integer(row.finish_position);
         const finishPercentile = number(row.finish_percentile);
         const payout = number(row.payout);
+        const refund = number(row.refund_amount);
         const entryFee = number(row.entry_fee);
         const fieldSize = integer(row.field_size);
         const paidPositions = integer(row.paid_positions);
@@ -57,14 +58,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         if (paidPositions !== null && (paidPositions < 1 || (fieldSize !== null && paidPositions > fieldSize))) throw new Error('paid_positions is outside the valid field size.');
         if (finishPercentile !== null && (finishPercentile < 0 || finishPercentile > 100)) throw new Error('finish_percentile must be between 0 and 100.');
         if (payout !== null && payout < 0) throw new Error('payout cannot be negative.');
+        if (refund !== null && refund < 0) throw new Error('refund_amount cannot be negative.');
         if (entryFee !== null && entryFee < 0) throw new Error('entry_fee cannot be negative.');
         const sport = text(row.sport)?.toUpperCase() ?? savedSlate?.sport ?? null;
         const contestFormat = text(row.contest_format)?.toUpperCase() ?? savedSlate?.contest.format ?? null;
         const actualPercentile = finishPercentile ?? (finishPosition !== null && fieldSize && fieldSize > 1 ? 100 * (1 - (finishPosition - 1) / (fieldSize - 1)) : null);
         const valuesToSave = {
           actual_dk_points: actual, cash_line: cashLine, beat_cash_line: cashLine === null ? null : actual >= cashLine,
-          finish_position: finishPosition, finish_percentile: actualPercentile, payout,
-          roi: payout !== null && entryFee !== null && entryFee > 0 ? (payout - entryFee) / entryFee : null,
+          finish_position: finishPosition, finish_percentile: actualPercentile, payout, refund_amount: refund,
+          roi: null,
           contest_id: contestId, contest_name: contestName, sport, contest_format: contestFormat,
           field_size: fieldSize, entry_fee: entryFee, paid_positions: paidPositions,
           outcome_source: 'DRAFTKINGS_CSV', external_entry_id: externalEntryId,

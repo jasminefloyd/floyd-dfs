@@ -27,9 +27,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (!SPORTS.includes(sport as typeof SPORTS[number]) || !COMPONENTS.includes(component as typeof COMPONENTS[number]) || !modelVersion || modelVersion.length > 180 || !evaluationId) throw new ApiError(400, 'sport, component, modelVersion, and evaluationId are required.', 'VALIDATION_FAILED');
       const evaluation = await getEvaluation(context.db, context.tenantId, evaluationId);
       if (evaluation.sport !== sport || evaluation.component !== component) throw new ApiError(409, 'Evaluation sport/component does not match the candidate model.', 'CONFLICT');
-      const inserted = await context.db.from('floyd_dfs_model_registry').insert({ tenant_id: context.tenantId, sport, component, model_version: modelVersion, status: 'EXPERIMENTAL', config: isRecord(body.config) ? body.config : {}, evaluation_id: evaluation.id }).select('*').single();
+      const inserted = await context.db.rpc('floyd_dfs_register_model_registry', { p_tenant_id: context.tenantId, p_actor_id: context.userId, p_sport: sport, p_component: component, p_model_version: modelVersion, p_config: isRecord(body.config) ? body.config : {}, p_evaluation_id: evaluation.id });
       if (inserted.error) throw inserted.error;
-      cors(req, res); res.status(201).json({ registry: inserted.data, message: 'Registered as EXPERIMENTAL. Registration does not alter runtime behavior.' }); return;
+      const registryRow = Array.isArray(inserted.data) ? inserted.data[0] : inserted.data;
+      if (!registryRow) throw new ApiError(500, 'Model registry registration returned no record.', 'INTERNAL_ERROR');
+      cors(req, res); res.status(201).json({ registry: registryRow, message: 'Registered as EXPERIMENTAL with an append-only audit event. Registration does not alter runtime behavior.' }); return;
     }
     if (body.action === 'review') {
       const evaluationId = text(body.evaluationId); const decision = text(body.decision).toUpperCase(); const reviewNote = text(body.reviewNote);
@@ -44,13 +46,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (body.action === 'transition') {
       const registryId = text(body.registryId); const target = text(body.status).toUpperCase(); const evaluationId = text(body.evaluationId);
       if (!registryId || !['SHADOW','CANARY','RETIRED'].includes(target)) throw new ApiError(400, 'registryId and status SHADOW, CANARY, or RETIRED are required. ACTIVE is reserved for P7 runtime rollout.', 'VALIDATION_FAILED');
+      const reviewNote = text(body.reviewNote);
+      if (reviewNote.length < 8) throw new ApiError(400, 'A reviewNote of at least 8 characters is required for an audited registry transition.', 'VALIDATION_FAILED');
       const prior = await context.db.from('floyd_dfs_model_registry').select('*').eq('tenant_id', context.tenantId).eq('id', registryId).maybeSingle();
       if (prior.error) throw prior.error;
       if (!prior.data) throw new ApiError(404, 'Model registry record not found.', 'NOT_FOUND');
       const current = String(prior.data.status);
-      if (target === 'RETIRED') {
-        if (current === 'ACTIVE') throw new ApiError(409, 'ACTIVE models must be retired through the P7 rollout control.', 'CONFLICT');
-      } else {
+      if (target !== 'RETIRED') {
         const chosenEvaluationId = evaluationId || String(prior.data.evaluation_id ?? '');
         if (!chosenEvaluationId) throw new ApiError(409, 'A persisted evaluation is required before a candidate can enter shadow or canary.', 'CONFLICT');
         const evaluation = await getEvaluation(context.db, context.tenantId, chosenEvaluationId);
@@ -64,13 +66,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         }
         if (current === 'CANARY' && target === 'SHADOW') throw new ApiError(409, 'Canary models cannot return to shadow; retire and register a new version.', 'CONFLICT');
         if (current === 'RETIRED') throw new ApiError(409, 'Retired model versions cannot be reactivated.', 'CONFLICT');
-        const update = await context.db.from('floyd_dfs_model_registry').update({ status: target, evaluation_id: chosenEvaluationId, config: { ...(isRecord(prior.data.config) ? prior.data.config : {}), lastReview: { evaluationId: chosenEvaluationId, reviewedBy: context.userId, reviewedAt: new Date().toISOString(), note: text(body.reviewNote) } } }).eq('tenant_id', context.tenantId).eq('id', registryId).select('*').single();
-        if (update.error) throw update.error;
-        cors(req, res); res.status(200).json({ registry: update.data, runtimeChanged: false, canaryRuntimeAdapter: 'NOT_CONNECTED', message: target === 'CANARY' ? 'Recorded NBA canary eligibility only. No candidate is routed to production until a runtime adapter is explicitly enabled.' : 'Recorded shadow status. Runtime remains unchanged.' }); return;
       }
-      const update = await context.db.from('floyd_dfs_model_registry').update({ status: 'RETIRED' }).eq('tenant_id', context.tenantId).eq('id', registryId).select('*').single();
-      if (update.error) throw update.error;
-      cors(req, res); res.status(200).json({ registry: update.data, runtimeChanged: false }); return;
+      if (target === 'RETIRED' && current === 'ACTIVE') throw new ApiError(409, 'ACTIVE models must be retired through the P7 rollout control.', 'CONFLICT');
+      const chosenEvaluationId = target === 'RETIRED' ? evaluationId || String(prior.data.evaluation_id ?? '') : evaluationId || String(prior.data.evaluation_id ?? '');
+      const transitioned = await context.db.rpc('floyd_dfs_transition_model_registry', { p_tenant_id: context.tenantId, p_registry_id: registryId, p_actor_id: context.userId, p_expected_status: current, p_next_status: target, p_evaluation_id: chosenEvaluationId || null, p_note: reviewNote });
+      if (transitioned.error) throw transitioned.error;
+      const registryRow = Array.isArray(transitioned.data) ? transitioned.data[0] : transitioned.data;
+      if (!registryRow) throw new ApiError(409, 'Model registry transition did not update the expected record.', 'CONFLICT');
+      cors(req, res); res.status(200).json({ registry: registryRow, runtimeChanged: false, audited: true, ...(target === 'CANARY' ? { canaryRuntimeAdapter: 'NOT_CONNECTED', message: 'Recorded NBA canary eligibility only. No candidate is routed to production until a runtime adapter is explicitly enabled.' } : {}) }); return;
     }
     throw new ApiError(400, 'Unsupported model-evaluation action.', 'VALIDATION_FAILED');
   } catch (error) { respondError(req, res, error); }
@@ -88,29 +91,36 @@ async function loadPortfolioPerformance(db: Awaited<ReturnType<typeof tenantCont
   if (!portfolios.length) return [];
   const portfolioIds = portfolios.map((portfolio) => String(portfolio.id)); const members: Array<Record<string, unknown>> = [];
   for (let offset = 0; offset < portfolioIds.length; offset += 300) {
-    const page = await queryAll((start, end) => db.from('floyd_dfs_portfolio_members').select('portfolio_id,lineup_id,lineup_revision,entry_status,entry_fee').eq('tenant_id', tenantId).in('portfolio_id', portfolioIds.slice(offset, offset + 300)).order('lineup_revision', { ascending: false }).range(start, end));
+    const page = await queryAll((start, end) => db.from('floyd_dfs_portfolio_members').select('portfolio_id,lineup_id,lineup_revision,entry_status,settlement_status,entry_fee').eq('tenant_id', tenantId).in('portfolio_id', portfolioIds.slice(offset, offset + 300)).order('lineup_revision', { ascending: false }).range(start, end));
     members.push(...page);
   }
   const latestMembers = new Map<string, Record<string, unknown>>();
   for (const member of members) { const key = `${member.portfolio_id}:${member.lineup_id}`; if (!latestMembers.has(key)) latestMembers.set(key, member); }
   const lineupIds = [...new Set([...latestMembers.values()].map((member) => String(member.lineup_id)))];
+  const entryLinks: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < lineupIds.length; offset += 300) {
+    const page = await queryAll((start, end) => db.from('floyd_dfs_entry_links').select('generated_lineup_id,contest_id,external_entry_id').eq('tenant_id', tenantId).in('generated_lineup_id', lineupIds.slice(offset, offset + 300)).range(start, end));
+    entryLinks.push(...page);
+  }
+  const linkedEntryByKey = new Map(entryLinks.map((link) => [`${link.generated_lineup_id}:${link.contest_id}`, String(link.external_entry_id)]));
   const results: Array<Record<string, unknown>> = [];
   for (let offset = 0; offset < lineupIds.length; offset += 300) {
-    const page = await queryAll((start, end) => db.from('floyd_dfs_contest_results').select('generated_lineup_id,contest_id,external_entry_id,payout,entry_fee,official_outcome,model_evaluation_eligible,reconciliation_status,result_payload,measured_at').eq('tenant_id', tenantId).in('generated_lineup_id', lineupIds.slice(offset, offset + 300)).eq('official_outcome', true).not('payout', 'is', null).order('measured_at', { ascending: false }).range(start, end));
+    const page = await queryAll((start, end) => db.from('floyd_dfs_contest_results').select('generated_lineup_id,contest_id,external_entry_id,payout,refund_amount,entry_fee,official_outcome,model_evaluation_eligible,reconciliation_status,result_payload,measured_at').eq('tenant_id', tenantId).in('generated_lineup_id', lineupIds.slice(offset, offset + 300)).eq('official_outcome', true).not('payout', 'is', null).not('refund_amount', 'is', null).order('measured_at', { ascending: false }).range(start, end));
     results.push(...page);
   }
   const resultByKey = new Map<string, Record<string, unknown>>();
-  for (const result of results) { const key = `${result.generated_lineup_id}:${result.contest_id}`; if (!resultByKey.has(key)) resultByKey.set(key, result); }
+  for (const result of results) { const key = `${result.generated_lineup_id}:${result.contest_id}:${result.external_entry_id}`; if (!resultByKey.has(key)) resultByKey.set(key, result); }
   return portfolios.map((portfolio) => {
-    const portfolioMembers = [...latestMembers.values()].filter((member) => String(member.portfolio_id) === String(portfolio.id) && member.entry_status === 'ENTERED');
+    const portfolioMembers = [...latestMembers.values()].filter((member) => String(member.portfolio_id) === String(portfolio.id) && member.entry_status === 'ENTERED' && member.settlement_status === 'VERIFIED');
     const realized = portfolioMembers.flatMap((member) => {
-      const result = resultByKey.get(`${member.lineup_id}:${portfolio.contest_id}`);
+      const externalEntryId = linkedEntryByKey.get(`${member.lineup_id}:${portfolio.contest_id}`);
+      const result = externalEntryId ? resultByKey.get(`${member.lineup_id}:${portfolio.contest_id}:${externalEntryId}`) : undefined;
       const payload = record(result?.result_payload);
       if (!result || payload?.fullFieldImport !== true || result.reconciliation_status !== 'MATCHED' || result.model_evaluation_eligible !== true) return [];
-      const fee = number(result.entry_fee ?? member.entry_fee); const payout = number(result.payout);
-      return fee >= 0 && payout >= 0 ? [{ fee, payout }] : [];
+      const fee = number(result.entry_fee ?? member.entry_fee); const payout = number(result.payout); const refund = number(result.refund_amount);
+      return fee >= 0 && payout >= 0 && refund >= 0 ? [{ fee, payout, refund }] : [];
     });
-    const totalFees = realized.reduce((sum, row) => sum + row.fee, 0); const totalPayout = realized.reduce((sum, row) => sum + row.payout, 0);
+    const totalFees = realized.reduce((sum, row) => sum + row.fee, 0); const totalPayout = realized.reduce((sum, row) => sum + row.payout + row.refund, 0);
     return { ...portfolio, enteredEntries: portfolioMembers.length, reconciledOfficialEntries: realized.length, realizedEntryFees: realized.length ? totalFees : null, realizedPayout: realized.length ? totalPayout : null, realizedNet: realized.length ? totalPayout - totalFees : null, realizedRoi: totalFees > 0 ? (totalPayout - totalFees) / totalFees : null, financialSource: realized.length ? 'FULL_FIELD_OFFICIAL_RESULTS_RECONCILED' : 'UNAVAILABLE' };
   });
 }

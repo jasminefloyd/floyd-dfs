@@ -28,7 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (found.error) throw found.error;
     if (!('worker' in context) && String(found.data.user_id) !== context.userId) { res.status(403).json({ error: 'You cannot process another user’s run.' }); return; }
     if (!['created', 'queued', 'failed', 'slate_validated'].includes(String(found.data.state))) { res.status(409).json({ error: 'This run is not in a processable state.' }); return; }
-    const payload = found.data.request_payload as { input?: { validatedSlate?: unknown; lineupMode?: unknown; simulationMode?: unknown; minSalaryUsed?: unknown; maxSharedPlayers?: unknown; fixedRosterSlots?: unknown } };
+    const payload = found.data.request_payload as { input?: { validatedSlate?: unknown; lineupMode?: unknown; simulationMode?: unknown; minSalaryUsed?: unknown; maxSharedPlayers?: unknown; maxPlayerExposure?: unknown; maxCaptainExposure?: unknown; fixedRosterSlots?: unknown } };
     if (!payload.input?.validatedSlate) throw new Error('This run does not contain a validated slate payload.');
     const existing = await context.db.from('engine_jobs').select('id,status,attempt,max_attempts').eq('tenant_id', context.tenantId).eq('generation_run_id', id).order('created_at', { ascending: false }).limit(1).maybeSingle();
     if (existing.error) throw existing.error;
@@ -43,8 +43,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     await recordEvent(context.db, { tenant_id: context.tenantId, generation_run_id: id, event_type: 'JOB_CLAIMED', stage: 'SLATE', payload: { attempt: nextAttempt } });
     const minSalaryUsed = Number(payload.input.minSalaryUsed);
     const maxSharedPlayers = Number(payload.input.maxSharedPlayers);
+    const maxPlayerExposure = parseExposure(payload.input.maxPlayerExposure);
+    const maxCaptainExposure = parseExposure(payload.input.maxCaptainExposure);
     const simulationMode = ['baseline', 'game_simulation', 'compare'].includes(String(payload.input.simulationMode)) ? payload.input.simulationMode as 'baseline' | 'game_simulation' | 'compare' : 'baseline';
-    const result = await processRun(context.db, found.data, payload.input.validatedSlate as Parameters<typeof processRun>[2], { lineupMode: typeof payload.input.lineupMode === 'string' ? payload.input.lineupMode : undefined, simulationMode, minSalaryUsed: Number.isFinite(minSalaryUsed) && minSalaryUsed > 0 ? minSalaryUsed : undefined, maxSharedPlayers: Number.isInteger(maxSharedPlayers) && maxSharedPlayers >= 0 ? maxSharedPlayers : undefined, fixedRosterSlots: isStringRecord(payload.input.fixedRosterSlots) ? payload.input.fixedRosterSlots : undefined });
+    const result = await processRun(context.db, found.data, payload.input.validatedSlate as Parameters<typeof processRun>[2], { lineupMode: typeof payload.input.lineupMode === 'string' ? payload.input.lineupMode : undefined, simulationMode, minSalaryUsed: Number.isFinite(minSalaryUsed) && minSalaryUsed > 0 ? minSalaryUsed : undefined, maxSharedPlayers: Number.isInteger(maxSharedPlayers) && maxSharedPlayers >= 0 ? maxSharedPlayers : undefined, maxPlayerExposure, maxCaptainExposure, fixedRosterSlots: isStringRecord(payload.input.fixedRosterSlots) ? payload.input.fixedRosterSlots : undefined });
     await context.db.from('engine_jobs').update({ status: 'succeeded', completed_at: new Date().toISOString(), error: null, output_ref: { selection: true } }).eq('tenant_id', context.tenantId).eq('id', jobId);
     cors(req, res); res.status(200).json(result);
   } catch (error) {
@@ -62,3 +64,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> { return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.entries(value as Record<string, unknown>).every(([key, item]) => Boolean(key) && typeof item === 'string')); }
+function parseExposure(value: unknown): number | undefined { if (value === undefined || value === null || value === '') return undefined; const rate = Number(value); return Number.isFinite(rate) && rate > 0 && rate <= 1 ? rate : undefined; }

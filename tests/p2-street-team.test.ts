@@ -122,12 +122,16 @@ assert.match(deriveStreetTeamBehaviorSignals('tenant-test', [statementObservatio
 
 const persistedBehaviorRows: Array<Record<string, unknown>> = [];
 let persistedSnapshot: Record<string, unknown> | undefined;
+let latestSnapshotMeta: { id: string; evidence_hash: string } | null = null;
 const collectionQuery = {
   insert: () => collectionQuery,
   select: () => collectionQuery,
   single: async () => ({ data: { id: 'collection-run-test' }, error: null }),
   update: () => collectionQuery,
   eq: () => collectionQuery,
+  order: () => collectionQuery,
+  limit: () => collectionQuery,
+  maybeSingle: async () => ({ data: latestSnapshotMeta, error: null }),
   upsert: async (rows: Array<Record<string, unknown>>) => {
     if (rows[0]?.source_observation_id) persistedBehaviorRows.push(...rows);
     return { error: null };
@@ -138,6 +142,7 @@ const collectionDb = {
   from: () => collectionQuery,
   rpc: async (_name: string, args: { p_snapshot: Record<string, unknown> }) => {
     persistedSnapshot = args.p_snapshot;
+    latestSnapshotMeta = { id: String(args.p_snapshot.id), evidence_hash: String(args.p_snapshot.evidence_hash) };
     return { data: args.p_snapshot.id, error: null };
   },
 } as unknown as SupabaseClient;
@@ -149,13 +154,26 @@ assert.equal(persistedBehaviorRows.length, 1);
 assert.equal(persistedBehaviorRows[0].source_observation_id, snapshotPayload?.behaviorSignals[0].observationIds[0]);
 assert.equal(persistedBehaviorRows[0].effect_status, 'REPORT_ONLY');
 assert.equal(persistedBehaviorRows[0].model_effect, 0);
+const savedSnapshotId = String(persistedSnapshot?.id);
+const repeated = await collectNbaStreetTeam(collectionDb, 'tenant-test', { apiKey: 'test-key', dataTier: 'PRODUCTION_VERIFIED', now: fixedNow, fetcher, idempotencyKey: 'manual-repeat-window' });
+assert.equal(repeated.status, 'COMPLETE');
+assert.equal(repeated.snapshotId, savedSnapshotId);
+assert.equal(String(persistedSnapshot?.id), savedSnapshotId);
+const partialFetcher: typeof fetch = async (input, init) => String(input).endsWith('/nba/projections/json/InjuredPlayers')
+  ? new Response('temporary provider failure', { status: 503 })
+  : fetcher(input, init);
+const partial = await collectNbaStreetTeam(collectionDb, 'tenant-test', { apiKey: 'test-key', dataTier: 'PRODUCTION_VERIFIED', now: fixedNow, fetcher: partialFetcher, idempotencyKey: 'manual-partial-window' });
+assert.equal(partial.status, 'PARTIAL');
+assert.equal(partial.snapshotId, savedSnapshotId);
+assert.equal(String(persistedSnapshot?.id), savedSnapshotId);
 
 const conflictProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
   apiKey: 'test-key', maxAttempts: 1,
   fetcher: async (input) => {
     const url = String(input);
     const payload = url.endsWith('/nba/scores/json/Players')
-      ? [{ PlayerID: 9, Name: 'Same ID', Team: 'BOS' }, { PlayerID: 9, Name: 'Same ID', Team: 'NY' }]
+      ? [{ PlayerID: 9, Name: 'Same ID', Team: 'BOS', InjuryStatus: 'Out' }, { PlayerID: 9, Name: 'Same ID', Team: 'NY', InjuryStatus: 'Out' }]
+      : url.endsWith('/nba/projections/json/InjuredPlayers') ? [{ PlayerID: 10, Name: 'Conflict Player', Team: 'BOS', InjuryStatus: 'Questionable' }]
       : [];
     return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
   },
@@ -163,6 +181,50 @@ const conflictProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoC
 const conflict = await conflictProvider.collect({ windowStart: fixedNow(), asOf: fixedNow() });
 assert.equal(conflict.rosterState.length, 0);
 assert.ok(conflict.unknowns.some((unknown) => unknown.reason.includes('quarantined')));
+const injuryConflictProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
+  apiKey: 'test-key', maxAttempts: 1,
+  fetcher: async (input) => {
+    const url = String(input);
+    const payload = url.endsWith('/nba/scores/json/Players') ? [{ PlayerID: 10, Name: 'Conflict Player', Team: 'BOS', InjuryStatus: 'Out' }]
+      : url.endsWith('/nba/projections/json/InjuredPlayers') ? [{ PlayerID: 10, Name: 'Conflict Player', Team: 'BOS', InjuryStatus: 'Questionable' }]
+        : [];
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+  },
+}), fixedNow, async () => new Response('<rss><channel></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } }));
+const injuryConflict = await injuryConflictProvider.collect({ windowStart: fixedNow(), asOf: fixedNow() });
+const conflictFact = injuryConflict.resolvedFacts.find((fact) => fact.factType === 'availability.injury_status');
+assert.ok(conflictFact);
+assert.equal(conflictFact?.state, 'CONFLICT');
+assert.equal((conflictFact.value as { normalizedStatus: string }).normalizedStatus, 'UNKNOWN');
+assert.equal(conflictFact.observationIds.length, 2);
+assert.equal(injuryConflict.availability[0]?.status, 'UNKNOWN');
+const articleVsAvailabilityProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
+  apiKey: 'test-key', maxAttempts: 1,
+  fetcher: async (input) => {
+    const url = String(input);
+    const payload = url.endsWith('/nba/scores/json/Players') ? [{ PlayerID: 11, Name: 'Report Player', Team: 'BOS', InjuryStatus: 'Questionable' }] : [];
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+  },
+}), fixedNow, async (input) => String(input).includes('/espn/rss/nba/news')
+  ? new Response('<rss><channel><item><title>Report Player is out tonight</title><link>https://news.example/report-player-out</link><pubDate>Thu, 29 Oct 2026 15:00:00 GMT</pubDate></item></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } })
+  : new Response('<rss><channel></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } }));
+const articleVsAvailability = await articleVsAvailabilityProvider.collect({ windowStart: fixedNow(), asOf: fixedNow() });
+assert.equal(articleVsAvailability.availability[0]?.status, 'QUESTIONABLE');
+assert.ok(articleVsAvailability.observations.some((observation) => observation.provider === 'ESPN NBA' && observation.claim.includes('is out tonight')));
+const syndicatedProvider = new SportsDataIoNbaStreetTeamProvider(new SportsDataIoClient({
+  apiKey: 'test-key', maxAttempts: 1,
+  fetcher: async () => new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } }),
+}), fixedNow, async (input) => {
+  const url = String(input);
+  if (url.includes('/espn/rss/nba/news')) return new Response('<rss><channel><item><title>Shared NBA report</title><link>https://news.example/shared-story?utm_source=espn</link><pubDate>Thu, 29 Oct 2026 15:00:00 GMT</pubDate></item></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } });
+  if (url.includes('rotowire.com/rss/news.php?sport=NBA')) return new Response('<rss><channel><item><title>Shared NBA report</title><link>https://news.example/shared-story?utm_source=rotowire</link><pubDate>Thu, 29 Oct 2026 15:00:00 GMT</pubDate></item></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } });
+  return new Response('<rss><channel></channel></rss>', { status: 200, headers: { 'content-type': 'application/rss+xml' } });
+});
+const syndicated = await syndicatedProvider.collect({ windowStart: fixedNow(), asOf: fixedNow() });
+const sharedStory = syndicated.observations.filter((item) => item.payload.title === 'Shared NBA report');
+assert.equal(sharedStory.length, 1);
+assert.ok(sharedStory[0]);
+assert.equal((sharedStory[0].payload.duplicateSources as string[]).length, 2);
 
 console.log('P2 NBA provider normalization, identity quarantine, timestamp, and provenance checks passed.');
 }
