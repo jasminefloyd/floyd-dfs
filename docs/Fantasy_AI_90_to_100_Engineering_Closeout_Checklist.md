@@ -30,6 +30,8 @@ Previously accepted constraints remain in force: do not create staging; do not i
 
 On 2026-10-31, the Street Team and NBA House browser clients were corrected to send the Supabase bearer session for tenant-protected API calls. The local `.env.local` does not set `STREET_TEAM_V2`, so that local feature remains disabled by its default-off flag. It was not enabled because the configured SportsDataIO account is an API Free Trial and does not provide valid NBA stats; the provider tier and daily budget also remain unset in Production. A previous generic 500 request ID had no matching Production log; the new safe request-ID diagnostics allow a later internal error to be correlated without logging raw exception messages.
 
+The authenticated-client and safe-diagnostics changes were committed as `a903518` and pushed to `codex/fantasy-ai-p00-baseline`. Production deployment `dpl_FixPSzzt7aVsgEW4fjZso926b2Jt` reached `READY` at `https://floyd-dfs.vercel.app`. No browser E2E replay was performed, so end-user recovery remains to be confirmed by retrying the affected workflows. The deployment did not change feature flags or SportsDataIO configuration.
+
 > **Scoring contract:** 90/100 is a *provisional static-implementation estimate*, not a certified 90 checklist points. This closeout checklist defines the remaining work and objective proof required for a 100/100 **NBA V1 architectural acceptance**. Completing tasks without passing tests and demonstrations does **not** earn full acceptance. Profitability, statistical superiority, and guaranteed winnings are **not** promised. An unvalidated model remaining in HOLD is acceptable; silently treating it as validated is not.
 
 ## 0. Required engineering workflow
