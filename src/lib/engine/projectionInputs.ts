@@ -58,25 +58,43 @@ export function gamesPlayedFromRow(row: Record<string, unknown>): number { retur
 
 /** Resolve DraftKings IDs through SportsDataIO's current NBA roster, requiring a
  * unique provider ID and an exact normalized current-team match. */
-export function mapSportsDataIoRosterIdentities<T extends SlatePlayer>(players: T[], rosterRows: Record<string, unknown>[]): { players: T[]; mapped: number; unresolved: number; conflicts: number } {
+export function mapSportsDataIoRosterIdentities<T extends SlatePlayer>(players: T[], rosterRows: Record<string, unknown>[]): { players: T[]; mapped: number; unresolved: number; conflicts: number; mappedBy: { providerId: number; exactNameAndTeam: number } } {
   let mapped = 0;
   let unresolved = 0;
   let conflicts = 0;
+  let mappedByProviderId = 0;
+  let mappedByExactNameAndTeam = 0;
   const result = players.map((player) => {
     const draftKingsId = String(player.identity?.draftKingsId ?? player.playerId).trim();
-    const matches = rosterRows.filter((row) => String(row.DraftKingsPlayerID ?? row.DraftKingsPlayerId ?? '').trim() === draftKingsId);
-    const providerIds = [...new Set(matches.map((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId'])).filter((id): id is string => Boolean(id)))];
-    if (providerIds.length !== 1) { unresolved += 1; return player; }
-    const providerId = providerIds[0];
-    const providerTeams = [...new Set(matches.filter((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId']) === providerId).map((row) => normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']) ?? '')).filter(Boolean))];
+    const providerIdMatches = rosterRows.filter((row) => String(row.DraftKingsPlayerID ?? row.DraftKingsPlayerId ?? '').trim() === draftKingsId);
+    const providerIds = [...new Set(providerIdMatches.map((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId'])).filter((id): id is string => Boolean(id)))];
+    let rows = providerIdMatches;
+    let matchMethod: 'PROVIDER_ID' | 'NAME_AND_TEAM' = 'PROVIDER_ID';
+    if (providerIds.length === 0) {
+      // DraftKings salary CSV `ID` values are draftable IDs and may not equal
+      // SportsDataIO's DraftKingsPlayerID cross-reference. Use a composite key
+      // only when full normalized name + current team resolves to one provider ID.
+      rows = rosterRows.filter((row) => normalizeProviderName(readString(row, ['Name', 'PlayerName', 'FullName']) ?? '') === normalizeProviderName(player.playerName)
+        && normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']) ?? '') === normalizeTeamCode(player.team ?? ''));
+      matchMethod = 'NAME_AND_TEAM';
+    }
+    const resolvedProviderIds = [...new Set(rows.map((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId'])).filter((id): id is string => Boolean(id)))];
+    if (resolvedProviderIds.length !== 1) {
+      if (resolvedProviderIds.length > 1 || providerIds.length > 1) conflicts += 1;
+      else unresolved += 1;
+      return player;
+    }
+    const providerId = resolvedProviderIds[0];
+    const providerTeams = [...new Set(rows.filter((row) => readString(row, ['PlayerID', 'PlayerId', 'playerId']) === providerId).map((row) => normalizeTeamCode(readString(row, ['Team', 'team', 'TeamAbbreviation']) ?? '')).filter(Boolean))];
     const slateTeam = normalizeTeamCode(player.team ?? '');
-    if (providerTeams.length !== 1 || !slateTeam || providerTeams[0] !== slateTeam) { unresolved += 1; return player; }
+    if (providerTeams.length !== 1 || !slateTeam || providerTeams[0] !== slateTeam) { conflicts += 1; return player; }
     if (player.identity?.sportsDataIoId && player.identity.sportsDataIoId !== providerId) { conflicts += 1; return player; }
-    if (player.identity?.sportsDataIoId === providerId) return player;
     mapped += 1;
-    return { ...player, identity: { ...player.identity, sportsDataIoId: providerId, confidence: 'EXACT' as const, matchedBy: 'PROVIDER_ID' as const } };
+    if (matchMethod === 'PROVIDER_ID') mappedByProviderId += 1;
+    else mappedByExactNameAndTeam += 1;
+    return { ...player, identity: { ...player.identity, sportsDataIoId: providerId, confidence: 'EXACT' as const, matchedBy: matchMethod === 'PROVIDER_ID' ? 'PROVIDER_ID' as const : 'NAME_AND_TEAM' as const } };
   });
-  return { players: result, mapped, unresolved, conflicts };
+  return { players: result, mapped, unresolved, conflicts, mappedBy: { providerId: mappedByProviderId, exactNameAndTeam: mappedByExactNameAndTeam } };
 }
 
 /** Provisional NBA shrinkage schedule: current-season rates gain weight with sample size. */

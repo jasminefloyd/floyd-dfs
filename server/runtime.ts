@@ -378,15 +378,20 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     // not numeric projection data. They remain usable on the Free Trial account and
     // must not depend on the PRODUCTION_VERIFIED numeric-stats attestation.
     if (workingSlate.sport === 'NBA') {
-      try {
-        const rosterPayload = await availability.get<unknown>('NBA', 'scores', 'Players');
-        const rosterRows = Array.isArray(rosterPayload) ? rosterPayload.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)) : [];
-        const mapped = mapSportsDataIoRosterIdentities(workingSlate.playerPool, rosterRows);
-        workingSlate = { ...workingSlate, playerPool: mapped.players };
-        stages.projectionIdentityMapping = { source: 'SPORTSDATAIO_NBA_PLAYERS_DRAFTKINGS_ID', mapped: mapped.mapped, unresolved: mapped.unresolved, conflicts: mapped.conflicts, rosterRows: rosterRows.length };
-      } catch (error) {
-        stages.projectionIdentityMappingWarning = error instanceof Error ? error.message : 'SportsDataIO NBA roster identity lookup failed.';
-      }
+      const rosterRows = (pinnedIntelSnapshot?.resolvedFacts ?? []).flatMap((fact) => {
+        if (fact.factType !== 'roster.membership' || fact.state !== 'ACCEPTED') return [];
+        const value = asRecord(fact.value);
+        if (!value) return [];
+        return [{
+          PlayerID: String(value.providerPlayerId ?? ''),
+          Name: String(value.displayName ?? ''),
+          Team: String(value.team ?? ''),
+          DraftKingsPlayerID: String(value.draftKingsPlayerId ?? ''),
+        }];
+      });
+      const mapped = mapSportsDataIoRosterIdentities(workingSlate.playerPool, rosterRows);
+      workingSlate = { ...workingSlate, playerPool: mapped.players };
+      stages.projectionIdentityMapping = { source: 'STREET_TEAM_NBA_ROSTER_PROVIDER_ID_OR_EXACT_NAME_TEAM', mapped: mapped.mapped, unresolved: mapped.unresolved, conflicts: mapped.conflicts, mappedBy: mapped.mappedBy, rosterRows: rosterRows.length };
     }
     if (workingSlate.sport === 'GOLF' && sportsDataIoProductionVerified) {
       try {
