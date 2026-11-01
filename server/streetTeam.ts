@@ -54,7 +54,7 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
     }
     const client = new SportsDataIoClient({ apiKey: options.apiKey, baseUrl: options.baseUrl, fetcher: options.fetcher, maxAttempts: 2, requestBudget: options.providerCallBudget });
     const provider = new SportsDataIoNbaStreetTeamProvider(client, now, options.fetcher);
-    const previousSnapshot = await db.from('floyd_dfs_intel_snapshots').select('id,evidence_hash,snapshot_payload')
+    const previousSnapshot = await db.from('floyd_dfs_intel_snapshots').select('id,as_of,evidence_hash,snapshot_payload')
       .eq('tenant_id', tenantId).eq('sport', 'NBA').order('as_of', { ascending: false }).limit(1).maybeSingle();
     if (previousSnapshot.error) throw previousSnapshot.error;
     const previousPayload = previousSnapshot.data?.snapshot_payload ? parseStreetTeamSnapshot(previousSnapshot.data.snapshot_payload, tenantId) : null;
@@ -164,9 +164,22 @@ export async function collectNbaStreetTeam(db: SupabaseClient, tenantId: string,
     const links = snapshotObservations.map((observation, ordinal) => ({ observation_id: observation.id, ordinal }));
     let canonicalSnapshotId: string | undefined = snapshotId;
     let recheckRequiredLineupCount = 0;
-    if (freshnessState === 'PARTIAL') {
+    const identityFeedsCurrent = ['SportsDataIO NBA Players', 'SportsDataIO NBA InjuredPlayers'].every((provider) => {
+      const diagnostic = providerResult.providerDiagnostics.find((item) => item.provider === provider);
+      // An empty InjuredPlayers array is a valid current response (no listed injuries).
+      return Boolean(diagnostic && diagnostic.status !== 'FAILED' && diagnostic.status !== 'RATE_LIMITED' && diagnostic.freshness === 'FRESH');
+    });
+    const previousAgeMs = previousSnapshot.data?.as_of ? now().getTime() - Date.parse(String(previousSnapshot.data.as_of)) : Number.POSITIVE_INFINITY;
+    const previousSnapshotStale = !Number.isFinite(previousAgeMs) || previousAgeMs < 0 || previousAgeMs > NBA_STREET_TEAM_SNAPSHOT_TTL_MS;
+    const mayPersistPartial = freshnessState === 'PARTIAL' && identityFeedsCurrent;
+    if (freshnessState === 'PARTIAL' && previousSnapshot.data?.id && !mayPersistPartial) {
       canonicalSnapshotId = previousSnapshot.data?.id ? String(previousSnapshot.data.id) : undefined;
-    } else if (changed) {
+    } else if (changed || previousSnapshotStale) {
+      // A successful current roster and injury response is enough to refresh the
+      // identity snapshot even when unrelated feeds/questions leave the collection
+      // PARTIAL. The snapshot remains marked PARTIAL and the identity gate still
+      // independently excludes unmapped, conflicted, or explicitly unavailable players.
+      // If either identity feed failed, retain the last known good snapshot instead.
       const materialChanges = detectStreetTeamMaterialChanges(snapshot, previousPayload ?? undefined);
       recheckRequiredLineupCount = await markUnlockedLineupsForRecheck(db, tenantId, materialChanges, snapshotId, now());
       const insertedSnapshot = await db.rpc('floyd_dfs_create_intel_snapshot_with_evidence', { p_snapshot: snapshotRow, p_evidence_links: links });

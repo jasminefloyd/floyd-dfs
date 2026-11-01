@@ -107,6 +107,10 @@ export class ResearchAgent {
       if (stillUnresolved) unknowns.push(gap);
     }
     const availabilityGaps = input.validatedSlate.playerPool
+      // DST is a team defense roster slot, not an athlete whose personal injury
+      // status can be researched. Team/player-pool data remains available to the
+      // downstream projection and optimizer stages.
+      .filter((player) => String(player.position ?? '').toUpperCase() !== 'DST')
       .filter((player) => !findings.some((finding) => finding.subjectId === player.playerId && finding.bucket === 'AVAILABILITY'))
       .map((player) => ({ question: `Is ${player.playerName} available with an unrestricted role for this slate?`, importance: player.availability?.roleStatus === 'NOT_STARTER' ? 'HIGH' as const : 'CRITICAL' as const, reason: player.availability?.roleStatus === 'NOT_STARTER' ? `No direct availability evidence was retrieved for ${player.playerName}; the player is not listed as a current starter, so starter confirmation is not required but availability remains unresolved.` : `No AVAILABILITY-bucket evidence was retrieved for ${player.playerName}.`, subjectId: player.playerId }));
     unknowns.push(...availabilityGaps);

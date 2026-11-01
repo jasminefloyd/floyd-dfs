@@ -32,7 +32,7 @@ import { FDS_ERROR_CODES, type ContestFormat, type EngineStage, type ProjectionP
 import { BoundaryContractError, parseValidatedSlate } from '../src/lib/engine/boundaryContracts.js';
 import { persistEvidenceLedger } from './evidenceLedger.js';
 import { isFeatureEnabled, isNbaHouseShadowEnabled, readFeatureFlags } from './featureFlags.js';
-import { getStreetTeamSnapshot } from './streetTeam.js';
+import { getStreetTeamSnapshot, streetTeamSnapshotFreshness } from './streetTeam.js';
 import { applyNbaStreetTeamIdentityGate } from './streetTeam/slateGate.js';
 import { assessContestPayoutReadiness, buildContestSpec } from './lineupAgent/contest.js';
 import { selectRuntimePortfolio } from './lineupAgent/runtimeSelection.js';
@@ -126,7 +126,25 @@ export function cors(req: VercelRequest, res: VercelResponse): void {
 export function respondError(req: VercelRequest, res: VercelResponse, error: unknown): void {
   cors(req, res);
   const id = responseRequestId(req);
-  if (!(error instanceof ApiError) && !(error instanceof DraftKingsApiError)) logInternalApiError(id, error);
+  if (error instanceof DraftKingsApiError) {
+    // Keep the response body provider-safe, but retain enough server-side context
+    // to diagnose provider failures. Never log query strings, headers, or bodies.
+    let endpoint = 'unknown';
+    try {
+      const url = new URL(error.details.url);
+      endpoint = `${url.host}${url.pathname}`.slice(0, 240);
+    } catch { /* Non-URL labels such as "lobby" are safe to report as-is. */
+      endpoint = error.details.url.slice(0, 80);
+    }
+    console.error('api-provider-error', {
+      requestId: id,
+      provider: 'DRAFTKINGS',
+      endpoint,
+      ...(typeof error.details.status === 'number' ? { upstreamStatus: error.details.status } : {}),
+      errorName: error.name.slice(0, 80),
+      message: error.message.slice(0, 240),
+    });
+  } else if (!(error instanceof ApiError)) logInternalApiError(id, error);
   if (error instanceof DraftKingsApiError && error.details.status === 403) {
     const upstreamEndpoint = (() => { try { const url = new URL(error.details.url); return `${url.host}${url.pathname}`; } catch { return undefined; } })();
     const safeMessage = "DraftKings denied this server-side API request (HTTP 403). Contest discovery may still work, but detailed contest and player-pool data is currently blocked from this deployment.";
@@ -163,6 +181,7 @@ function logInternalApiError(id: string, error: unknown): void {
   if (typeof diagnostic.status === 'number' && Number.isFinite(diagnostic.status)) fields.status = diagnostic.status;
   if (error instanceof BoundaryContractError) fields.path = error.path.slice(0, 128);
   const message = typeof diagnostic.message === 'string' ? diagnostic.message : '';
+  if (message) fields.message = redactSensitiveErrorText(message).slice(0, 240);
   const notNull = /null value in column "([^"]{1,128})" of relation "([^"]{1,128})"/.exec(message);
   if (notNull) {
     fields.column = notNull[1]!;
@@ -262,9 +281,13 @@ export async function saveStage(db: SupabaseClient, run: Json, stage: EngineStag
   if (prior.error) throw prior.error;
   const version = Number(prior.data?.version ?? 0) + 1;
   const now = new Date().toISOString();
-  const result = await db.from('engine_stage_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, stage, version, status, input_payload: versionedJson(input ?? {}), output_payload: output === null || output === undefined ? null : versionedJson(output), warnings, errors, parent_stage_versions: versionPayload(parentStageVersions), started_at: now, completed_at: now }).select('*').single();
+  // `engine_stage_runs.status` records whether execution finished. The package's own
+  // `status` remains the data/model readiness assessment (COMPLETE/PARTIAL/BLOCKED).
+  // This keeps a successfully executed stage visible as complete without hiding gaps.
+  const executionStatus = status === 'BLOCKED' || status === 'FAILED' ? status : 'COMPLETE';
+  const result = await db.from('engine_stage_runs').insert({ tenant_id: run.tenant_id, generation_run_id: run.id, stage, version, status: executionStatus, input_payload: versionedJson(input ?? {}), output_payload: output === null || output === undefined ? null : versionedJson(output), warnings, errors, parent_stage_versions: versionPayload(parentStageVersions), started_at: now, completed_at: now }).select('*').single();
   if (result.error) throw result.error;
-  await recordEvent(db, { tenant_id: String(run.tenant_id), generation_run_id: String(run.id), event_type: 'STAGE_COMPLETED', stage, payload: { version, status, warnings, errors } });
+  await recordEvent(db, { tenant_id: String(run.tenant_id), generation_run_id: String(run.id), event_type: 'STAGE_COMPLETED', stage, payload: { version, executionStatus, readinessStatus: status, warnings, errors } });
   run.lineage = versionPayload({ ...(run.lineage as Json ?? {}), [stage]: version });
   await db.from('generation_runs').update({ current_stage: stage, state: stateForStage(stage), lineage: run.lineage }).eq('tenant_id', run.tenant_id).eq('id', run.id);
   return result.data as Json;
@@ -442,7 +465,14 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           const weighted = deriveWeightedSeasonInputs(workingSlate.sport, player, seasonRows, priorSeasonRows, currentWeight, { allowTeamMismatch });
           const inputs = weighted.inputs;
           if (weighted.usedPrior && currentRow && currentGames > 0 && priorRow) blendedPlayers.push(player.playerName);
-          const identity = providerId ? { ...player.identity, sportsDataIoId: providerId, confidence: 'HIGH' as const, matchedBy: player.identity?.matchedBy === 'DRAFTKINGS' ? 'NAME_AND_TEAM' as const : player.identity?.matchedBy ?? 'NAME_AND_TEAM' as const } : player.identity;
+          const hasExactSportsDataIoIdentity = player.identity?.confidence === 'EXACT'
+            && player.identity.matchedBy === 'PROVIDER_ID'
+            && player.identity.sportsDataIoId === providerId;
+          const identity = providerId
+            ? hasExactSportsDataIoIdentity
+              ? player.identity
+              : { ...player.identity, sportsDataIoId: providerId, confidence: 'HIGH' as const, matchedBy: player.identity?.matchedBy === 'DRAFTKINGS' ? 'NAME_AND_TEAM' as const : player.identity?.matchedBy ?? 'NAME_AND_TEAM' as const }
+            : player.identity;
           return { ...player, ...(identity ? { identity } : {}), ...(Number.isFinite(dkPoints) && !Number.isFinite(player.providerFppg) ? { providerFppg: dkPoints / games } : {}), ...(inputs && !player.projectionInputs ? { projectionInputs: inputs } : {}) };
         });
         workingSlate = { ...workingSlate, playerPool: refreshedPlayers };
@@ -733,9 +763,24 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       nbaAvailabilitySnapshot = snapshot;
       const gate = applyNbaStreetTeamIdentityGate(workingSlate, snapshot);
       workingSlate = gate.slate;
-      stages.streetTeamIdentityGate = { snapshotId: snapshot.snapshotId, mappedPlayerCount: gate.mappedPlayerIds.length, excludedPlayers: gate.excluded };
+      const snapshotFreshness = streetTeamSnapshotFreshness(snapshot);
+      stages.streetTeamIdentityGate = { snapshotId: snapshot.snapshotId, snapshotAsOf: snapshot.asOf, snapshotFreshness, mappedPlayerCount: gate.mappedPlayerIds.length, availabilityEvidence: gate.availabilityEvidence, excludedPlayers: gate.excluded };
+      const streetTeamWarnings: string[] = [];
+      const externalAvailabilityCount = gate.availabilityEvidence.filter((item) => item.source === 'ESPN').length;
+      if (externalAvailabilityCount) streetTeamWarnings.push(`Fresh ESPN availability statuses resolved ${externalAvailabilityCount} player(s) whose SportsDataIO Free Trial injury status was unrecognized. ESPN status is not a confirmed starting lineup.`);
+      if (snapshotFreshness === 'PARTIAL') streetTeamWarnings.push(`Street Team refreshed a usable but partial NBA snapshot; ${snapshot.providerDiagnostics.filter((item) => item.status === 'FAILED' || item.status === 'RATE_LIMITED').length} provider feed(s) failed or were rate-limited and ${snapshot.unknowns.length} question(s) remain unresolved.`);
+      if (streetTeamWarnings.length) stages.streetTeamWarning = streetTeamWarnings.join(' ');
       if (gate.excluded.length) stages.identityGateWarning = `${gate.excluded.length} NBA player(s) were removed from automatic selection because exact identity or resolved availability could not be verified.`;
-      if (!workingSlate.playerPool.length) throw new ApiError(422, 'NBA auto-selection is blocked because no player has a verified exact identity and resolved availability.', 'VALIDATION_FAILED');
+      if (!workingSlate.playerPool.length) {
+        const reasons = new Map<string, number>();
+        for (const item of gate.excluded) reasons.set(item.reason, (reasons.get(item.reason) ?? 0) + 1);
+        const mapping = asRecord(stages.projectionIdentityMapping);
+        const mappingSummary = mapping
+          ? ` Exact DraftKings-to-SportsDataIO mapping: ${String(mapping.mapped ?? 0)} mapped, ${String(mapping.unresolved ?? 0)} unresolved, ${String(mapping.conflicts ?? 0)} conflicts across ${String(mapping.rosterRows ?? 0)} provider roster rows.`
+          : ' No exact DraftKings-to-SportsDataIO roster mapping was recorded for this run.';
+        const reasonSummary = [...reasons].map(([reason, count]) => `${count} ${reason}`).join('; ');
+        throw new ApiError(422, `NBA auto-selection is blocked because no player passed exact identity and availability checks.${mappingSummary} Gate exclusions: ${reasonSummary || 'none recorded'}`, 'VALIDATION_FAILED');
+      }
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError(503, error instanceof Error ? error.message : 'NBA Street Team identity verification failed.', 'PROVIDER_UNAVAILABLE');

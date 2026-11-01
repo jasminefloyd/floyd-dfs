@@ -4,6 +4,7 @@ export interface NbaSlateIdentityGateResult {
   slate: ValidatedSlate;
   mappedPlayerIds: string[];
   excluded: Array<{ playerId: string; playerName: string; reason: string }>;
+  availabilityEvidence: Array<{ playerId: string; source: string; status: string; mappedBy: string; retrievedAt: string; confirmed: boolean }>;
 }
 
 /** Only exact DK/provider identities present in the captured Street Team roster may enter auto-selection. */
@@ -15,6 +16,7 @@ export function applyNbaStreetTeamIdentityGate(slate: ValidatedSlate, snapshot: 
   const availability = new Map(snapshot.resolvedFacts.filter((fact) => fact.factType === 'availability.injury_status').map((fact) => [fact.subject.id, fact]));
   const mappedPlayerIds: string[] = [];
   const excluded: NbaSlateIdentityGateResult['excluded'] = [];
+  const availabilityEvidence: NbaSlateIdentityGateResult['availabilityEvidence'] = [];
   const playerPool = slate.playerPool.flatMap((player) => {
     const providerId = player.identity?.sportsDataIoId;
     const dkId = player.identity?.draftKingsId ?? player.playerId;
@@ -34,19 +36,39 @@ export function applyNbaStreetTeamIdentityGate(slate: ValidatedSlate, snapshot: 
       return [];
     }
     const statusFact = availability.get(matches[0]!.subject.id);
-    const status = asRecord(statusFact?.value)?.normalizedStatus;
-    if (statusFact?.state === 'CONFLICT' || status === 'UNKNOWN') {
+    const streetTeamStatus = asRecord(statusFact?.value)?.normalizedStatus;
+    const currentStatus = player.availability;
+    const currentStatusAge = now.getTime() - Date.parse(currentStatus?.retrievedAt ?? '');
+    const freshEspnStatus = currentStatus?.source.toUpperCase() === 'ESPN'
+      && Number.isFinite(currentStatusAge)
+      && currentStatusAge >= 0
+      && currentStatusAge <= 24 * 60 * 60_000
+      && ['PROVIDER_ID', 'NAME_AND_TEAM'].includes(currentStatus.mappedBy ?? '')
+      && ['ACTIVE', 'OUT', 'INACTIVE'].includes(currentStatus.status);
+    // The SportsDataIO Free Trial can return the literal `Scrambled` in InjuryStatus.
+    // That remains UNKNOWN in Street Team; a fresh ESPN status matched by provider ID
+    // or exact name/team can resolve the current scan. Projected/questionable, stale,
+    // unknown, and name-only ESPN records continue to fail closed.
+    if (statusFact?.state === 'CONFLICT' || (streetTeamStatus === 'UNKNOWN' && !freshEspnStatus)) {
       excluded.push({ playerId: player.playerId, playerName: player.playerName, reason: 'Street Team availability is conflicted or unknown.' });
       return [];
     }
+    const status = streetTeamStatus === 'UNKNOWN' && freshEspnStatus ? currentStatus!.status : streetTeamStatus;
     mappedPlayerIds.push(player.playerId);
+    availabilityEvidence.push(streetTeamStatus === 'UNKNOWN' && freshEspnStatus
+      ? { playerId: player.playerId, source: currentStatus!.source, status: currentStatus!.status, mappedBy: currentStatus!.mappedBy ?? 'UNMAPPED', retrievedAt: currentStatus!.retrievedAt, confirmed: currentStatus!.confirmed }
+      : { playerId: player.playerId, source: 'STREET_TEAM', status: String(streetTeamStatus ?? 'ROSTER_ONLY'), mappedBy: 'SPORTSDATAIO_PROVIDER_ID', retrievedAt: statusFact?.resolvedAt ?? snapshot.asOf, confirmed: true });
     if (status === 'OUT') {
       excluded.push({ playerId: player.playerId, playerName: player.playerName, reason: 'Street Team has a resolved OUT status.' });
       return [];
     }
+    if (status === 'INACTIVE') {
+      excluded.push({ playerId: player.playerId, playerName: player.playerName, reason: 'Current ESPN availability status is INACTIVE.' });
+      return [];
+    }
     return [player];
   });
-  return { slate: { ...slate, playerPool }, mappedPlayerIds, excluded };
+  return { slate: { ...slate, playerPool }, mappedPlayerIds, excluded, availabilityEvidence };
 }
 
 /** Recheck the selected entries against the freshest verified pre-lock NBA identity/status snapshot. */

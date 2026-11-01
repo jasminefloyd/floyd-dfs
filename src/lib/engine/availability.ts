@@ -72,7 +72,17 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
     const record = records[0];
     const isEspn = snapshot.source.toUpperCase().includes('ESPN');
     const mappedBy: NonNullable<SlatePlayer['availability']>['mappedBy'] = providerIdRecords.length ? 'PROVIDER_ID' : exactRecords.length ? 'NAME_AND_TEAM' : 'NAME_ONLY';
-    const identity = record.providerPlayerId && isEspn ? { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy } : player.identity;
+    // Keep identity provenance from the stronger exact SportsDataIO roster match.
+    // ESPN is enriching availability/photos here; replacing `confidence` and
+    // `matchedBy` would downgrade a verified DK→SportsDataIO identity and cause
+    // the NBA Street Team gate to reject the player later in the same pipeline.
+    const identity: SlatePlayer['identity'] = record.providerPlayerId && isEspn
+      ? player.identity?.confidence === 'EXACT'
+        && player.identity.matchedBy === 'PROVIDER_ID'
+        && Boolean(player.identity.sportsDataIoId)
+        ? { ...player.identity, espnId: record.providerPlayerId }
+        : { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy }
+      : player.identity;
     const photoIdentityVerified = providerIdRecords.length === 1 || exactRecords.length === 1;
     const photoUrl = isEspn && photoIdentityVerified ? approvedPhotoUrl(record.photoUrl, allowedPhotoHosts) : undefined;
     const photo = photoUrl ? { tenantId: slate.tenantId, playerId: player.playerId, providerId: record.providerPlayerId, source: 'ESPN', url: photoUrl, retrievedAt: snapshot.retrievedAt, verifiedAt: snapshot.retrievedAt } : player.photo;

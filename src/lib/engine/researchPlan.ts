@@ -19,7 +19,7 @@ export function createResearchPlan(slate: ValidatedSlate, now = new Date(), gaps
     preferredSourceTiers: tiers,
     freshnessRequirementMinutes: freshness,
   }));
-  for (const player of slate.playerPool) questions.push({
+  for (const player of slate.playerPool.filter((item) => String(item.position ?? '').toUpperCase() !== 'DST')) questions.push({
     id: `${slate.slateId}:availability:${player.playerId}`,
     bucket: 'AVAILABILITY',
     question: `Is ${player.playerName} available with an unrestricted role for this slate?`,

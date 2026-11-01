@@ -66,6 +66,9 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   }
 
   const projectionByPlayer = new Map(input.projectionPackage.players.map((player) => [player.playerId, player]));
+  // Search enumerates many partial rosters. Keep identity lookups O(1) rather than
+  // rescanning the full player pool for every branch and team constraint.
+  const playerById = new Map(input.validatedSlate.playerPool.map((player) => [player.playerId, player]));
   const fixedRosterSlots = options.fixedRosterSlots ?? {};
   const fixedSlotErrors: string[] = [];
   const fixedPlayerIds = new Set<string>();
@@ -117,7 +120,7 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
   const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
   const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, 0, new Set(), workingInput, projectionByPlayer, playersByValue, minSalaryBySlot, generated, Number.MAX_SAFE_INTEGER, minSalaryUsed, searchControl, fixedRosterSlots);
+  enumerate(slots, 0, {}, 0, 0, new Set(), workingInput, projectionByPlayer, playerById, playersByValue, minSalaryBySlot, generated, Number.MAX_SAFE_INTEGER, minSalaryUsed, searchControl, fixedRosterSlots);
   const uniqueGenerated = deduplicateSlotPermutations(generated);
   const exhaustive = !searchControl.truncated;
   if (!uniqueGenerated.length) return blocked(input.validatedSlate, profile, now, input.validatedSlate.sport === 'MLB' && unconfirmedMlbPlayers.length
@@ -233,7 +236,7 @@ function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<str
   return result;
 }
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, currentExpectedPoints: number, used: Set<string>, input: OptimizerInput, projectionByPlayer: Map<string, ProjectionPackage['players'][number]>, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number; truncated: boolean; objectiveBounded: boolean; targetLineups: number; bestTopK: Array<{ key: string; score: number }>; seenLineups: Set<string>; candidatesEvaluated: number; prunedBranches: number }, fixedRosterSlots: Record<string, string>): void {
+function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, currentExpectedPoints: number, used: Set<string>, input: OptimizerInput, projectionByPlayer: Map<string, ProjectionPackage['players'][number]>, playerById: Map<string, SlatePlayer>, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number; truncated: boolean; objectiveBounded: boolean; targetLineups: number; bestTopK: Array<{ key: string; score: number }>; seenLineups: Set<string>; candidatesEvaluated: number; prunedBranches: number }, fixedRosterSlots: Record<string, string>): void {
   if (output.length >= limit && !control.objectiveBounded) return;
   if (control.visited >= control.budget) { control.truncated = true; return; }
   control.visited += 1;
@@ -243,14 +246,14 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     if (remainingUpperBound < weakestRetained - 1e-9) { control.prunedBranches += 1; return; }
   }
   if (index === slots.length) {
-    const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
+    const teams = new Set(Object.values(rosterSlots).map((id) => playerById.get(id)?.team).filter(Boolean));
     const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
     if (minimumTeams && teams.size < minimumTeams) return;
     const maxHittersPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumHittersPerTeam;
     if (maxHittersPerTeam && input.validatedSlate.sport === 'MLB') {
       const hittersByTeam = new Map<string, number>();
       for (const playerId of Object.values(rosterSlots)) {
-        const player = input.validatedSlate.playerPool.find((candidate) => candidate.playerId === playerId);
+        const player = playerById.get(playerId);
         if (player?.team && !['P', 'SP', 'RP'].includes(String(player.position ?? '').toUpperCase())) hittersByTeam.set(player.team, (hittersByTeam.get(player.team) ?? 0) + 1);
       }
       if ([...hittersByTeam.values()].some((count) => count > maxHittersPerTeam)) return;
@@ -278,7 +281,7 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
   const slot = slots[index];
   const ruleSlot = baseSlot(slot);
   const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
-  const selectedTeams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
+  const selectedTeams = new Set(Object.values(rosterSlots).map((id) => playerById.get(id)?.team).filter(Boolean));
   const remainingMinCost = slots.slice(index + 1).reduce((sum, remainingSlot) => sum + (minSalaryBySlot[baseSlot(remainingSlot)] ?? 0), 0);
   for (const player of playersByValue) {
     if (output.length >= limit && !control.objectiveBounded) return;
@@ -293,18 +296,18 @@ function enumerate(slots: string[], index: number, rosterSlots: Record<string, s
     const salary = salaryForSlot(player, ruleSlot, input.validatedSlate.rosterRules.slots[ruleSlot]);
     if (salary === undefined || salaryUsed + salary + remainingMinCost > input.validatedSlate.salaryCap) continue;
     const maxPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
-    if (maxPerTeam && player.team && Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)?.team).filter((team) => team === player.team).length >= maxPerTeam) continue;
+    if (maxPerTeam && player.team && Object.values(rosterSlots).filter((id) => playerById.get(id)?.team === player.team).length >= maxPerTeam) continue;
     const maxHittersPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumHittersPerTeam;
     if (maxHittersPerTeam && input.validatedSlate.sport === 'MLB' && player.team && !['P', 'SP', 'RP'].includes(String(player.position ?? '').toUpperCase())) {
-      const existingHitters = Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)).filter((candidate) => candidate !== undefined && candidate.team === player.team && !['P', 'SP', 'RP'].includes(String(candidate.position ?? '').toUpperCase())).length;
+      const existingHitters = Object.values(rosterSlots).map((id) => playerById.get(id)).filter((candidate) => candidate !== undefined && candidate.team === player.team && !['P', 'SP', 'RP'].includes(String(candidate.position ?? '').toUpperCase())).length;
       if (existingHitters >= maxHittersPerTeam) continue;
     }
     if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
     rosterSlots[slot] = player.playerId;
     used.add(player.playerId);
-    const projection = input.projectionPackage.players.find((row) => row.playerId === player.playerId);
+    const projection = projectionByPlayer.get(player.playerId);
     const expectedPlayerPoints = projection ? meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50) * (input.validatedSlate.rosterRules.slots[ruleSlot]?.fantasyMultiplier ?? 1) : 0;
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, currentExpectedPoints + expectedPlayerPoints, used, input, projectionByPlayer, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control, fixedRosterSlots);
+    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, currentExpectedPoints + expectedPlayerPoints, used, input, projectionByPlayer, playerById, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control, fixedRosterSlots);
     delete rosterSlots[slot];
     used.delete(player.playerId);
   }

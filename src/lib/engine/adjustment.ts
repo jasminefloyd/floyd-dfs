@@ -31,7 +31,7 @@ export function netSignedMagnitude(items: AdjustmentItem[]): number {
 
 export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, now = new Date()): AdjustmentPackage {
   const unknowns = research.unknowns ?? [];
-  const criticalGaps = unknowns.filter((unknown) => unknown.importance === 'CRITICAL').map((unknown) => ({ question: unknown.question, importance: unknown.importance, reason: unknown.reason, affectedPlayerIds: unknown.subjectId ? [unknown.subjectId] : slate.playerPool.map((player) => player.playerId) }));
+  const criticalGaps = unknowns.filter((unknown) => unknown.importance === 'CRITICAL' && (!unknown.subjectId || slate.playerPool.some((player) => player.playerId === unknown.subjectId && String(player.position ?? '').toUpperCase() !== 'DST'))).map((unknown) => ({ question: unknown.question, importance: unknown.importance, reason: unknown.reason, affectedPlayerIds: unknown.subjectId ? [unknown.subjectId] : slate.playerPool.filter((player) => String(player.position ?? '').toUpperCase() !== 'DST').map((player) => player.playerId) }));
   const freshFindings = research.findings.filter((finding) => !finding.expiresAt || Date.parse(finding.expiresAt) > now.getTime());
   const unlinkedContext = freshFindings.filter((finding) => (finding.subjectType === 'TEAM' || finding.subjectType === 'EVENT') && finding.bucket !== 'FIELD_SENTIMENT');
   let adjustments = slate.playerPool.map((player) => {
@@ -43,6 +43,7 @@ export function adjustSlate(slate: ValidatedSlate, research: ResearchPackage, no
     return adjustPlayer(player.playerId, slate.sport, freshFindings.filter((finding) => (finding.subjectType === 'PLAYER' || !finding.subjectType) && finding.subjectId === player.playerId), unlinkedContext.filter(linkedGame));
   });
   const evidenceGaps = slate.playerPool
+    .filter((player) => String(player.position ?? '').toUpperCase() !== 'DST')
     .filter((player) => !freshFindings.some((finding) => finding.subjectId === player.playerId))
     .map((player) => ({ question: `What role, availability, or matchup evidence exists for ${player.playerName}?`, importance: 'HIGH' as const, reason: `No research findings were retrieved for ${player.playerName}; Sport Adjustment cannot assert an opportunity change without evidence.`, affectedPlayerIds: [player.playerId] }));
   adjustments = redistributeForUnavailablePlayers(slate, adjustments);
