@@ -28,7 +28,7 @@ No named on-call owner or escalation contact was found in the checked-in configu
 ## Rollout and rollback controls
 
 - Server feature flags are case-insensitive booleans and default to `false` when unset.
-- `STREET_TEAM_V2` gates the NBA collection/scheduler endpoints. Keep scheduling disabled until the provider call ceiling and required secrets are configured and verified.
+- `STREET_TEAM_V2` gates the NBA collection/scheduler endpoints. Production currently has this flag enabled, but SportsDataIO collection remains paused: the configured account is an API Free Trial, `SPORTS_DATA_IO_DATA_TIER` is not attested as `PRODUCTION_VERIFIED`, and the verified daily call budget is unset. The scheduler's budget check skips provider collection and the collector's tier check prevents provider requests. Do not mark the trial as production-verified or invent a call budget. Enable collection only after valid provider data access and the applicable call ceiling are verified.
 - `NBA_HOUSE_V1` is retained as a shadow-mode alias; `NBA_HOUSE_SHADOW_V1` enables shadow reporting. `NBA_HOUSE_CANARY_V1` and `NBA_HOUSE_ACTIVE_V1` are separate runtime selections and must not both be enabled. A selected candidate still requires matching reviewed registry/evaluation evidence.
 - `NBA_HOUSE_KILL_SWITCH_V1=true` forces pinned NBA House runs back to legacy. After setting it in the deployment environment, verify the next run reports legacy selection before considering rollback complete.
 - `LEARNING_V2` gates evaluation/proposal/registry writes; disabling it stops those writes without changing the legacy generation route.
