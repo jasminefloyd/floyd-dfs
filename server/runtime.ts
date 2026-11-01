@@ -125,6 +125,8 @@ export function cors(req: VercelRequest, res: VercelResponse): void {
 }
 export function respondError(req: VercelRequest, res: VercelResponse, error: unknown): void {
   cors(req, res);
+  const id = responseRequestId(req);
+  if (!(error instanceof ApiError) && !(error instanceof DraftKingsApiError)) logInternalApiError(id, error);
   if (error instanceof DraftKingsApiError && error.details.status === 403) {
     const upstreamEndpoint = (() => { try { const url = new URL(error.details.url); return `${url.host}${url.pathname}`; } catch { return undefined; } })();
     const safeMessage = "DraftKings denied this server-side API request (HTTP 403). Contest discovery may still work, but detailed contest and player-pool data is currently blocked from this deployment.";
@@ -132,7 +134,7 @@ export function respondError(req: VercelRequest, res: VercelResponse, error: unk
       error: safeMessage,
       safeMessage,
       code: 'PROVIDER_UNAVAILABLE',
-      requestId: responseRequestId(req),
+      requestId: id,
       retriable: false,
       stage: 'SLATE',
       reasons: [{ code: 'UPSTREAM_ACCESS_BLOCKED', message: 'The provider denied this request.' }],
@@ -149,7 +151,24 @@ export function respondError(req: VercelRequest, res: VercelResponse, error: unk
     : error instanceof DraftKingsApiError
       ? `DraftKings provider request failed${error.details.status ? ` (HTTP ${error.details.status})` : ''}.`
       : 'Server request failed. Retry later or contact support with the request ID.';
-  res.status(status).json({ schemaVersion: FDS_SCHEMA_VERSION, error: safeMessage, safeMessage, code: apiErrorCode(legacyCode, status), requestId: responseRequestId(req), retriable: status === 408 || status === 429 || status >= 500, reasons: [{ code: legacyCode, message: safeMessage }] });
+  res.status(status).json({ schemaVersion: FDS_SCHEMA_VERSION, error: safeMessage, safeMessage, code: apiErrorCode(legacyCode, status), requestId: id, retriable: status === 408 || status === 429 || status >= 500, reasons: [{ code: legacyCode, message: safeMessage }] });
+}
+function logInternalApiError(id: string, error: unknown): void {
+  const diagnostic = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const fields: Record<string, string | number> = {
+    requestId: id,
+    name: error instanceof Error ? error.name.slice(0, 80) : typeof error,
+  };
+  if (typeof diagnostic.code === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(diagnostic.code)) fields.code = diagnostic.code;
+  if (typeof diagnostic.status === 'number' && Number.isFinite(diagnostic.status)) fields.status = diagnostic.status;
+  if (error instanceof BoundaryContractError) fields.path = error.path.slice(0, 128);
+  const message = typeof diagnostic.message === 'string' ? diagnostic.message : '';
+  const notNull = /null value in column "([^"]{1,128})" of relation "([^"]{1,128})"/.exec(message);
+  if (notNull) {
+    fields.column = notNull[1]!;
+    fields.table = notNull[2]!;
+  }
+  console.error('api-internal-error', fields);
 }
 function responseRequestId(req: VercelRequest): string { const value = String(req.headers['x-request-id'] ?? '').trim(); return /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : requestId(); }
 function apiErrorCode(code: string, status: number): import('../src/lib/engine/contracts.js').FdsApiError['code'] {

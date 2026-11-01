@@ -23,7 +23,10 @@ export default function StreetTeamPage() {
     const selectedSnapshotPath = requestedSnapshotId
       ? `/api/street-team/briefings?snapshotId=${encodeURIComponent(requestedSnapshotId)}`
       : '/api/street-team/briefings';
-    Promise.all([fetch(selectedSnapshotPath), fetch('/api/street-team/briefings?history=1&limit=20')]).then(async ([latestResponse, historyResponse]) => {
+    authenticatedHeaders().then((headers) => Promise.all([
+      fetch(selectedSnapshotPath, { headers }),
+      fetch('/api/street-team/briefings?history=1&limit=20', { headers }),
+    ])).then(async ([latestResponse, historyResponse]) => {
       const response = latestResponse;
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message ?? body.message ?? 'Unable to load the Street Team briefing.');
