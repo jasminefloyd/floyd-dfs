@@ -78,7 +78,7 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
     // the NBA Street Team gate to reject the player later in the same pipeline.
     const identity: SlatePlayer['identity'] = record.providerPlayerId && isEspn
       ? player.identity?.confidence === 'EXACT'
-        && player.identity.matchedBy === 'PROVIDER_ID'
+        && (player.identity.matchedBy === 'PROVIDER_ID' || player.identity.matchedBy === 'NAME_AND_TEAM')
         && Boolean(player.identity.sportsDataIoId)
         ? { ...player.identity, espnId: record.providerPlayerId }
         : { ...player.identity, espnId: record.providerPlayerId, confidence: 'HIGH' as const, matchedBy: mappedBy }

@@ -478,7 +478,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           const inputs = weighted.inputs;
           if (weighted.usedPrior && currentRow && currentGames > 0 && priorRow) blendedPlayers.push(player.playerName);
           const hasExactSportsDataIoIdentity = player.identity?.confidence === 'EXACT'
-            && player.identity.matchedBy === 'PROVIDER_ID'
+            && (player.identity.matchedBy === 'PROVIDER_ID' || player.identity.matchedBy === 'NAME_AND_TEAM')
             && player.identity.sportsDataIoId === providerId;
           const identity = providerId
             ? hasExactSportsDataIoIdentity
