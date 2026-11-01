@@ -1,0 +1,9 @@
+# Local credentials, build artifacts, metadata, and user-provided archives are not deployment inputs.
+**/.env*
+*.local
+Archive.zip
+node_modules
+dist
+test-results
+supabase/.temp
+.vercel
