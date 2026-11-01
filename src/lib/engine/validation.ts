@@ -47,29 +47,72 @@ export function assertRosterFeasible(slate: ValidatedSlate, nodeLimit = 250_000,
   });
   const salaryCap = slate.salaryCap;
   const rules = slate.rosterRules.slots;
+  const candidatesBySlot = new Map(slots.map((slot) => {
+    const base = slot.replace(/_\d+$/, '');
+    const rule = rules[base];
+    const candidates = available.flatMap((player) => {
+      if (!player.eligibility[slot] && !player.eligibility[base]) return [];
+      const salary = salaryForRosterSlot(player, slot, rule);
+      return salary !== undefined && Number.isFinite(salary) && salary >= 0 && salary <= salaryCap ? [{ player, salary }] : [];
+    }).sort((a, b) => a.salary - b.salary || a.player.playerId.localeCompare(b.player.playerId));
+    return [slot, candidates] as const;
+  }));
+  // Search the most constrained roster slots first. DraftKings player pools arrive in salary
+  // order (most expensive first); walking that order made this feasibility-only check spend its
+  // node budget proving that many expensive partial rosters exceeded the cap before reaching a
+  // legal low-cost roster. Candidate order here affects only proof of existence, never projection
+  // or optimizer ranking.
+  const searchSlots = [...slots].sort((a, b) => (candidatesBySlot.get(a)!.length - candidatesBySlot.get(b)!.length) || a.localeCompare(b));
   const used = new Set<string>();
   const roster: Record<string, string> = {};
+  const teamCounts = new Map<string, number>();
   let visited = 0;
   const visit = (index: number, salary: number): boolean => {
     visited += 1;
     if (visited > nodeLimit) return false;
     if (salary > salaryCap) return false;
-    if (index === slots.length) {
+    const remaining = searchSlots.slice(index);
+    if (index === searchSlots.length) {
       if (salary < minSalaryUsed) return false;
       const playerIds = Object.values(roster);
       return validateLineupCandidate({ playerIds, rosterSlots: roster, salaryUsed: salary }, slate).length === 0;
     }
-    const slot = slots[index];
-    const base = slot.replace(/_\d+$/, '');
-    const rule = rules[base];
-    for (const player of available) {
+    let minimumRemainingSalary = 0;
+    let maximumRemainingSalary = 0;
+    for (const remainingSlot of remaining) {
+      const options = candidatesBySlot.get(remainingSlot)!;
+      const eligible = slate.rosterRules.uniquePlayersRequired ? options.filter(({ player }) => !used.has(player.playerId)) : options;
+      if (!eligible.length) return false;
+      minimumRemainingSalary += eligible[0]!.salary;
+      maximumRemainingSalary += eligible[eligible.length - 1]!.salary;
+    }
+    if (salary + minimumRemainingSalary > salaryCap || salary + maximumRemainingSalary < minSalaryUsed) return false;
+
+    const teamConstraints = slate.rosterRules.teamConstraints;
+    const maximumPlayersPerTeam = teamConstraints?.maximumPlayersPerTeam;
+    if (maximumPlayersPerTeam !== undefined && [...teamCounts.values()].some((count) => count > maximumPlayersPerTeam)) return false;
+    const minimumTeams = teamConstraints?.minimumTeams;
+    if (minimumTeams !== undefined) {
+      const possibleNewTeams = new Set(remaining.flatMap((remainingSlot) => candidatesBySlot.get(remainingSlot)!
+        .filter(({ player }) => !used.has(player.playerId) && player.team && !teamCounts.has(player.team))
+        .map(({ player }) => player.team!)));
+      if (teamCounts.size + possibleNewTeams.size < minimumTeams) return false;
+    }
+
+    const slot = searchSlots[index]!;
+    const options = candidatesBySlot.get(slot)!;
+    for (const { player, salary: slotSalary } of options) {
       if (slate.rosterRules.uniquePlayersRequired && used.has(player.playerId)) continue;
-      if (!player.eligibility[slot] && !player.eligibility[base]) continue;
-      const slotSalary = salaryForRosterSlot(player, slot, rule);
-      if (slotSalary === undefined || salary + slotSalary > salaryCap) continue;
+      if (salary + slotSalary > salaryCap) break;
       roster[slot] = player.playerId;
       used.add(player.playerId);
+      if (player.team) teamCounts.set(player.team, (teamCounts.get(player.team) ?? 0) + 1);
       if (visit(index + 1, salary + slotSalary)) return true;
+      if (player.team) {
+        const count = (teamCounts.get(player.team) ?? 1) - 1;
+        if (count) teamCounts.set(player.team, count);
+        else teamCounts.delete(player.team);
+      }
       used.delete(player.playerId);
       delete roster[slot];
     }
