@@ -30,12 +30,16 @@ assert.equal(selectedCandidate.model.houseRuntime.mode, 'CANARY');
 assert.equal(selectedCandidate.model.houseRuntime.candidateSelected, true);
 assert.equal(selectedCandidate.model.houseRuntime.configuredMode, 'LEGACY', 'observed assignment is distinct from current flags');
 
-const run = (tenantId: string, assignedMode: string, createdAt = now.toISOString(), candidateSelected = false) => ({ tenant_id: tenantId, created_at: createdAt, lineage: { sport: 'NBA', nbaHouseRolloutAssignment: { assignedMode, candidateSelected, effectiveProjection: candidateSelected ? 'HOUSE' : 'LEGACY', fallback: assignedMode === 'LEGACY', reason: assignedMode === 'LEGACY' ? 'Fallback to legacy.' : `${assignedMode} assignment.` } } });
+const run = (tenantId: string, assignedMode: string, createdAt = now.toISOString(), candidateSelected = false, state = 'COMPLETE') => ({ tenant_id: tenantId, created_at: createdAt, state, lineage: { sport: 'NBA', nbaHouseRolloutAssignment: { assignedMode, candidateSelected, effectiveProjection: candidateSelected ? 'HOUSE' : 'LEGACY', fallback: assignedMode === 'LEGACY', reason: assignedMode === 'LEGACY' ? 'Fallback to legacy.' : `${assignedMode} assignment.` } } });
 const legacyRun = buildOperationsSnapshot({ ...base, generationRuns: [run('tenant-a', 'LEGACY')] });
 assert.equal(legacyRun.model.houseRuntime.mode, 'LEGACY');
 assert.equal(legacyRun.model.houseRuntime.telemetryStale, false);
 assert.equal(legacyRun.model.houseRuntime.fallback, true);
 assert.equal(legacyRun.model.houseRuntime.fallbackReason, 'Fallback to legacy.');
+assert.equal(legacyRun.model.houseRuntime.lastSuccessfulRunAt, now.toISOString());
+const failedLatest = buildOperationsSnapshot({ ...base, generationRuns: [run('tenant-a', 'CANARY', now.toISOString(), true, 'FAILED'), run('tenant-a', 'LEGACY', '2026-10-31T15:00:00.000Z', false, 'COMPLETE')] });
+assert.equal(failedLatest.model.houseRuntime.mode, 'CANARY', 'observed route follows the latest assignment regardless of outcome');
+assert.equal(failedLatest.model.houseRuntime.lastSuccessfulRunAt, '2026-10-31T15:00:00.000Z', 'last successful House run is separately identified');
 const shadowRun = buildOperationsSnapshot({ ...base, featureFlags: { ...flags, NBA_HOUSE_SHADOW_V1: true }, generationRuns: [run('tenant-a', 'SHADOW')] });
 assert.equal(shadowRun.model.houseRuntime.mode, 'SHADOW');
 assert.equal(shadowRun.model.houseRuntime.configuredMode, 'SHADOW');

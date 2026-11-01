@@ -23,6 +23,7 @@ export interface JointFieldScenarios {
 export interface PortfolioOptimizerInput {
   slate: ValidatedSlate; research: ResearchPackage; optimizer: OptimizerPackage; seed: string;
   fieldReadiness: 'CALIBRATED' | 'UNVALIDATED' | 'UNAVAILABLE';
+  fieldReadinessReason?: string;
   cashLineCalibration?: CashLineCalibration; lockedRosterSlots?: Record<string, string>;
   jointFieldScenarios?: JointFieldScenarios; searchBudget?: number;
 }
@@ -69,7 +70,7 @@ export function optimizePortfolio(input: PortfolioOptimizerInput, now = new Date
   const jointOutcomes = financialReady && best.length === count ? jointNetSamples(best, scenarios!, payout.payoutTiers, payout.fieldSize!, payout.entryFee!) : null;
   const samples = jointOutcomes?.samples ?? [];
   const ev = samples.length ? summary(samples) : null;
-  const readinessReason = financialReady ? null : payout.warnings.join(' ') || (input.fieldReadiness !== 'CALIBRATED' ? 'An independently reviewed calibrated field model is not available.' : !input.jointFieldScenarios ? 'A certified joint field scenario set is not available.' : 'The joint field scenario set failed identity, cutoff, candidate, rules, or score-shape validation.');
+  const readinessReason = financialReady ? null : [input.fieldReadinessReason, ...payout.warnings, input.fieldReadinessReason || payout.warnings.length ? null : input.fieldReadiness !== 'CALIBRATED' ? 'An independently reviewed calibrated field model is not available.' : !input.jointFieldScenarios ? 'A certified joint field scenario set is not available.' : 'The joint field scenario set failed identity, cutoff, candidate, rules, or score-shape validation.'].filter((reason): reason is string => Boolean(reason)).join(' ');
   const result: SelectionPackage = {
     ...selectedPackage, status: selectedPackage.status === 'BLOCKED' ? 'BLOCKED' : partial ? 'PARTIAL' : 'COMPLETE',
     warnings: [...selectedPackage.warnings, ...(!financialReady ? ['Portfolio used bounded joint score/upside selection. Expected net return is unavailable because complete contest/payout and calibrated common field scenarios are not present.'] : []), ...(exhausted ? [`Portfolio combination search reached its ${budget} node budget; the best feasible portfolio found is returned.`] : [])],

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { buildContestSpec, assessContestPayoutReadiness } from '../server/lineupAgent/contest.js';
 import { contestFieldReadiness } from '../server/lineupAgent/fieldModel.js';
+import { buildJointFieldScenarios } from '../server/lineupAgent/jointScenarioBuilder.js';
 import { calculateContestExpectedValue } from '../server/lineupAgent/expectedValue.js';
 import { contestRulesHash, optimizePortfolio } from '../server/lineupAgent/portfolioOptimizer.js';
 import { selectRuntimePortfolio } from '../server/lineupAgent/runtimeSelection.js';
@@ -68,7 +69,11 @@ assert.equal(tied.expectedGrossPayout, 75, 'rank 1 and rank 2 prizes are divided
 assert.equal(tied.expectedNetProfit, 65);
 assert.equal(tied.cashProbability, 1);
 assert.equal(contestFieldReadiness().status, 'UNAVAILABLE');
-assert.equal(contestFieldReadiness({ modelVersion: 'field.v1', independentContests: 1, minimumIndependentContests: 30, datasetSha256: 'hash', passedPredeterminedChecks: true, humanApproved: true }).status, 'EXPERIMENTAL');
+assert.equal(contestFieldReadiness({ modelVersion: 'field.v1', independentContests: 1, minimumIndependentContests: 30, datasetSha256: 'hash', passedPredeterminedChecks: true, humanApproved: true, evaluationVersion: null, evaluationReportSha256: null, holdoutStart: null, holdoutEnd: null, reviewedAt: null, reviewerId: null }).status, 'EXPERIMENTAL');
+const reviewedFieldEvidence = { modelVersion: 'field.v1', independentContests: 30, minimumIndependentContests: 30, datasetSha256: 'b'.repeat(64), passedPredeterminedChecks: true, humanApproved: true, evaluationVersion: 'field-eval.v1', evaluationReportSha256: 'c'.repeat(64), holdoutStart: '2026-10-01T00:00:00.000Z', holdoutEnd: '2026-10-30T00:00:00.000Z', reviewedAt: '2026-10-30T01:00:00.000Z', reviewerId: 'reviewer-fixture' };
+assert.equal(contestFieldReadiness(reviewedFieldEvidence).status, 'CALIBRATED');
+assert.equal(contestFieldReadiness({ ...reviewedFieldEvidence, reviewedAt: '2026-10-29T23:59:59.000Z' }).status, 'EXPERIMENTAL', 'review before holdout completion cannot certify calibration');
+assert.equal(contestFieldReadiness({ ...reviewedFieldEvidence, datasetSha256: 'not-a-hash' }).status, 'EXPERIMENTAL', 'dataset identity must be a SHA-256 digest');
 
 const jointSlate = { ...slateFor(2), contest: { ...slateFor(2).contest, objective: 'MAX_FPTS' as const, contestSize: 4, maxEntriesAllowed: 2 }, rosterRules: { rosterSize: 2, slots: { UTIL: { count: 2 } }, uniquePlayersRequired: true }, playerPool: [...slateFor(2).playerPool, { ...slateFor(2).playerPool[0]!, playerId: 'p5' }, { ...slateFor(2).playerPool[1]!, playerId: 'p6' }] } as ValidatedSlate;
 const jointCandidates: LineupCandidate[] = [
@@ -90,9 +95,16 @@ assert.equal(financial.portfolioOptimization?.expectedNetReturn, 13);
 assert.equal(financial.portfolioOptimization?.expectedNetReturnStandardError, 0);
 assert.equal(financial.portfolioOptimization?.portfolioCashProbability, 1);
 assert.equal(financial.portfolioOptimization?.portfolioLossProbability, 0);
-const runtimeCalibratedOptimizer: OptimizerPackage = { ...optimizer, contestSimulation: { status: 'COMPLETE', simulations: 2, fieldEntries: 2, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: 'UNAVAILABLE', readiness: 'CALIBRATED', jointFieldScenarios: fieldScores } };
+const runtimeCalibratedOptimizer: OptimizerPackage = { ...optimizer, contestSimulation: { status: 'COMPLETE', simulations: 2, fieldEntries: 2, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: 'UNAVAILABLE', readiness: 'CALIBRATED', fieldValidationEvidence: reviewedFieldEvidence, jointFieldScenarios: fieldScores } };
+assert.equal(buildJointFieldScenarios(runtimeCalibratedOptimizer).status, 'READY');
+assert.equal(buildJointFieldScenarios({ ...runtimeCalibratedOptimizer, contestSimulation: { ...runtimeCalibratedOptimizer.contestSimulation!, jointFieldScenarios: { ...fieldScores, datasetSha256: 'd'.repeat(64) } } }).status, 'NOT_READY', 'scenario data must match the reviewed calibration dataset');
 const runtimeFinancial = selectRuntimePortfolio({ slate: paidContest, research, optimizer: runtimeCalibratedOptimizer, seed: 'field-seed' });
-assert.equal(runtimeFinancial.portfolioOptimization?.objective, 'MAX_EXPECTED_NET_RETURN', 'runtime bridge passes the optimizer-produced calibrated scenario artifact');
+assert.equal(runtimeFinancial.portfolioOptimization?.objective, 'MAX_EXPECTED_NET_RETURN', 'runtime bridge passes scenario artifacts only with complete reviewed calibration evidence');
+const readinessFlagOnly: OptimizerPackage = { ...runtimeCalibratedOptimizer, contestSimulation: { ...runtimeCalibratedOptimizer.contestSimulation!, fieldValidationEvidence: undefined } };
+assert.equal(buildJointFieldScenarios(readinessFlagOnly).status, 'NOT_READY', 'a CALIBRATED flag alone cannot authorize financial optimization');
+const readinessFlagOnlyResult = selectRuntimePortfolio({ slate: paidContest, research, optimizer: readinessFlagOnly, seed: 'field-seed' });
+assert.equal(readinessFlagOnlyResult.portfolioOptimization?.expectedNetReturn, null);
+assert.match(readinessFlagOnlyResult.portfolioOptimization?.fieldReadinessReason ?? '', /evaluation evidence/i, 'readiness output names the missing review evidence');
 const uncalibratedWithScenario: OptimizerPackage = { ...optimizer, contestSimulation: { status: 'COMPLETE', simulations: 2, fieldEntries: 2, fieldModel: 'PROJECTED_OWNERSHIP', payoutModel: 'UNAVAILABLE', readiness: 'UNVALIDATED', jointFieldScenarios: fieldScores } };
 const runtimeFallback = selectRuntimePortfolio({ slate: paidContest, research, optimizer: uncalibratedWithScenario, seed: 'field-seed' });
 assert.equal(runtimeFallback.portfolioOptimization?.objective, 'SAFE_SCORE_UPSIDE', 'runtime ignores scenarios without calibrated optimizer readiness');

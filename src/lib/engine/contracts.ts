@@ -615,6 +615,12 @@ export interface OptimizerPackage {
     dependenceModel?: 'INDEPENDENT_PLAYER_SAMPLES';
     readiness?: 'UNVALIDATED' | 'CALIBRATED' | 'UNAVAILABLE';
     rulesVersion?: string;
+    fieldValidationEvidence?: {
+      modelVersion: string; independentContests: number; minimumIndependentContests: number;
+      datasetSha256: string | null; passedPredeterminedChecks: boolean; humanApproved: boolean;
+      evaluationVersion: string | null; evaluationReportSha256: string | null;
+      holdoutStart: string | null; holdoutEnd: string | null; reviewedAt: string | null; reviewerId: string | null;
+    };
     jointFieldScenarios?: {
       fieldModelVersion: string; datasetSha256: string; simulationVersion: string; seed: string;
       slateId: string; contestId: string; asOf: string; rulesHash: string; candidateIds: string[];

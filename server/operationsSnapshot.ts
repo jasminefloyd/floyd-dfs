@@ -12,6 +12,7 @@ export interface HouseRuntimeStatus {
   configuredMode: HouseRuntimeMode;
   source: 'RUN_LINEAGE' | 'NO_RECENT_NBA_ASSIGNMENT';
   observedAt: string | null;
+  lastSuccessfulRunAt: string | null;
   sampleCount: number;
   candidateSelected: boolean | null;
   fallback: boolean | null;
@@ -40,6 +41,7 @@ export function resolveHouseRuntimeStatus(input: { now: Date; tenantId: string; 
     return assignment ? [{ run, assignment }] : [];
   }).sort((a, b) => timestamp(b.run.created_at) - timestamp(a.run.created_at));
   const latest = assignments[0];
+  const lastSuccessfulRun = assignments.find(({ run }) => String(run.state ?? '').toUpperCase() === 'COMPLETE');
   const evaluation = input.evaluations.find((row) => String(row.candidate_model_version ?? '').trim().length > 0) ?? null;
   const lastCandidateEvaluation = evaluation ? {
     id: String(evaluation.id),
@@ -50,7 +52,7 @@ export function resolveHouseRuntimeStatus(input: { now: Date; tenantId: string; 
     sampleCount: finite(evaluation.sample_count),
   } : null;
   if (!latest) return {
-    mode: 'UNKNOWN', configuredMode, source: 'NO_RECENT_NBA_ASSIGNMENT', observedAt: null,
+    mode: 'UNKNOWN', configuredMode, source: 'NO_RECENT_NBA_ASSIGNMENT', observedAt: null, lastSuccessfulRunAt: null,
     sampleCount: 0, candidateSelected: null, fallback: null, fallbackReason: null,
     killSwitchEnabled, telemetryStale: true,
     reason: conflictingRolloutFlags ? 'Canary and active flags conflict; runtime configuration is invalid.' : 'No tenant-owned NBA runtime assignment is available in the sampled run history.',
@@ -65,7 +67,9 @@ export function resolveHouseRuntimeStatus(input: { now: Date; tenantId: string; 
       : mode === 'UNKNOWN' ? 'The latest NBA run assignment has an unsupported or missing mode.' : `Observed from NBA run lineage; latest sampled assignment is ${mode}.`;
   const fallback = typeof latest.assignment.fallback === 'boolean' ? latest.assignment.fallback : null;
   return {
-    mode, configuredMode, source: 'RUN_LINEAGE', observedAt, sampleCount: assignments.length,
+    mode, configuredMode, source: 'RUN_LINEAGE', observedAt,
+    lastSuccessfulRunAt: typeof lastSuccessfulRun?.run.created_at === 'string' ? lastSuccessfulRun.run.created_at : null,
+    sampleCount: assignments.length,
     candidateSelected: typeof latest.assignment.candidateSelected === 'boolean' ? latest.assignment.candidateSelected : null,
     fallback,
     fallbackReason: fallback ? reason : null,
