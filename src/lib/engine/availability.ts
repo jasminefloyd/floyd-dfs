@@ -7,7 +7,8 @@ export function normalizeProviderName(value: string): string { return value.norm
 // Both DraftKings and provider (SportsDataIO/ESPN) team codes pass through this same function
 // before comparison, so it only matters that every known variant for one real team collapses
 // to the same value -- not which specific variant is picked as "canonical."
-const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR', SDP: 'SD', SFG: 'SF', TBR: 'TB', AZ: 'ARI', OAK: 'ATH', LV: 'LVA' };
+// NBA variants differ by provider (DraftKings/SportsDataIO PHO, ESPN PHX/UTAH, odds feeds GSW/NOP/NYK/SAS).
+const TEAM_CODE_ALIASES: Record<string, string> = { CHW: 'CWS', WAS: 'WSH', PDX: 'POR', SDP: 'SD', SFG: 'SF', TBR: 'TB', AZ: 'ARI', OAK: 'ATH', LV: 'LVA', PHO: 'PHX', GSW: 'GS', NOP: 'NO', NYK: 'NY', SAS: 'SA', BRK: 'BKN', CHO: 'CHA', UTAH: 'UTA' };
 export function normalizeTeamCode(value?: string): string { const code = (value ?? '').trim().toUpperCase(); return TEAM_CODE_ALIASES[code] ?? code; }
 
 // A structured-availability provider call failing means the engine has zero confirmed signal

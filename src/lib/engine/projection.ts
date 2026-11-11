@@ -66,7 +66,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
     const fields = [...new Set(golfMissing.flatMap(({ fields: missing }) => missing))].join(', ');
     gaps.push({ reason: `Golf structured projections are missing required inputs for ${golfMissing.length}/${slate.playerPool.length} golfers (${fields}). Sample: ${sample}${golfMissing.length > 5 ? ', and others' : ''}. Check SportsDataIO Golf tournament lookup, feed access, and golfer-name matching; lineups remain blocked until inputs are available.` });
   }
-  if (slate.sport === 'NBA' || slate.sport === 'WNBA') reconcileBasketballOpportunities(prepared, slate, gaps);
+  if (slate.sport === 'NBA' || slate.sport === 'WNBA') { reconcileBasketballOpportunities(prepared, slate, gaps); applyBasketballMarketEnvironment(prepared, slate); }
   players.push(...prepared.map(({ player, values, adjustment }) => projectPlayer(slate, player, values, adjustment, true)));
   if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); any candidate uses DraftKings provider FPPG only and is provisional. Verified skill, course, weather, and finish/cut inputs are still required before entry.` });
   // DK's own FPPG is enough to produce a clearly provisional research candidate, but not an
@@ -117,6 +117,7 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const ceiling = quantile(orderedSamples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
   if (slate.sport === 'WNBA' && (adjusted.expectedMinutes ?? 99) <= 8 && player.availability?.roleStatus !== 'CONFIRMED_STARTER') uncertaintyFactors.push('Low-minute WNBA role is not confirmed; the current event distribution does not model a separate DNP probability.');
+  if (Number.isFinite(adjusted.marketScoringMultiplier) && Math.abs(adjusted.marketScoringMultiplier - 1) > 0.001) uncertaintyFactors.push(`Scoring rates scaled ${adjusted.marketScoringMultiplier >= 1 ? '+' : ''}${((adjusted.marketScoringMultiplier - 1) * 100).toFixed(1)}% toward the Vegas implied team total (half-weight, capped at 10%).`);
   if ((adjusted.vacatedMinutesGain ?? 0) > 0) uncertaintyFactors.push(`Projected for +${adjusted.vacatedMinutesGain.toFixed(1)} minutes vacated by confirmed-out teammates (provisional allocation by role and position).`);
   if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
@@ -397,4 +398,37 @@ function positionsOf(player: SlatePlayer): string[] {
   const fromEligibility = base.filter((position) => player.eligibility?.[position]);
   const fromPosition = String(player.position ?? '').toUpperCase().split(/[/,\s]+/).filter((position) => base.includes(position));
   return [...new Set([...fromEligibility, ...fromPosition])];
+}
+
+// Vegas implied team totals are the best public estimate of how many points a team scores
+// tonight. Season per-minute rates already reflect a team's usual scoring, so compare the market
+// to what this model itself projects for the team (rates x minutes, scaled to regulation) and
+// move half of the way toward the market, capped at +/-10%. Scoring stats take the full
+// multiplier; possession-driven counting stats take its square root. Skipped when the projected
+// rotation covers too few minutes for a team-level comparison to be meaningful.
+const MARKET_SHRINKAGE = 0.5;
+const MARKET_CAP = 0.1;
+function applyBasketballMarketEnvironment(prepared: Array<{ player: SlatePlayer; values: Record<string, number> }>, slate: ValidatedSlate): void {
+  const regulation = slate.sport === 'WNBA' ? 200 : 240;
+  const byTeam = new Map<string, typeof prepared>();
+  for (const item of prepared) {
+    if (!item.player.team || !item.player.marketContext || UNAVAILABLE_STATUSES.includes(item.player.availability?.status ?? '') || isConfirmedAbsence(item.player)) continue;
+    byTeam.set(item.player.team, [...(byTeam.get(item.player.team) ?? []), item]);
+  }
+  for (const teamPlayers of byTeam.values()) {
+    const implied = teamPlayers[0].player.marketContext?.impliedTeamTotal;
+    if (!Number.isFinite(implied) || !(implied! > 0)) continue;
+    const minutes = teamPlayers.reduce((sum, item) => sum + Math.max(0, item.values.expectedMinutes ?? 0), 0);
+    if (minutes < regulation * 0.75) continue;
+    const modelPoints = teamPlayers.reduce((sum, item) => sum + Math.max(0, item.values.expectedMinutes ?? 0) * Math.max(0, item.values.pointsPerMinute ?? 0), 0) * (regulation / minutes);
+    if (!(modelPoints > 0)) continue;
+    const multiplier = Math.max(1 - MARKET_CAP, Math.min(1 + MARKET_CAP, 1 + MARKET_SHRINKAGE * (implied! / modelPoints - 1)));
+    const possession = Math.sqrt(multiplier);
+    for (const item of teamPlayers) {
+      const next: Record<string, number> = { ...item.values, marketScoringMultiplier: multiplier };
+      for (const field of ['pointsPerMinute', 'threesPerMinute', 'assistsPerMinute']) if (Number.isFinite(next[field])) next[field] *= multiplier;
+      for (const field of ['reboundsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute']) if (Number.isFinite(next[field])) next[field] *= possession;
+      item.values = next;
+    }
+  }
 }
