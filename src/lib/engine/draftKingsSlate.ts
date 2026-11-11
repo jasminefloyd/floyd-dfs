@@ -231,6 +231,20 @@ interface OfficialScoringProfile { rules: Record<string, { value: number }>; sou
 
 function officialScoringProfile(sport: Sport, format: ContestFormat, rules: Record<string, unknown>, eventContext: string): OfficialScoringProfile | undefined {
   if (sport === 'GOLF' && format === 'SHOWDOWN') return officialGolfShowdownScoringProfile(rules, eventContext);
+  // DraftKings' official NBA Classic and Showdown Captain Mode rules publish the complete
+  // standard NBA scoring table. The scoring values are identical across both formats; Showdown
+  // applies its separate 1.5x Captain multiplier through the authoritative roster rule above.
+  // This reviewed profile lets Production validate an identity-bound lobby/CSV slate when
+  // DraftKings' detailed game-type endpoint is blocked, while any live scoring values still
+  // have to match this table exactly.
+  if (sport === 'NBA' && (format === 'CLASSIC' || format === 'SHOWDOWN')) return {
+    rules: standardScoringRules(sport, format),
+    source: format === 'SHOWDOWN' ? 'DRAFTKINGS_OFFICIAL_NBA_SHOWDOWN_SCORING' : 'DRAFTKINGS_OFFICIAL_NBA_CLASSIC_SCORING',
+    sourceUrl: format === 'SHOWDOWN' ? 'https://www.draftkings.com/help/rules/nba/showdown-captain-mode' : 'https://www.draftkings.com/help/rules/nba/classic',
+    version: `DK_NBA_${format}_SCORING_2026-11-11.1`,
+    reviewedAt: '2026-11-11T00:00:00.000Z',
+    verified: true,
+  };
   // DraftKings' WNBA rules endpoint omits scoring values on some game types. The official
   // DraftKings WNBA Fantasy Points table publishes the same base fantasy-point categories
   // used by this Classic/Showdown scorer. Captain scoring remains a separately verified
