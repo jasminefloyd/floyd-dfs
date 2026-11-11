@@ -95,7 +95,12 @@ export function draftKingsClient(sportCodes: Partial<Record<(typeof DRAFTKINGS_S
     const code = env(`DRAFTKINGS_SPORT_CODE_${sport}`);
     return code ? [[sport, code]] : [];
   }));
-  return new DraftKingsClient({ sportCodes: { ...configured, ...sportCodes } });
+  // DraftKings blocks its detailed API (draft groups, rules, draftables) from cloud server IPs.
+  // DRAFTKINGS_API_BASE_URL can route those calls through a relay on an unblocked network; the
+  // public lobby and salary CSV still go direct. Unset means today's behavior.
+  const apiBaseUrl = env('DRAFTKINGS_API_BASE_URL');
+  const relayToken = env('DRAFTKINGS_RELAY_TOKEN');
+  return new DraftKingsClient({ sportCodes: { ...configured, ...sportCodes }, ...(apiBaseUrl ? { apiBaseUrl } : {}), ...(relayToken ? { apiHeaders: { 'x-relay-token': relayToken } } : {}) });
 }
 export function requestId(): string { return crypto.randomUUID(); }
 

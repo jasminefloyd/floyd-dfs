@@ -968,6 +968,26 @@ const testNbaMarketEnvironmentParity = (): void => {
   assert.equal(projectSlate(thin, adjustments, now).players[0].adjustedOpportunity.pointsPerMinute, 0.47, 'a thin projected rotation is too incomplete for a team-level market comparison');
 };
 
+const testDraftKingsRelayRoutingParity = async (): Promise<void> => {
+  // A relay base URL receives the detailed API calls with the relay secret; the public lobby
+  // keeps going direct to draftkings.com and never receives the secret.
+  const seen: Array<{ url: string; token?: string }> = [];
+  const client = new DraftKingsClient({ sportCodes: {}, apiBaseUrl: 'https://relay.example/', apiHeaders: { 'x-relay-token': 'secret' }, fetcher: async (input, init) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    seen.push({ url: String(input), token: headers['x-relay-token'] });
+    if (String(input).includes('/sites/US-DK/sports')) return new Response(JSON.stringify({ sports: [] }), { status: 200 });
+    return new Response(JSON.stringify({ Contests: [] }), { status: 200 });
+  } });
+  await client.listSports();
+  await client.listContests('NBA');
+  const api = seen.find((call) => call.url.startsWith('https://relay.example/sites/US-DK/sports/v1/sports'));
+  assert.ok(api, 'detailed API calls use the relay host');
+  assert.equal(api!.token, 'secret');
+  const lobby = seen.find((call) => call.url.startsWith('https://www.draftkings.com/lobby/getcontests'));
+  assert.ok(lobby, 'the public lobby still goes direct');
+  assert.equal(lobby!.token, undefined, 'the relay secret is never sent to draftkings.com');
+};
+
 const testMarketDerivedOwnershipNudgeParity = (): void => {
   const marketSlate: ValidatedSlate = {
     ...baseSlate,
@@ -1475,5 +1495,6 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
   testProjectionQuantilesUseOneOrderedDistribution();
   await testOpenAiSelectionNearDuplicateDisclosureParity();
   await testMarketContextImpliedTotalParity(); testInstructionPackControls();
+  await testDraftKingsRelayRoutingParity();
   console.log('engine parity tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });
