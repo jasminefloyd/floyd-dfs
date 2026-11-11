@@ -5,6 +5,9 @@ export interface SportsDataIoClientOptions { apiKey: string; baseUrl?: string; f
 export interface GolfProjectionRefresh { rows: Record<string, unknown>[]; tournamentName?: string; warning?: string; }
 export interface SportsDataIoGameWeather { gameId?: string; homeTeam?: string; awayTeam?: string; homeProbablePitcherId?: string; awayProbablePitcherId?: string; homeProbablePitcher?: string; awayProbablePitcher?: string; homeOpener?: boolean; awayOpener?: boolean; temperatureLow?: number; temperatureHigh?: number; windSpeed?: number; windDirection?: string; description?: string; }
 export interface WnbaRecentPlayerMinutes { playerId?: string; name?: string; team?: string; minutes: number[]; }
+/** DraftKings points (standard NBA scoring, no bonuses) that a team's opponents scored against
+ * it in recent final box scores, with the player-minutes they took to score them. */
+export interface RecentOpponentAllowance { team: string; games: number; minutes: number; fantasyPoints: number; }
 
 export class SportsDataIoClient {
   private readonly fetcher: typeof fetch;
@@ -227,10 +230,12 @@ export class SportsDataIoClient {
    * strictly before the slate date, preventing same-day/future leakage. WNBA nests player rows
    * in `scores/BoxScores/{date}`; NBA v3 serves final box scores at `stats/BoxScoresFinal/{date}`. */
   async getWnbaRecentMinutes(eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> { return this.getBasketballRecentMinutes('WNBA', eventDate, lookbackDays, signal); }
-  async getBasketballRecentMinutes(sport: 'NBA' | 'WNBA', eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> {
+  async getBasketballRecentMinutes(sport: 'NBA' | 'WNBA', eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> { return (await this.getBasketballRecentBoxScores(sport, eventDate, lookbackDays, signal)).players; }
+  async getBasketballRecentBoxScores(sport: 'NBA' | 'WNBA', eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<{ players: WnbaRecentPlayerMinutes[]; opponents: RecentOpponentAllowance[] }> {
     const [feed, resource] = sport === 'NBA' ? ['stats', 'BoxScoresFinal'] : ['scores', 'BoxScores'];
     const target = new Date(`${eventDate.slice(0, 10)}T00:00:00.000Z`);
-    if (!Number.isFinite(target.getTime())) return [];
+    if (!Number.isFinite(target.getTime())) return { players: [], opponents: [] };
+    const allowed = new Map<string, { games: Set<string>; minutes: number; fantasyPoints: number }>();
     const dates = Array.from({ length: Math.max(1, Math.min(45, Math.floor(lookbackDays))) }, (_, index) => {
       const day = new Date(target); day.setUTCDate(day.getUTCDate() - index - 1); return day.toISOString().slice(0, 10);
     });
@@ -254,10 +259,22 @@ export class SportsDataIoClient {
           const key = id ?? `${normalizeProviderName(name ?? '')}|${normalizeTeamCode(team ?? '')}`;
           const row = byPlayer.get(key) ?? { playerId: id, name, team, minutes: [] };
           row.minutes.push(minutes); byPlayer.set(key, row);
+          const opponent = readString(player, ['Opponent', 'opponent']);
+          const gameId = readIdentifier(player, ['GameID', 'GameId', 'gameId']);
+          const stat = (keys: string[]) => readNumber(player, keys) ?? 0;
+          if (opponent && minutes > 0) {
+            const fantasyPoints = stat(['Points']) + 0.5 * stat(['ThreePointersMade']) + 1.25 * stat(['Rebounds']) + 1.5 * stat(['Assists']) + 2 * stat(['Steals']) + 2 * stat(['BlockedShots']) - 0.5 * stat(['Turnovers']);
+            const code = normalizeTeamCode(opponent);
+            const entry = allowed.get(code) ?? { games: new Set<string>(), minutes: 0, fantasyPoints: 0 };
+            if (gameId) entry.games.add(gameId);
+            entry.minutes += minutes; entry.fantasyPoints += fantasyPoints; allowed.set(code, entry);
+          }
         }
       }
     }
-    return [...byPlayer.values()].map((row) => ({ ...(row.playerId ? { playerId: row.playerId } : {}), ...(row.name ? { name: row.name } : {}), ...(row.team ? { team: row.team } : {}), minutes: row.minutes.slice(0, 10) }));
+    const players = [...byPlayer.values()].map((row) => ({ ...(row.playerId ? { playerId: row.playerId } : {}), ...(row.name ? { name: row.name } : {}), ...(row.team ? { team: row.team } : {}), minutes: row.minutes.slice(0, 10) }));
+    const opponents = [...allowed.entries()].map(([team, entry]) => ({ team, games: entry.games.size || Math.round(entry.minutes / (sport === 'NBA' ? 240 : 200)), minutes: entry.minutes, fantasyPoints: entry.fantasyPoints }));
+    return { players, opponents };
   }
   async getGolfTournamentProjectionInputs(slate: ValidatedSlate, signal?: AbortSignal): Promise<GolfProjectionRefresh> {
     const season = String(new Date(slate.event.eventDate).getUTCFullYear());
@@ -370,3 +387,20 @@ function readIdentifier(record: Record<string, unknown>, keys: string[]): string
 function readNumber(record: Record<string, unknown>, keys: string[]): number | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'number' && Number.isFinite(value)) return value; if (typeof value === 'string' && Number.isFinite(Number(value))) return Number(value); } return undefined; }
 function readBoolean(record: Record<string, unknown>, keys: string[]): boolean | undefined { for (const key of keys) { const value = record[key]; if (typeof value === 'boolean') return value; if (typeof value === 'number' && (value === 0 || value === 1)) return value === 1; if (typeof value === 'string' && /^(true|false)$/i.test(value)) return value.toLowerCase() === 'true'; } return undefined; }
 function fullName(record: Record<string, unknown>): string | undefined { const first = readString(record, ['FirstName', 'firstName']); const last = readString(record, ['LastName', 'lastName']); return first && last ? `${first} ${last}` : first ?? last; }
+
+/** Opponent defense factor per team: DraftKings points allowed per player-minute relative to
+ * the league, shrunk toward 1 with 10 games of prior weight and capped at +/-6%. */
+export function opponentDefenseFactors(opponents: RecentOpponentAllowance[]): Map<string, number> {
+  const minutes = opponents.reduce((sum, row) => sum + row.minutes, 0);
+  const points = opponents.reduce((sum, row) => sum + row.fantasyPoints, 0);
+  const factors = new Map<string, number>();
+  if (!(minutes > 0) || !(points > 0)) return factors;
+  const league = points / minutes;
+  for (const row of opponents) {
+    if (!(row.minutes > 0) || !(row.games > 0)) continue;
+    const raw = row.fantasyPoints / row.minutes / league;
+    const shrunk = 1 + (raw - 1) * row.games / (row.games + 10);
+    factors.set(normalizeTeamCode(row.team), Math.max(0.94, Math.min(1.06, shrunk)));
+  }
+  return factors;
+}

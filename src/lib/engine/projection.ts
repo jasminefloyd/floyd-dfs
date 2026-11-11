@@ -66,7 +66,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
     const fields = [...new Set(golfMissing.flatMap(({ fields: missing }) => missing))].join(', ');
     gaps.push({ reason: `Golf structured projections are missing required inputs for ${golfMissing.length}/${slate.playerPool.length} golfers (${fields}). Sample: ${sample}${golfMissing.length > 5 ? ', and others' : ''}. Check SportsDataIO Golf tournament lookup, feed access, and golfer-name matching; lineups remain blocked until inputs are available.` });
   }
-  if (slate.sport === 'NBA' || slate.sport === 'WNBA') { reconcileBasketballOpportunities(prepared, slate, gaps); applyBasketballMarketEnvironment(prepared, slate); }
+  if (slate.sport === 'NBA' || slate.sport === 'WNBA') { reconcileBasketballOpportunities(prepared, slate, gaps); applyBasketballBlowoutRisk(prepared); applyBasketballMarketEnvironment(prepared, slate); applyBasketballOpponentDefense(prepared); }
   players.push(...prepared.map(({ player, values, adjustment }) => projectPlayer(slate, player, values, adjustment, true)));
   if (golfFallbackCount) gaps.push({ reason: `Golf structured projection is unavailable for ${golfFallbackCount} player(s); any candidate uses DraftKings provider FPPG only and is provisional. Verified skill, course, weather, and finish/cut inputs are still required before entry.` });
   // DK's own FPPG is enough to produce a clearly provisional research candidate, but not an
@@ -118,6 +118,9 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
   if (slate.sport === 'WNBA' && (adjusted.expectedMinutes ?? 99) <= 8 && player.availability?.roleStatus !== 'CONFIRMED_STARTER') uncertaintyFactors.push('Low-minute WNBA role is not confirmed; the current event distribution does not model a separate DNP probability.');
   if (Number.isFinite(adjusted.marketScoringMultiplier) && Math.abs(adjusted.marketScoringMultiplier - 1) > 0.001) uncertaintyFactors.push(`Scoring rates scaled ${adjusted.marketScoringMultiplier >= 1 ? '+' : ''}${((adjusted.marketScoringMultiplier - 1) * 100).toFixed(1)}% toward the Vegas implied team total (half-weight, capped at 10%).`);
+  if ((adjusted.usageRateGain ?? 0) > 0.001) uncertaintyFactors.push(`Scoring rate +${(adjusted.usageRateGain * 100).toFixed(1)}% from shot volume vacated by confirmed-out teammates (provisional, capped at 20%).`);
+  if ((adjusted.blowoutMinutesChange ?? 0) !== 0) uncertaintyFactors.push(`${adjusted.blowoutMinutesChange < 0 ? 'Minus' : 'Plus'} ${Math.abs(adjusted.blowoutMinutesChange).toFixed(1)} minutes for blowout risk (point spread ${adjusted.blowoutSpread.toFixed(1)}; provisional).`);
+  if (Number.isFinite(adjusted.opponentDefenseApplied) && Math.abs(adjusted.opponentDefenseApplied - 1) > 0.001) uncertaintyFactors.push(`Rates scaled ${adjusted.opponentDefenseApplied >= 1 ? '+' : ''}${((adjusted.opponentDefenseApplied - 1) * 100).toFixed(1)}% for the opponent's recent fantasy points allowed (used only without Vegas lines; shrunk and capped at 6%).`);
   if ((adjusted.vacatedMinutesGain ?? 0) > 0) uncertaintyFactors.push(`Projected for +${adjusted.vacatedMinutesGain.toFixed(1)} minutes vacated by confirmed-out teammates (provisional allocation by role and position).`);
   if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
@@ -351,6 +354,7 @@ function reconcileBasketballOpportunities(prepared: Array<{ player: SlatePlayer;
     const absent = absentByTeam.get(team) ?? [];
     const vacated = absent.reduce((sum, item) => sum + Math.max(0, item.values.expectedMinutes ?? 0), 0);
     let transfer = Math.min(vacated, Math.max(0, targetMinutes - total));
+    const plannedTransfer = transfer;
     if (transfer > 0.5) {
       const absentPositions = new Set(absent.flatMap((item) => positionsOf(item.player)));
       const gains = new Map<string, number>();
@@ -375,6 +379,9 @@ function reconcileBasketballOpportunities(prepared: Array<{ player: SlatePlayer;
         const gain = gains.get(item.player.playerId) ?? 0;
         if (gain > 0.05) item.values = { ...item.values, vacatedMinutesGain: gain, ...(Number.isFinite(item.values.minutesP10) ? { minutesP10: item.values.minutesP10 + gain } : {}), ...(Number.isFinite(item.values.minutesP90) ? { minutesP90: item.values.minutesP90 + gain } : {}) };
       }
+      // Scale the usage transfer by the share of vacated minutes actually reassigned, so a long
+      // absence already reflected in teammates' recent minutes is not boosted again.
+      applyVacatedUsage(teamPlayers, absent, gains, vacated > 0 ? (plannedTransfer - transfer) / vacated : 0);
     }
     if (total < targetMinutes - 1) gaps.push({ reason: `${team} ${slate.sport} projected player pool accounts for ${total.toFixed(1)} of ${targetMinutes} regulation minutes; incomplete rotation coverage is not inflated into the missing minutes.` });
     // Reconcile over-allocation; missing rotation minutes remain a visible coverage problem.
@@ -388,7 +395,7 @@ function reconcileBasketballOpportunities(prepared: Array<{ player: SlatePlayer;
 
 function headroom(item: { player: SlatePlayer; values: Record<string, number> }, gains: Map<string, number>, sport: 'NBA' | 'WNBA'): number {
   const minutes = item.values.expectedMinutes ?? 0;
-  if (minutes < 4) return 0; // out-of-rotation players do not inherit a starter's minutes
+  if (minutes < 8) return 0; // fringe players (under 8 projected minutes) do not inherit a starter's minutes
   const cap = Math.max(minutes, Math.min(MAX_PLAYER_MINUTES[sport], minutes - (gains.get(item.player.playerId) ?? 0) + MAX_MINUTES_GAIN));
   return Math.max(0, cap - minutes);
 }
@@ -430,5 +437,93 @@ function applyBasketballMarketEnvironment(prepared: Array<{ player: SlatePlayer;
       for (const field of ['reboundsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute']) if (Number.isFinite(next[field])) next[field] *= possession;
       item.values = next;
     }
+  }
+}
+
+// Usage: when a high-volume player is out, his shots and assists do not disappear with his
+// minutes. Teammates who inherit his minutes absorb some of it at their own rates; the rest
+// of the volume above that (60% of it, the remainder being lost efficiency) moves to the
+// remaining rotation in proportion to their current volume. Each player's per-minute rate
+// can rise at most 20%. Players whose research already flagged increased usage are skipped.
+const USAGE_STATS = ['pointsPerMinute', 'assistsPerMinute', 'threesPerMinute'];
+const USAGE_ABSORPTION = 0.6;
+const MAX_USAGE_RATE_GAIN = 0.2;
+type PreparedBasketballPlayer = { player: SlatePlayer; values: Record<string, number>; adjustment?: PlayerAdjustment };
+function applyVacatedUsage(teamPlayers: PreparedBasketballPlayer[], absent: PreparedBasketballPlayer[], gains: Map<string, number>, share: number): void {
+  if (!(share > 0)) return;
+  const recipients = teamPlayers.filter((item) => (item.values.expectedMinutes ?? 0) >= 12 && !(item.adjustment?.adjustments ?? []).some((entry) => entry.adjustmentType === 'USAGE' && entry.direction === 'UP'));
+  if (!recipients.length) return;
+  for (const stat of USAGE_STATS) {
+    const absentVolume = absent.reduce((sum, item) => sum + Math.max(0, item.values.expectedMinutes ?? 0) * Math.max(0, item.values[stat] ?? 0), 0) * Math.min(1, share);
+    const absorbed = teamPlayers.reduce((sum, item) => sum + (gains.get(item.player.playerId) ?? 0) * Math.max(0, item.values[stat] ?? 0), 0);
+    let remaining = Math.max(0, absentVolume - absorbed) * USAGE_ABSORPTION;
+    if (!(remaining > 1e-6)) continue;
+    const base = new Map(recipients.map((item) => [item.player.playerId, Math.max(0, item.values[stat] ?? 0)]));
+    const given = new Map<string, number>();
+    for (let round = 0; round < 4 && remaining > 1e-6; round += 1) {
+      const room = (item: PreparedBasketballPlayer) => Math.max(0, MAX_USAGE_RATE_GAIN * (base.get(item.player.playerId) ?? 0) * (item.values.expectedMinutes ?? 0) - (given.get(item.player.playerId) ?? 0));
+      const open = recipients.filter((item) => room(item) > 1e-9);
+      const weights = open.map((item) => (item.values.expectedMinutes ?? 0) * (base.get(item.player.playerId) ?? 0));
+      const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+      if (!(weightTotal > 0)) break;
+      let distributed = 0;
+      open.forEach((item, index) => { const amount = Math.min(room(item), remaining * weights[index] / weightTotal); given.set(item.player.playerId, (given.get(item.player.playerId) ?? 0) + amount); distributed += amount; });
+      remaining -= distributed;
+    }
+    for (const item of recipients) {
+      const volume = given.get(item.player.playerId) ?? 0; const minutes = item.values.expectedMinutes ?? 0; const rate = base.get(item.player.playerId) ?? 0;
+      if (!(volume > 1e-9) || !(minutes > 0)) continue;
+      item.values = { ...item.values, [stat]: rate + volume / minutes, ...(stat === 'pointsPerMinute' && rate > 0 ? { usageRateGain: volume / minutes / rate } : {}) };
+    }
+  }
+}
+
+// Blowouts: in lopsided games, starters on both teams often sit the fourth quarter. For a
+// spread beyond 8 points, starters (28+ minutes) lose 0.35 minutes per extra point (up to 4),
+// and those minutes go to the bench (8-24 minutes) so the team still plays its full game.
+// Provisional values, not outcome-calibrated.
+const BLOWOUT_SPREAD_THRESHOLD = 8;
+const BLOWOUT_MINUTES_PER_POINT = 0.35;
+const BLOWOUT_MAX_CUT = 4;
+function applyBasketballBlowoutRisk(prepared: PreparedBasketballPlayer[]): void {
+  const byTeam = new Map<string, PreparedBasketballPlayer[]>();
+  for (const item of prepared) {
+    if (!item.player.team || UNAVAILABLE_STATUSES.includes(item.player.availability?.status ?? '') || isConfirmedAbsence(item.player)) continue;
+    byTeam.set(item.player.team, [...(byTeam.get(item.player.team) ?? []), item]);
+  }
+  for (const teamPlayers of byTeam.values()) {
+    const spread = teamPlayers.find((item) => Number.isFinite(item.player.marketContext?.spread))?.player.marketContext?.spread;
+    if (spread === undefined || !Number.isFinite(spread)) continue;
+    const cut = Math.min(BLOWOUT_MAX_CUT, BLOWOUT_MINUTES_PER_POINT * Math.max(0, Math.abs(spread) - BLOWOUT_SPREAD_THRESHOLD));
+    if (!(cut > 0.01)) continue;
+    const starters = teamPlayers.filter((item) => (item.values.expectedMinutes ?? 0) >= 28);
+    const bench = teamPlayers.filter((item) => { const minutes = item.values.expectedMinutes ?? 0; return minutes >= 8 && minutes < 24; });
+    if (!starters.length || !bench.length) continue;
+    const removed = starters.reduce((sum, item) => sum + cut * Math.min(1, ((item.values.expectedMinutes ?? 0) - 26) / 8), 0);
+    const benchMinutes = bench.reduce((sum, item) => sum + (item.values.expectedMinutes ?? 0), 0);
+    const shift = (item: PreparedBasketballPlayer, delta: number) => {
+      item.values = { ...item.values, expectedMinutes: (item.values.expectedMinutes ?? 0) + delta, blowoutMinutesChange: delta, blowoutSpread: Math.abs(spread), ...(Number.isFinite(item.values.minutesP10) ? { minutesP10: Math.max(0, item.values.minutesP10 + delta) } : {}), ...(Number.isFinite(item.values.minutesP90) ? { minutesP90: item.values.minutesP90 + delta } : {}) };
+    };
+    for (const item of starters) shift(item, -cut * Math.min(1, ((item.values.expectedMinutes ?? 0) - 26) / 8));
+    for (const item of bench) shift(item, removed * (item.values.expectedMinutes ?? 0) / benchMinutes);
+  }
+}
+
+// Opponent defense. Vegas implied team totals already price the opponent's defense, so this
+// applies only to players whose team has no market data. The factor (computed upstream from
+// recent box scores: DraftKings points the opponent allowed per minute vs. league average,
+// shrunk toward 1 by sample size and capped at +/-6%) scales scoring rates fully and
+// possession stats by its square root.
+function applyBasketballOpponentDefense(prepared: PreparedBasketballPlayer[]): void {
+  for (const item of prepared) {
+    const factor = item.values.opponentDefenseFactor;
+    if (!Number.isFinite(factor) || !(factor > 0) || Math.abs(factor - 1) < 1e-6) continue;
+    if (Number.isFinite(item.player.marketContext?.impliedTeamTotal)) continue;
+    const bounded = Math.max(0.94, Math.min(1.06, factor));
+    const possession = Math.sqrt(bounded);
+    const next: Record<string, number> = { ...item.values, opponentDefenseApplied: bounded };
+    for (const field of ['pointsPerMinute', 'threesPerMinute', 'assistsPerMinute']) if (Number.isFinite(next[field])) next[field] *= bounded;
+    for (const field of ['reboundsPerMinute', 'stealsPerMinute', 'blocksPerMinute']) if (Number.isFinite(next[field])) next[field] *= possession;
+    item.values = next;
   }
 }

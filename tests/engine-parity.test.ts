@@ -16,7 +16,7 @@ import { findConflicts, normalizeArticles } from '../src/lib/engine/researchEvid
 import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { evaluateProjectionCalibration, evaluatePairedProjectionBaseline, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
-import { seasonParamFor, SportsDataIoClient } from '../src/lib/engine/sportsDataIoProvider';
+import { seasonParamFor, SportsDataIoClient, opponentDefenseFactors } from '../src/lib/engine/sportsDataIoProvider';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
 import { assertProjection, assertSlate, validateLineupCandidate } from '../src/lib/engine/validation';
@@ -398,7 +398,7 @@ const testSportsDataIoHistoricalContextFeedsParity = async (): Promise<void> => 
   const nbaRequested: string[] = [];
   const nbaClient = new SportsDataIoClient({ apiKey: 'test-key', baseUrl: 'https://sportsdata.test/v3', fetcher: async (input) => {
     const url = String(input); nbaRequested.push(url);
-    if (/\/nba\/stats\/json\/BoxScoresFinal\/2026-11-10$/.test(url)) return new Response(JSON.stringify([{ PlayerGames: [{ PlayerID: 20, Name: 'Guard Twenty', Team: 'BOS', Minutes: 34 }] }]), { status: 200 });
+    if (/\/nba\/stats\/json\/BoxScoresFinal\/2026-11-10$/.test(url)) return new Response(JSON.stringify([{ PlayerGames: [{ PlayerID: 20, Name: 'Guard Twenty', Team: 'BOS', Opponent: 'NYK', GameID: 9, Minutes: 34, Points: 20, Rebounds: 4, Assists: 6 }] }]), { status: 200 });
     if (/\/nba\/stats\/json\/BoxScoresFinal\/2026-11-08$/.test(url)) return new Response(JSON.stringify([{ PlayerGames: [{ PlayerID: 20, Name: 'Guard Twenty', Team: 'BOS', Minutes: 29 }] }]), { status: 200 });
     if (url.endsWith('/nba/scores/json/CurrentSeason')) return new Response(JSON.stringify({ Season: 2027, StartYear: 2026, EndYear: 2027, ApiSeason: '2027REG' }), { status: 200 });
     return new Response(JSON.stringify([]), { status: 200 });
@@ -407,6 +407,9 @@ const testSportsDataIoHistoricalContextFeedsParity = async (): Promise<void> => 
   assert.deepEqual(nbaMinutes.find((row) => row.playerId === '20')?.minutes, [34, 29], 'most recent game first');
   assert.ok(!nbaRequested.some((url) => url.includes('/2026-11-11')), 'no same-day box scores');
   assert.equal(await nbaClient.getCurrentSeason('NBA'), '2027');
+  const nbaBox = await nbaClient.getBasketballRecentBoxScores('NBA', '2026-11-11', 4);
+  const nyk = nbaBox.opponents.find((row) => row.team === normalizeTeamCode('NYK'));
+  assert.deepEqual(nyk && { games: nyk.games, minutes: nyk.minutes, fantasyPoints: nyk.fantasyPoints }, { games: 1, minutes: 34, fantasyPoints: 20 + 5 + 9 }, 'points the Knicks allowed are tallied from box scores');
 };
 
 const testGolfSportsDataIoV2ProjectionParity = async (): Promise<void> => {
@@ -988,6 +991,54 @@ const testDraftKingsRelayRoutingParity = async (): Promise<void> => {
   assert.equal(lobby!.token, undefined, 'the relay secret is never sent to draftkings.com');
 };
 
+const testNbaUsageBlowoutAndDefenseParity = (): void => {
+  const scoring = { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } };
+  const adjustments = { slateId: baseSlate.slateId, tenantId: baseSlate.tenantId, sport: 'NBA', version: 1, generatedAt: now.toISOString(), adjustments: [], status: 'COMPLETE' } as unknown as Parameters<typeof projectSlate>[1];
+  const rates = (ppm: number) => ({ pointsPerMinute: ppm, reboundsPerMinute: 0.2, assistsPerMinute: 0.1, stealsPerMinute: 0.03, blocksPerMinute: 0.02, turnoversPerMinute: 0.05, threesPerMinute: 0.05 });
+  const make = (id: string, team: string, position: string, minutes: number, ppm: number, extra: Record<string, unknown> = {}) => ({ playerId: id, playerName: id, team, opponent: team === 'BOS' ? 'NYK' : 'BOS', position, salary: 5000, eligibility: { [position]: true, UTIL: true }, projectionInputs: { expectedMinutes: minutes, ...rates(ppm) }, ...extra });
+  const ppm = (package_: ReturnType<typeof projectSlate>, id: string) => package_.players.find((player) => player.playerId === id)!.adjustedOpportunity.pointsPerMinute;
+  const mins = (package_: ReturnType<typeof projectSlate>, id: string) => package_.players.find((player) => player.playerId === id)!.adjustedOpportunity.expectedMinutes;
+
+  // Usage: a 0.9 point-per-minute star is out. Teammates inherit his minutes at their own
+  // rates; 60% of the remaining volume moves to the rotation, at most +20% per player.
+  const rotation = [make('star', 'BOS', 'SF', 36, 0.9), make('pg', 'BOS', 'PG', 34, 0.5), make('sg', 'BOS', 'SG', 32, 0.45), make('sf-bench', 'BOS', 'SF', 18, 0.4), make('pf', 'BOS', 'PF', 30, 0.4), make('c', 'BOS', 'C', 30, 0.4), make('g-bench', 'BOS', 'PG', 20, 0.4), make('big-bench', 'BOS', 'C', 16, 0.35), make('deep', 'BOS', 'PG', 6, 0.4)];
+  const slate: ValidatedSlate = { ...baseSlate, sport: 'NBA', scoringRules: scoring, playerPool: rotation };
+  const before = projectSlate(slate, adjustments, now);
+  const withOut = applyAvailabilitySnapshot(slate, { source: 'ESPN', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, records: rotation.map((player) => ({ playerName: player.playerName, team: 'BOS', status: player.playerId === 'star' ? 'OUT' as const : 'ACTIVE' as const, confirmed: true })) });
+  const after = projectSlate(withOut, adjustments, now);
+  assert.ok(ppm(after, 'pg') > 0.5 && ppm(after, 'pg') <= 0.5 * 1.2 + 1e-9, 'a starter gains scoring rate, capped at +20%');
+  assert.ok(ppm(after, 'sg') > 0.45, 'the volume is shared, not given to one player');
+  assert.equal(ppm(after, 'deep'), 0.4, 'out-of-rotation players do not gain usage');
+  assert.equal(mins(after, 'deep'), 6, 'fringe players do not inherit minutes');
+  assert.equal(ppm(before, 'pg'), 0.5, 'no absence means no usage change');
+  const teamPoints = (package_: ReturnType<typeof projectSlate>) => package_.players.reduce((sum, player) => sum + (player.adjustedOpportunity.expectedMinutes ?? 0) * (player.adjustedOpportunity.pointsPerMinute ?? 0), 0);
+  assert.ok(teamPoints(after) < teamPoints(before), 'losing the star still lowers projected team scoring (not all of his volume is replaced)');
+  assert.ok(after.players.find((player) => player.playerId === 'pg')!.uncertaintyFactors.some((factor) => /shot volume vacated/.test(factor)));
+
+  // Blowout: a 14-point spread trims starters by 0.35 x (14 - 8) = 2.1 minutes and gives the
+  // minutes to the bench; a 5-point spread changes nothing; team minutes are preserved.
+  const market = (spread: number) => ({ marketContext: { impliedTeamTotal: 112.8, spread, gameTotal: 225.6 } });
+  const team = (code: string, spread: number) => [36, 34, 34, 32, 30, 22, 20, 18, 6].map((minutes, index) => make(`${code}-${index}`, code, 'SF', minutes, 0.47, market(spread)));
+  const blowout = projectSlate({ ...slate, playerPool: [...team('BIG', -14), ...team('CLOSE', 5)] }, adjustments, now);
+  assert.ok(Math.abs(mins(blowout, 'BIG-0') - (36 - 2.1)) < 1e-9, 'starters lose minutes in a likely blowout');
+  assert.ok(mins(blowout, 'BIG-5') > 22, 'the bench gains them');
+  assert.equal(mins(blowout, 'BIG-8'), 6, 'deep reserves are unchanged');
+  const total = (prefix: string) => blowout.players.filter((player) => player.playerId.startsWith(prefix)).reduce((sum, player) => sum + (player.adjustedOpportunity.expectedMinutes ?? 0), 0);
+  assert.ok(Math.abs(total('BIG-') - 232) < 1e-9, 'team minutes are preserved');
+  assert.equal(mins(blowout, 'CLOSE-0'), 36, 'a close game has no blowout adjustment');
+
+  // Opponent defense: used only when the team has no Vegas line, capped at 6%.
+  const defensePool = [make('soft', 'BOS', 'SF', 34, 0.5), make('tough', 'BOS', 'SF', 34, 0.5), make('wild', 'BOS', 'SF', 34, 0.5), make('vegas', 'NYK', 'SF', 34, 0.5, market(0))].map((player, index) => ({ ...player, projectionInputs: { ...player.projectionInputs, opponentDefenseFactor: [1.04, 0.97, 1.5, 1.05][index] } }));
+  const defense = projectSlate({ ...slate, playerPool: defensePool }, adjustments, now);
+  assert.ok(Math.abs(ppm(defense, 'soft') - 0.52) < 1e-9);
+  assert.ok(Math.abs(ppm(defense, 'tough') - 0.485) < 1e-9);
+  assert.ok(Math.abs(ppm(defense, 'wild') - 0.53) < 1e-9, 'capped at +6%');
+  assert.equal(ppm(defense, 'vegas'), 0.5 * 1, 'Vegas lines already include the opponent, so no double count');
+  const factors = opponentDefenseFactors([{ team: 'BOS', games: 10, minutes: 2400, fantasyPoints: 2400 * 1.1 }, { team: 'NYK', games: 10, minutes: 2400, fantasyPoints: 2400 * 0.9 }]);
+  assert.ok(Math.abs(factors.get(normalizeTeamCode('BOS'))! - 1.05) < 1e-9, '10 games of data move half way toward the observed +10%');
+  assert.ok(Math.abs(factors.get(normalizeTeamCode('NYK'))! - 0.95) < 1e-9);
+};
+
 const testMarketDerivedOwnershipNudgeParity = (): void => {
   const marketSlate: ValidatedSlate = {
     ...baseSlate,
@@ -1473,7 +1524,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
 
 (async () => {
   testMlbRelieverWorkloadGuardParity(); testPairedBaselineHoldoutParity();
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testNbaVacatedMinutesRedistributionParity(); testNbaMarketEnvironmentParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testNbaVacatedMinutesRedistributionParity(); testNbaMarketEnvironmentParity(); testNbaUsageBlowoutAndDefenseParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
   await testWnbaAvailabilityUsesNumericEventTeamIds();

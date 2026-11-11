@@ -9,7 +9,7 @@ import { optimizeLineups } from '../src/lib/engine/optimizer.js';
 import { selectLineups } from '../src/lib/engine/selection.js';
 import { ResearchAgent } from '../src/lib/engine/researchAgent.js';
 import { createDefaultRssProviders } from '../src/lib/engine/rssProvider.js';
-import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor } from '../src/lib/engine/sportsDataIoProvider.js';
+import { SportsDataIoClient, SportsDataIoResearchProvider, seasonParamFor, opponentDefenseFactors } from '../src/lib/engine/sportsDataIoProvider.js';
 import { applyAvailabilitySnapshot, normalizeProviderName, normalizeTeamCode, withDegradedAvailability } from '../src/lib/engine/availability.js';
 import { assertAdjustment, assertContestMetrics, assertOptimizer, assertProjection, assertResearch, assertSelection, assertSlate } from '../src/lib/engine/validation.js';
 import { buildLiveStatePackage } from '../src/lib/engine/liveState.js';
@@ -379,11 +379,18 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
       const sport = workingSlate.sport;
       const stageKey = sport === 'NBA' ? 'nba' : 'wnba';
       try {
-        const recentRows = await availability.getBasketballRecentMinutes(sport, workingSlate.event.eventDate, 28);
+        const recentBox = await availability.getBasketballRecentBoxScores(sport, workingSlate.event.eventDate, 28);
+        const recentRows = recentBox.players;
+        const defenseFactors = opponentDefenseFactors(recentBox.opponents);
         const byId = new Map(recentRows.flatMap((row) => row.playerId ? [[row.playerId, row.minutes] as const] : []));
         const byNameTeam = new Map(recentRows.flatMap((row) => row.name ? [[`${normalizeProviderName(row.name)}|${normalizeTeamCode(row.team ?? '')}`, row.minutes] as const] : []));
         let matched = 0;
-        const playerPool = workingSlate.playerPool.map((player) => {
+        let defenseMatched = 0;
+        const playerPool = workingSlate.playerPool.map((sourcePlayer) => {
+          // Opponent defense rides on projectionInputs; projection uses it only without Vegas lines.
+          const defense = sourcePlayer.opponent ? defenseFactors.get(normalizeTeamCode(String(sourcePlayer.opponent))) : undefined;
+          if (defense !== undefined) defenseMatched += 1;
+          const player = defense !== undefined && sourcePlayer.projectionInputs ? { ...sourcePlayer, projectionInputs: { ...sourcePlayer.projectionInputs, opponentDefenseFactor: defense } } : sourcePlayer;
           const samples = (player.identity?.sportsDataIoId ? byId.get(player.identity.sportsDataIoId) : undefined)
             ?? byNameTeam.get(`${normalizeProviderName(player.playerName)}|${normalizeTeamCode(String(player.team ?? ''))}`);
           if (!samples?.length) return player;
@@ -399,7 +406,7 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           return { ...player, projectionInputs: { ...player.projectionInputs, expectedMinutes: minutesP50, minutesP10, minutesP90, limitedMinutesRisk }, sportContext: { ...player.sportContext, nba: { ...player.sportContext?.nba, minutesP10, minutesP50, minutesP90, limitedMinutesRisk, minutesSampleCount: ordered.length, minutesRetrievedAt: new Date().toISOString() } } };
         });
         workingSlate = { ...workingSlate, playerPool };
-        stages[`${stageKey}MinutesHistory`] = { source: sport === 'NBA' ? 'SportsDataIO NBA final BoxScoresFinal' : 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, retrievedAt: new Date().toISOString() };
+        stages[`${stageKey}MinutesHistory`] = { source: sport === 'NBA' ? 'SportsDataIO NBA final BoxScoresFinal' : 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, opponentDefenseTeams: defenseFactors.size, opponentDefensePlayersMatched: defenseMatched, retrievedAt: new Date().toISOString() };
         if (matched < playerPool.length) stages[`${stageKey}MinutesWarning`] = `Recent ${sport} minutes were available for ${matched}/${playerPool.length} players. Missing histories retain season-based minutes; role uncertainty remains provisional.`;
       } catch (error) {
         stages[`${stageKey}MinutesWarning`] = `Recent ${sport} game minutes lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
