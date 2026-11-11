@@ -10,11 +10,8 @@
     "check:server": "tsc -p tsconfig.server.json",
     "test:parity": "node scripts/run-engine-parity.mjs",
     "lint": "oxlint",
-    "import:dk": "node scripts/import-draftkings-slate.mjs",
     "backfill:player-actuals": "node scripts/backfill-player-actuals.mjs",
     "backfill:run-evidence": "node scripts/backfill-run-evidence.mjs",
-    "import:mlb-actuals": "node scripts/import-mlb-actual-results.mjs",
-    "import:results": "node scripts/import-projection-results.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

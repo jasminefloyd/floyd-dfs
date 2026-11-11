@@ -105,8 +105,12 @@ function beneficiaryScore(sport: Sport, unavailablePosition?: string, teammatePo
   const out = (unavailablePosition ?? '').toUpperCase();
   const teammate = (teammatePosition ?? '').toUpperCase();
   if (sport === 'NBA' || sport === 'WNBA') {
-    if (out === 'PG') return teammate === 'PG' ? 5 : ['SG', 'SF'].includes(teammate) ? 3 : 1;
-    if (['SG', 'SF', 'PF', 'C'].includes(out)) return teammate === out ? 5 : ['SG', 'SF', 'PF', 'C'].includes(teammate) ? 3 : 1;
+    // DraftKings lists multi-position players ("PG/SG"); score the best pairing of any listed
+    // positions rather than requiring an exact string match.
+    const outPositions = out.split(/[/,\s]+/).filter(Boolean);
+    const teammatePositions = teammate.split(/[/,\s]+/).filter(Boolean);
+    const pairScore = (o: string, t: string) => o === 'PG' ? (t === 'PG' ? 5 : ['SG', 'SF'].includes(t) ? 3 : 1) : ['SG', 'SF', 'PF', 'C'].includes(o) ? (t === o ? 5 : ['SG', 'SF', 'PF', 'C'].includes(t) ? 3 : 1) : 0;
+    return Math.max(0, ...outPositions.flatMap((o) => teammatePositions.map((t) => pairScore(o, t))));
   }
   if (sport === 'NFL' || sport === 'CFB') {
     if (out === 'QB') return ['WR', 'TE', 'RB'].includes(teammate) ? 4 : 1;

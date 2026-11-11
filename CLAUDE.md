@@ -42,8 +42,8 @@ This is where the real 6-stage pipeline lives. `server/runtime.ts`'s `processRun
 1. **Slate** — `draftKings.ts`, `draftKingsSlate.ts`. Normalizes/validates the DraftKings contest (contest rules, roster/scoring rules, player pool). No player analysis.
 2. **Research** — `researchAgent.ts`, `researchPlan.ts`, `researchEvidence.ts`, plus provider files (`rssProvider.ts`, `sportsDataIoProvider.ts`, `espnProjectionProvider.ts`, `oddsProvider.ts`, `structuredSportsProvider.ts`, `webResearchProvider.ts`, `configuredResearchProvider.ts`, `openAiSynthesizer.ts`). Gathers evidence; does not project or rank.
 3. **Sport Adjustment** — `adjustment.ts`, `openAiAdjustment.ts`. Translates research evidence into opportunity deltas per sport.
-4. **Projection** — `projection.ts`. Converts adjusted opportunity into floor/median/ceiling fantasy point ranges under the slate's actual DK scoring rules.
-5. **Optimize** — `optimizer.ts`. Deterministic lineup generation/ranking against salary cap, roster, and contest-objective constraints.
+4. **Projection** — `projection.ts`. Converts adjusted opportunity into floor/median/ceiling fantasy point ranges under the slate's actual DK scoring rules. For NBA/WNBA it also reassigns minutes vacated by confirmed-out players (kept on the slate as `excludedPlayers`, never lineup-eligible) within the regulation-minute budget, and moves team scoring half way toward the Vegas implied team total (capped at ±10%).
+5. **Optimize** — `optimizer.ts`. Exact top-K branch-and-bound search (`searchTopLineups`) over each player's linear objective value with a Lagrangian salary-cap bound, then rescoring of each candidate on the summed lineup samples. `searchCompleteness: 'EXHAUSTIVE'` means proven (linear MAX_FPTS objective, or every legal lineup enumerated); hitting the node budget reports `BOUNDED`.
 6. **Selection** — `selection.ts`, `openAiSelection.ts`. Picks and explains the final lineup(s) from the optimizer's candidates.
 
 Shared: `contracts.ts` (largest file — the TS types for every stage's input/output package), `validation.ts` (contract assertions), `availability.ts` (player availability reconciliation), `cashLineCalibration.ts` (cash-line probability modeling, the most complete Learning Loop piece).
@@ -73,11 +73,10 @@ Most handlers are thin wrappers around `server/runtime.ts` functions or `src/lib
 **Real and wired end-to-end:** the 6-stage synchronous pipeline (`src/lib/engine/*` + `processRun()`), the contracts/validation layer, and the `api/learning/*` slice of the Learning Loop.
 
 **Aspirational / not implemented:**
-- All ~22 `supabase/functions/*` directories (the doc's §19 Edge Functions) exist but are **empty** — no source files.
-- The DB schema described in the doc (§15–18) isn't tracked in this repo's migrations — `supabase/migrations/` has exactly one file (`20260825000000_cash_line_calibration.sql`). The bulk of the referenced tables (`generation_runs`, `floyd_dfs_research_runs`, etc.) exist in Supabase but their schema isn't version-controlled here.
+- The doc's §19 Edge Functions do not exist (there is no `supabase/functions/` directory).
+- The DB schema described in the doc (§15–18) is only partly tracked: `supabase/migrations/` holds the additive migrations made in this repo (cash-line calibration, projection artifacts, evidence ledger, contest outcomes, player actuals). The core tables (`generation_runs`, `floyd_dfs_research_runs`, etc.) exist in Supabase but their base schema isn't version-controlled here.
 - Multi-tenant RLS policies described in the doc aren't present as migrations either.
 - The doc's full Testing Strategy (§34) doesn't exist — see Testing below.
-- `npm run import:dk`, `import:mlb-actuals`, `import:results` reference `scripts/import-*.mjs` files that **don't exist** in `scripts/` (only `run-engine-parity.mjs` does). These npm scripts will fail if run.
 
 If you're asked to implement something "per the design doc," confirm first whether it's meant to close one of these gaps or whether the doc section in question has already been superseded by what's in `src/lib/engine`.
 
