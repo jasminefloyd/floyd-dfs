@@ -1,3 +1,4 @@
+import { bestShowdownLineup, buildShowdownField, evaluateShowdownTournament, showdownLineupKey } from './showdownTournament.js';
 import type {
   LineupCandidate,
   ObjectiveProfile,
@@ -111,6 +112,11 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   const invalidGenerated = generated.flatMap((lineup) => validateLineupCandidate({ playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed }, workingInput.validatedSlate));
   if (invalidGenerated.length) return blocked(input.validatedSlate, profile, now, invalidGenerated);
   const scored = generated.map((lineup) => scoreCandidate(lineup, workingInput, projectionByPlayer, profile, marketAverages));
+  // Showdown tournaments: rank by expected payout against a simulated field, which accounts for
+  // duplicate lineups. Max-points and cash/safe objectives keep their own ranking.
+  const showdownTournament = workingInput.validatedSlate.contest.format === 'SHOWDOWN' && profile !== MAX_FPTS_PROFILE && profile !== SMALL_FIELD_PROFILE
+    ? runShowdownTournamentModel(workingInput, projectionByPlayer, slots, scored, profile, marketAverages, warnings)
+    : undefined;
   // Score and simulate the full legal search result before truncating the candidate report. This
   // prevents a deterministic pre-sort from silently excluding a lineup that wins in the contest
   // model. The final report is still bounded by maxCandidates for storage/UI consumption.
@@ -118,6 +124,20 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   applyFieldHeuristic(allRanked); // must run before field simulation, which weights construction
   const contestSimulation = simulateContestField(input.validatedSlate, allRanked, { seed: `${input.validatedSlate.slateId}:${input.validatedSlate.contest.draftKingsContestId}` }, input.projectionPackage.players);
   applyContestMetrics(allRanked, contestSimulation);
+  // Guardrail: the field is modeled, not observed, so a lineup may trade away at most 3% (and
+  // at least 6 points) of the best projected score to avoid duplicates. Lineups outside that
+  // window keep their metrics but rank after every lineup inside it.
+  const bestMean = Math.max(...allRanked.map((candidate) => candidate.expectedPoints ?? -Infinity));
+  const tournamentFloor = bestMean - Math.max(SHOWDOWN_MIN_POINT_WINDOW, SHOWDOWN_POINT_WINDOW_SHARE * bestMean);
+  if (showdownTournament) for (const candidate of allRanked) {
+    const metrics = showdownTournament.metrics.get(candidate.id);
+    if (!metrics) continue;
+    const insideWindow = (candidate.expectedPoints ?? -Infinity) >= tournamentFloor;
+    const fee = workingInput.validatedSlate.contest.entryFee;
+    Object.assign(candidate, { expectedDuplicates: metrics.expectedDuplicates, winFrequency: metrics.winFrequency, topOnePercentFrequency: metrics.topOnePercentFrequency, cashFrequency: metrics.cashFrequency, roi: metrics.roi, ...(fee ? { expectedPayout: metrics.expectedPayoutMultiple * fee } : {}), heuristicTournamentScore: insideWindow ? metrics.expectedPayoutMultiple : metrics.expectedPayoutMultiple - 1_000, contestMetricProvenance: 'SHOWDOWN_FIELD_MODEL' });
+  }
+  if (showdownTournament) warnings.push(`Showdown tournament ranking kept lineups within ${(bestMean - tournamentFloor).toFixed(1)} points of the best projected score (${bestMean.toFixed(1)}) ahead of all others.`);
+  if (showdownTournament) rankCandidates(allRanked, allRanked.length);
   const ranked = rankCandidates(allRanked, maxCandidates);
   const cashLineEstimate = computeCashLineEstimate(input.validatedSlate);
   if (cashLineEstimate) for (const candidate of ranked) candidate.cashLineProbability = rawCashLineProbability({ median: candidate.median, floor: candidate.floor, ceiling: candidate.ceiling, cashLine: cashLineEstimate.value }) ?? undefined;
@@ -125,6 +145,43 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
   assignTypes(ranked);
   if (contestSimulation.status === 'UNAVAILABLE') warnings.push(`Contest simulation unavailable: ${contestSimulation.reason}`);
   return { slateId: input.validatedSlate.slateId, tenantId: input.validatedSlate.tenantId, sport: input.validatedSlate.sport, version: 1, generatedAt: now.toISOString(), objectiveProfile: profile, candidates: ranked, warnings, gaps: input.projectionPackage.gaps.map((gap) => gap.reason), status: input.projectionPackage.status === 'PARTIAL' ? 'PARTIAL' : 'COMPLETE', engineState: 'MODEL_VALIDATION_REQUIRED', searchCompleteness: exhaustive ? 'EXHAUSTIVE' : 'BOUNDED', ...(exhaustive ? { optimalityGap: 0 } : {}), ...(options.portfolioConstraints ? { portfolioConstraints: options.portfolioConstraints } : {}), contestSimulation: { status: contestSimulation.status, simulations: contestSimulation.simulations, fieldEntries: contestSimulation.fieldEntries, fieldModel: contestSimulation.fieldModel, payoutModel: contestSimulation.payoutModel, reason: contestSimulation.reason }, ...(cashLineEstimate ? { cashLineEstimate } : {}) };
+}
+
+const SHOWDOWN_POINT_WINDOW_SHARE = 0.03;
+const SHOWDOWN_MIN_POINT_WINDOW = 6;
+function runShowdownTournamentModel(input: OptimizerInput, projectionByPlayer: Map<string, OptimizerInput['projectionPackage']['players'][number]>, slots: string[], scored: LineupCandidate[], profile: ObjectiveProfile, marketAverages: ReturnType<typeof slateMarketAverages>, warnings: string[]) {
+  const slate = input.validatedSlate;
+  const means = new Map(slate.playerPool.flatMap((player) => { const projection = projectionByPlayer.get(player.playerId); return projection ? [[player.playerId, playerMean(projection)] as const] : []; }));
+  const captainSlot = slots.find((slot) => /^(CPT|CAPTAIN|MVP)/i.test(baseSlot(slot)));
+  const utilitySlots = slots.filter((slot) => slot !== captainSlot);
+  const standardShowdown = Boolean(captainSlot) && utilitySlots.every((slot) => baseSlot(slot) === 'UTIL') && !slate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
+  const captainRule = captainSlot ? slate.rosterRules.slots[baseSlot(captainSlot)] : undefined;
+  const solverPlayers = slate.playerPool.flatMap((player) => {
+    const captainSalary = captainSlot ? salaryForSlot(player, baseSlot(captainSlot), captainRule) : undefined;
+    const utilitySalary = salaryForSlot(player, 'UTIL', slate.rosterRules.slots.UTIL);
+    return means.has(player.playerId) && player.eligibility.CPT !== false && player.eligibility.UTIL && captainSalary !== undefined && utilitySalary !== undefined ? [{ playerId: player.playerId, team: player.team, captainSalary, utilitySalary }] : [];
+  });
+  const findBest = standardShowdown
+    ? (value: (playerId: string) => number) => bestShowdownLineup(solverPlayers, value, { salaryCap: slate.salaryCap, captainSlot: captainSlot!, utilitySlots, minimumTeams: slate.rosterRules.teamConstraints?.minimumTeams, captainMultiplier: captainRule?.fantasyMultiplier ?? 1.5 })
+    : (value: (playerId: string) => number) => searchTopLineups(slots, slate, (player) => value(player.playerId), { topK: 1, minSalaryUsed: 0, nodeBudget: 300_000 }).lineups[0];
+  const opponents = Math.max(200, Math.min(3000, (slate.contest.contestSize ?? 1000) - 1));
+  const field = buildShowdownField(means, findBest, `${slate.slateId}:${slate.contest.draftKingsContestId}:field`, opponents);
+  if (!field.simulatedOpponents) { warnings.push('Showdown tournament model could not build a simulated field; lineups ranked by the profile heuristic.'); return undefined; }
+  // Popular field lineups are strong lineups too; add the ones the search did not return so the
+  // ranking compares chalk against lower-duplicate alternatives on equal terms.
+  const known = new Set(scored.map((candidate) => showdownLineupKey(candidate.rosterSlots)));
+  for (const lineup of field.lineups) {
+    if (known.has(lineup.key) || validateLineupCandidate({ playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed }, slate).length) continue;
+    known.add(lineup.key);
+    scored.push(scoreCandidate(lineup, input, projectionByPlayer, profile, marketAverages));
+  }
+  const contestSize = slate.contest.contestSize;
+  if (!contestSize) warnings.push('Contest size is unknown; the Showdown tournament model assumed 1,000 entries.');
+  const result = evaluateShowdownTournament(slate, scored, field, (rosterSlots) => buildLineupOutcomeSamples(rosterSlots, input, projectionByPlayer), contestSize ?? 1000);
+  if (!result) { warnings.push('Showdown tournament model was unavailable (missing outcome samples); lineups ranked by the profile heuristic.'); return undefined; }
+  const chalk = [...field.lineups].sort((a, b) => b.copies - a.copies)[0];
+  warnings.push(`Showdown tournament model: ranked ${result.metrics.size} lineups by expected payout against ${result.simulatedOpponents} simulated opponents scaled to ${result.contestSize.toLocaleString('en-US')} entries (${result.payoutModel === 'CONTEST_PAYOUT_STRUCTURE' ? 'contest payout table' : `approximate payout curve, ${result.paidPositions.toLocaleString('en-US')} paid`}). The most popular simulated lineup appears about ${Math.round(chalk.copies * (result.contestSize - 1) / result.simulatedOpponents)} times. Field mix and payouts are provisional estimates, not observed entries.`);
+  return result;
 }
 
 function isExplicitlyUnavailable(player: SlatePlayer): boolean {

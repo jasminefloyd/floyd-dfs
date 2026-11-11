@@ -17,6 +17,7 @@ import { overlap, selectLineups } from '../src/lib/engine/selection';
 import { deriveSeasonBasedInputs, deriveWeightedSeasonInputs, findRow, gamesPlayedFromRow } from '../src/lib/engine/projectionInputs';
 import { evaluateProjectionCalibration, evaluatePairedProjectionBaseline, validatePreLockBacktestRows } from '../src/lib/engine/calibration';
 import { seasonParamFor, SportsDataIoClient, opponentDefenseFactors } from '../src/lib/engine/sportsDataIoProvider';
+import { bestShowdownLineup, showdownLineupKey } from '../src/lib/engine/showdownTournament';
 import { getTeamMarketContext } from '../src/lib/engine/oddsProvider';
 import { normalizeResearchPublishedAt } from '../src/lib/engine/webResearchProvider';
 import { assertProjection, assertSlate, validateLineupCandidate } from '../src/lib/engine/validation';
@@ -1039,6 +1040,59 @@ const testNbaUsageBlowoutAndDefenseParity = (): void => {
   assert.ok(Math.abs(factors.get(normalizeTeamCode('NYK'))! - 0.95) < 1e-9);
 };
 
+const testShowdownTournamentModelParity = (): void => {
+  // (1) The fast Showdown solver is exact: compare with brute force over every Captain and
+  // every 5-player UTIL set on a small pool.
+  let seed = 4242; const random = () => { seed = (1664525 * seed + 1013904223) >>> 0; return seed / 4294967296; };
+  const pool = Array.from({ length: 12 }, (_, index) => { const salary = Math.round((1000 + Math.pow(random(), 1.3) * 12000) / 200) * 200; return { playerId: `s${index}`, team: index % 3 === 0 ? 'NYK' : 'BOS', utilitySalary: salary, captainSalary: salary * 1.5 }; });
+  const value = new Map(pool.map((player) => [player.playerId, player.utilitySalary / 1000 * (3 + random() * 4)]));
+  let brute = -Infinity;
+  for (const captain of pool) {
+    const rest = pool.filter((player) => player !== captain);
+    const choose = (start: number, picked: typeof pool): void => {
+      if (picked.length === 5) { const salary = captain.captainSalary + picked.reduce((sum, player) => sum + player.utilitySalary, 0); const teams = new Set([captain.team, ...picked.map((player) => player.team)]); if (salary <= 50000 && teams.size >= 2) brute = Math.max(brute, 1.5 * value.get(captain.playerId)! + picked.reduce((sum, player) => sum + value.get(player.playerId)!, 0)); return; }
+      for (let index = start; index < rest.length; index += 1) choose(index + 1, [...picked, rest[index]]);
+    };
+    choose(0, []);
+  }
+  const utilitySlots = ['UTIL_1', 'UTIL_2', 'UTIL_3', 'UTIL_4', 'UTIL_5'];
+  const fast = bestShowdownLineup(pool, (id) => value.get(id)!, { salaryCap: 50000, captainSlot: 'CPT', utilitySlots, minimumTeams: 2 })!;
+  const fastValue = Object.entries(fast.rosterSlots).reduce((sum, [slot, id]) => sum + value.get(id)! * (slot === 'CPT' ? 1.5 : 1), 0);
+  assert.ok(Math.abs(fastValue - brute) < 1e-9, `fast Showdown solver ${fastValue} must equal brute force ${brute}`);
+  assert.ok(fast.salaryUsed <= 50000);
+  // (2) Captain choice is part of a Showdown lineup's identity.
+  assert.notEqual(showdownLineupKey({ CPT: 'a', UTIL_1: 'b', UTIL_2: 'c' }), showdownLineupKey({ CPT: 'b', UTIL_1: 'a', UTIL_2: 'c' }));
+  assert.equal(showdownLineupKey({ CPT: 'a', UTIL_1: 'b', UTIL_2: 'c' }), showdownLineupKey({ CPT: 'a', UTIL_1: 'c', UTIL_2: 'b' }));
+
+  // (3) In a 5,000-entry Showdown tournament the top-ranked lineup stays within the projected
+  // points window of the best lineup, is less duplicated than the max-points lineup, and
+  // carries model provenance. Max Fantasy Points mode is untouched by the tournament model.
+  const players: ValidatedSlate['playerPool'] = []; const projections: ProjectionPackage['players'] = [];
+  for (const team of ['NYK', 'BOS']) for (let index = 0; index < 11; index += 1) {
+    const salary = Math.round((index < 2 ? 10000 + random() * 3000 : index < 7 ? 4000 + random() * 5000 : 1000 + random() * 2200) / 200) * 200;
+    const mean = salary / 1000 * (4.6 + (random() - 0.5) * 2.6);
+    const id = `${team}-${index}`;
+    players.push({ playerId: id, playerName: id, team, opponent: team === 'NYK' ? 'BOS' : 'NYK', position: 'F', salary, utilitySalary: salary, captainSalary: salary * 1.5, eligibility: { CPT: true, UTIL: true } });
+    const samples = Array.from({ length: 512 }, () => Math.max(0, mean * (0.55 + random() * 0.9)));
+    const sorted = [...samples].sort((a, b) => a - b);
+    projections.push({ playerId: id, salary, baselineOpportunity: {}, adjustedOpportunity: {}, opportunityDelta: {}, componentProjection: {}, projectedOutcomes: { floorP20: sorted[102], medianP50: sorted[256], ceilingP90: sorted[460] }, simulatedFantasyPointSamples: samples, salaryEfficiency: { medianPer1k: sorted[256] / salary * 1000, ceilingPer1k: sorted[460] / salary * 1000 }, confidence: 'HIGH', uncertaintyFactors: [], watchDependencies: [], modelVersion: 'test' });
+  }
+  const showdown: ValidatedSlate = { ...baseSlate, sport: 'NBA', salaryCap: 50000, contest: { ...baseSlate.contest, format: 'SHOWDOWN', contestSize: 5000, entryFee: 0.25, userEntryCount: 1 } as ValidatedSlate['contest'], rosterRules: { rosterSize: 6, slots: { CPT: { count: 1, salaryMultiplier: 1.5, fantasyMultiplier: 1.5 }, UTIL: { count: 5 } }, uniquePlayersRequired: true, teamConstraints: { minimumTeams: 2 } }, playerPool: players };
+  const showdownProjection: ProjectionPackage = { ...projection, players: projections, simulationRuns: 512 };
+  const tournament = optimizeLineups({ validatedSlate: showdown, projectionPackage: showdownProjection }, { lineupMode: 'tournament' }, now);
+  const pick = [...tournament.candidates].sort((a, b) => (a.heuristicTournamentRank ?? Infinity) - (b.heuristicTournamentRank ?? Infinity))[0];
+  const maxPoints = [...tournament.candidates].sort((a, b) => (b.expectedPoints ?? 0) - (a.expectedPoints ?? 0))[0];
+  const best = maxPoints.expectedPoints!;
+  assert.equal(pick.contestMetricProvenance, 'SHOWDOWN_FIELD_MODEL');
+  assert.ok(pick.expectedPoints! >= best - Math.max(6, 0.03 * best) - 1e-9, 'the tournament pick stays inside the projected points window');
+  assert.ok((pick.expectedDuplicates ?? Infinity) <= (maxPoints.expectedDuplicates ?? 0), 'the tournament pick is no more duplicated than the max-points lineup');
+  assert.ok((maxPoints.expectedDuplicates ?? 0) > 1, 'the simulated field concentrates on the max-points lineup');
+  assert.ok(tournament.warnings.some((warning) => /Showdown tournament model: ranked/.test(warning)));
+  for (const candidate of tournament.candidates.slice(0, 20)) assert.deepEqual(validateLineupCandidate(candidate, showdown), []);
+  const maxMode = optimizeLineups({ validatedSlate: showdown, projectionPackage: showdownProjection }, { lineupMode: 'max_fpts' }, now);
+  assert.ok(maxMode.candidates.every((candidate) => candidate.contestMetricProvenance !== 'SHOWDOWN_FIELD_MODEL'), 'Max Fantasy Points mode does not use the tournament model');
+};
+
 const testMarketDerivedOwnershipNudgeParity = (): void => {
   const marketSlate: ValidatedSlate = {
     ...baseSlate,
@@ -1524,7 +1578,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
 
 (async () => {
   testMlbRelieverWorkloadGuardParity(); testPairedBaselineHoldoutParity();
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testNbaVacatedMinutesRedistributionParity(); testNbaMarketEnvironmentParity(); testNbaUsageBlowoutAndDefenseParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testNbaVacatedMinutesRedistributionParity(); testNbaMarketEnvironmentParity(); testNbaUsageBlowoutAndDefenseParity(); testShowdownTournamentModelParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
   await testWnbaAvailabilityUsesNumericEventTeamIds();

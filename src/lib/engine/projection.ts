@@ -4,6 +4,10 @@ import { isPitcher, isQuarterback } from './projectionInputs.js';
 
 const MODEL_VERSION = 'projection.deterministic.v3';
 const SIMULATION_RUNS = 256;
+// Showdown pools are small (about 25 players), and tournament ranking depends on rare top-end
+// outcomes, so more correlated game simulations cut sampling noise at little cost.
+const SHOWDOWN_SIMULATION_RUNS = 1024;
+function simulationRunsFor(slate: ValidatedSlate): number { return slate.contest.format === 'SHOWDOWN' ? SHOWDOWN_SIMULATION_RUNS : SIMULATION_RUNS; }
 
 const REQUIRED_BASKETBALL = ['expectedMinutes', 'pointsPerMinute', 'reboundsPerMinute', 'assistsPerMinute', 'stealsPerMinute', 'blocksPerMinute', 'turnoversPerMinute', 'threesPerMinute'];
 const REQUIRED_NFL_SKILL = ['snaps', 'routes', 'targets', 'carries', 'catchRate', 'yardsPerTarget', 'yardsPerCarry', 'touchdownProbability'];
@@ -59,7 +63,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
       }
       prepared.push({ player, values: adjustedValues, adjustment });
     }
-    else { players.push(projectFromProviderFppg(player, adjustment)); if (slate.sport === 'GOLF') golfFallbackCount += 1; }
+    else { players.push(projectFromProviderFppg(player, adjustment, simulationRunsFor(slate))); if (slate.sport === 'GOLF') golfFallbackCount += 1; }
   }
   if (golfMissing.length) {
     const sample = golfMissing.slice(0, 5).map(({ name }) => name).join(', ');
@@ -73,7 +77,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
   // entry-ready Golf projection. Keep the candidate path available for QA and comparison while
   // the run trust gate continues to require model validation and complete sport context.
   const status = players.length === 0 ? 'BLOCKED' : gaps.length || adjustmentPackage.status !== 'COMPLETE' || golfFallbackCount > 0 ? 'PARTIAL' : 'COMPLETE';
-  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: SIMULATION_RUNS, players, gaps, status };
+  return { slateId: slate.slateId, tenantId: slate.tenantId, sport: slate.sport, version: 1, generatedAt: now.toISOString(), modelVersion: MODEL_VERSION, simulationRuns: simulationRunsFor(slate), players, gaps, status };
 }
 
 // No projectionInputs are available for this player (either the sport has no rate-stat
@@ -82,7 +86,7 @@ export function projectSlate(slate: ValidatedSlate, adjustmentPackage: Adjustmen
 // floor/ceiling by simulating around the single aggregate FPPG component with the same
 // seeded-noise machinery used for the granular model, so floor/ceiling remain real quantiles
 // of a (coarser) distribution rather than a flat +-15% guess.
-function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustment | undefined): ProjectionPackage['players'][number] {
+function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustment | undefined, runs = SIMULATION_RUNS): ProjectionPackage['players'][number] {
   const factor = adjustmentFactor(adjustment);
   const rawMedian = (player.providerFppg ?? 0) * factor;
   // FPPG fallback samples are non-negative by construction (the simulated fantasy-point
@@ -92,7 +96,7 @@ function projectFromProviderFppg(player: SlatePlayer, adjustment: PlayerAdjustme
   const components = { fantasyPoints: median };
   const rules = { fantasyPoints: { value: 1 } };
   const noiseWidth = noiseWidthFor('FPPG');
-  const samples = simulateSportScores('FPPG', player, components, rules, `${player.playerId}:fppg`, noiseWidth);
+  const samples = simulateSportScores('FPPG', player, components, rules, `${player.playerId}:fppg`, noiseWidth, components, runs);
   const orderedSamples = [...samples].sort((a, b) => a - b);
   const floor = quantile(orderedSamples, 0.2);
   const ceiling = quantile(orderedSamples, 0.9);
@@ -107,7 +111,7 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const rules = scoringRulesFor(slate, components);
   const analyticalMedian = scoreComponents(components, rules);
   const noiseWidth = noiseWidthFor(slate.sport);
-  const samples = simulateSportScores(slate.sport, player, components, rules, `${player.playerId}:${slate.sport}`, noiseWidth, adjusted);
+  const samples = simulateSportScores(slate.sport, player, components, rules, `${player.playerId}:${slate.sport}`, noiseWidth, adjusted, simulationRunsFor(slate));
   const orderedSamples = [...samples].sort((a, b) => a - b);
   const floor = quantile(orderedSamples, 0.2);
   // Report all outcome quantiles from the same simulated distribution. The analytical
@@ -182,9 +186,9 @@ function scoringRulesFor(slate: ValidatedSlate, components: Record<string, numbe
 }
 
 function scoreComponents(components: Record<string, number>, rules: Record<string, { value: number }>): number { for (const [key, value] of Object.entries(components)) { if (!Number.isFinite(value)) throw new Error(`Projection produced a non-finite scoring component: ${key}.`); if (!rules[key] || !Number.isFinite(rules[key].value)) throw new Error(`Projection scoring component ${key} is missing from the DraftKings scoring contract.`); } return Object.entries(components).reduce((total, [key, value]) => total + value * rules[key].value, 0); }
-function simulateSportScores(sport: Sport | 'FPPG', player: SlatePlayer, components: Record<string, number>, rules: Record<string, { value: number }>, seedText: string, noiseWidth: number, inputs: Record<string, number> = components): number[] {
+function simulateSportScores(sport: Sport | 'FPPG', player: SlatePlayer, components: Record<string, number>, rules: Record<string, { value: number }>, seedText: string, noiseWidth: number, inputs: Record<string, number> = components, runs = SIMULATION_RUNS): number[] {
   let seed = hash(seedText); let environmentSeed = hash(`${sport}:${gameGroup(player)}`); const scores: number[] = [];
-  for (let i = 0; i < SIMULATION_RUNS; i += 1) {
+  for (let i = 0; i < runs; i += 1) {
     environmentSeed = next(environmentSeed); const gameNoise = (environmentSeed / 4294967296 - 0.5) * sportEnvironmentWidth(sport);
     const random = () => { seed = next(seed); return seed / 4294967296; };
     const sampled = sport === 'FPPG' ? sampleAggregate(components, random, noiseWidth) : sport === 'MLB' ? sampleMlb(player, inputs, random) : sport === 'NFL' || sport === 'CFB' ? sampleFootball(player, inputs, rules, random, gameNoise) : sport === 'GOLF' ? sampleGolf(components, random) : sampleBasketball(player, components, inputs, rules, random, gameNoise);

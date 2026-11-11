@@ -379,7 +379,9 @@ export interface LineupCandidate {
   expectedDuplicates?: number;
   expectedPayout?: number;
   roi?: number;
-  contestMetricProvenance?: 'JOINT_FIELD_SIMULATION' | 'UNAVAILABLE';
+  /** SHOWDOWN_FIELD_MODEL: Showdown tournament model (simulated opponents from projection
+   * disagreement; contest payouts when known, otherwise an approximate curve). */
+  contestMetricProvenance?: 'JOINT_FIELD_SIMULATION' | 'SHOWDOWN_FIELD_MODEL' | 'UNAVAILABLE';
   cashLineProbability?: number;
 }
 
