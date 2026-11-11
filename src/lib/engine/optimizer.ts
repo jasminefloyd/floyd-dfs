@@ -80,38 +80,32 @@ export function optimizeLineups(input: OptimizerInput, options: OptimizerOptions
 
   const slots = slotOrder(workingInput.validatedSlate.rosterRules.slots);
   if (!slots.length) return blocked(input.validatedSlate, profile, now, ['No roster slots are available.']);
-  const estimatedSearchSpace = estimateLegalSearchSpace(workingInput.validatedSlate.playerPool.length, slots.length);
-  const useUnboundedTraversal = estimatedSearchSpace <= 100_000;
-  // Large professional slates can contain 600+ rows; candidate-count limits alone do not
-  // bound the DFS work needed to find each legal salary combination. Bound both accepted
-  // candidates and visited search nodes so a valid slate cannot pin a serverless worker.
-  const limit = useUnboundedTraversal ? Number.MAX_SAFE_INTEGER : maxCandidates;
-  const searchControl = { visited: 0, budget: useUnboundedTraversal ? Number.MAX_SAFE_INTEGER : 150_000 };
-  // Sorts by RAW projected value aligned with the actual objective being scored (median/ceiling,
-  // weighted the same way scoreCandidate() weights them below) -- not by salary efficiency
-  // (points per $1k). Efficiency systematically ranks cheap, decent-production bench players
-  // above expensive stars (a $2k player scoring 8 pts has HIGHER points-per-dollar than an $11k
-  // player scoring 32, purely because salary doesn't scale linearly with production), which
-  // means the DFS search would try the cheap player's entire subtree of UTIL combinations first
-  // and can exhaust the whole node budget before ever trying the actual highest-value player at
-  // any slot, including CPT -- confirmed live: an efficiency-sorted search never generated a
-  // single candidate with the slate's best player (4x the next-best player's median) as captain,
-  // out of 500 ranked candidates. Sorting by the same value the objective actually rewards fixes
-  // this at the source, for every objective profile including the pure-median "max fantasy
-  // points" one.
-  const searchValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); if (!projection) return 0; const mean = meanOf(projection.simulatedFantasyPointSamples ?? [], projection.projectedOutcomes.medianP50); return mean * (profile.meanWeight ?? 0) + projection.projectedOutcomes.medianP50 * profile.medianWeight + projection.projectedOutcomes.ceilingP90 * profile.ceilingWeight; };
-  const playersByValue = [...workingInput.validatedSlate.playerPool].sort((a, b) => searchValue(b) - searchValue(a));
-  const minSalaryBySlot = minSalaryPerSlot(playersByValue, workingInput.validatedSlate.salaryCap, workingInput.validatedSlate.rosterRules.slots);
-  const generated: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }> = [];
-  enumerate(slots, 0, {}, 0, new Set(), workingInput, playersByValue, minSalaryBySlot, generated, limit, minSalaryUsed, searchControl);
-  // The combinatorial estimate is an upper bound, not proof that the actual legal
-  // enumeration was cut off. If the DFS exhausted all branches before reaching its
-  // accepted-candidate budget, it did complete an exhaustive search.
-  const exhaustive = useUnboundedTraversal || (generated.length < limit && searchControl.visited < searchControl.budget);
+  // Exact top-K branch-and-bound over the objective's per-player linear value. The previous
+  // depth-first search kept the first N legal lineups it reached in value order, which locked the
+  // top player into every early slot and filled the rest with minimum-salary punts; on realistic
+  // NBA main slates that left ~20+ expected points per lineup unexplored. This search instead
+  // proves which lineups are best: a branch is abandoned only when a valid upper bound (a
+  // Lagrangian relaxation of the salary cap) shows it cannot beat the K-th best lineup found.
+  // For MAX_FPTS the linear value is exactly lineup expected points, so a completed search is the
+  // proven optimum. Other profiles rank by a linear surrogate (weighted mean/median/ceiling) and
+  // every candidate is then rescored on the full lineup distribution below.
+  const linearValue = (player: SlatePlayer) => { const projection = projectionByPlayer.get(player.playerId); if (!projection) return 0; return playerMean(projection) * (profile.meanWeight ?? 0) + projection.projectedOutcomes.medianP50 * profile.medianWeight + projection.projectedOutcomes.ceilingP90 * profile.ceilingWeight; };
+  const linearObjective = (profile.meanWeight ?? 0) > 0 && profile.medianWeight === 0 && profile.ceilingWeight === 0 && profile.leverageWeight === 0 && profile.correlationWeight === 0;
+  // Proving the K-th best lineup costs far more than proving the best one, so size K to what
+  // selection needs (the requested entries plus room for overlap/diversity rules) unless the
+  // caller asked for a specific candidate count.
+  const searchK = options.maxCandidates ?? Math.min(maxCandidates, Math.max(60, 10 * Math.max(1, contest.userEntryCount)));
+  const search = searchTopLineups(slots, workingInput.validatedSlate, linearValue, { topK: searchK, minSalaryUsed, nodeBudget: 2_500_000 });
+  const generated = search.lineups;
   if (!generated.length) return blocked(input.validatedSlate, profile, now, minSalaryUsed ? ['No legal lineups satisfy roster eligibility, salary cap, team constraints, and the minimum salary used.'] : ['No legal lineups satisfy roster eligibility, salary cap, and team constraints.']);
-  if (!exhaustive && generated.length >= limit) warnings.push(`Lineup enumeration stopped at ${limit} candidates (a search budget, not exhaustive enumeration); results reflect the highest-value combinations found within that budget.`);
-  if (!exhaustive && searchControl.visited >= searchControl.budget) warnings.push(`Lineup enumeration reached the ${searchControl.budget}-node search budget; legal combinations outside the explored search were not evaluated.`);
-  if (exhaustive) warnings.push(`Exhaustive legal lineup enumeration completed for the reference-sized slate (${generated.length} candidates).`);
+  // EXHAUSTIVE means the reported candidates are provably the best for the optimized quantity:
+  // either every legal lineup was enumerated, or the objective is linear and the bounded search
+  // completed. A surrogate-ranked search that completed is still reported as BOUNDED.
+  const exhaustive = search.completed && (search.enumeratedAll || linearObjective);
+  if (!search.completed) warnings.push(`Lineup search reached its ${search.nodesVisited.toLocaleString('en-US')}-node budget before proving optimality; the best lineups found are reported, but a better legal lineup may exist.`);
+  else if (search.enumeratedAll) warnings.push(`Exhaustive legal lineup enumeration completed (${generated.length} candidates).`);
+  else if (linearObjective) warnings.push(`Branch-and-bound search proved these are the ${generated.length} highest expected-point legal lineups (${search.nodesVisited.toLocaleString('en-US')} nodes).`);
+  else warnings.push(`Branch-and-bound search proved the top ${generated.length} lineups by the profile's linear player value; final ranking uses the full lineup distribution, which that bound does not cover.`);
 
   const marketAverages = slateMarketAverages(workingInput.validatedSlate.playerPool);
   const invalidGenerated = generated.flatMap((lineup) => validateLineupCandidate({ playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed }, workingInput.validatedSlate));
@@ -158,55 +152,109 @@ function slotOrder(slots: Record<string, { count: number }>): string[] {
   return Object.entries(slots).flatMap(([slot, rule]) => Array.from({ length: rule.count }, (_, index) => rule.count > 1 ? `${slot}_${index + 1}` : slot));
 }
 
-function estimateLegalSearchSpace(playerCount: number, slotCount: number): number {
-  let estimate = 1;
-  for (let index = 0; index < slotCount; index += 1) estimate *= Math.max(1, playerCount - index);
-  return estimate;
-}
+interface SearchOptions { topK: number; minSalaryUsed: number; nodeBudget: number; }
+interface SearchResult { lineups: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>; completed: boolean; enumeratedAll: boolean; nodesVisited: number; }
 
-// An optimistic (lowest-possible) salary needed to fill every OTHER slot besides the one
-// currently being assigned, used to prune branches that can never fit under the cap instead
-// of only discovering that at the leaf.
-function minSalaryPerSlot(players: SlatePlayer[], cap: number, slots: Record<string, { salaryMultiplier?: number }>): Record<string, number> {
-  const result: Record<string, number> = {};
-  for (const [slot, rule] of Object.entries(slots)) {
-    const salaries = players.map((player) => salaryForSlot(player, slot, rule)).filter((value): value is number => value !== undefined);
-    result[slot] = salaries.length ? Math.min(...salaries) : cap;
-  }
-  return result;
-}
+// Exact top-K lineup search (branch and bound).
+// - Slots are filled most-constrained first; each slot tries players in descending value.
+// - Upper bound for the unfilled slots, valid for every lambda >= 0:
+//     sum(v) = sum(v - lambda*s) + lambda*sum(s) <= sum_j max_p(v_pj - lambda*s_pj) + lambda*budget
+//   The per-slot maxima ignore uniqueness, teams and the cap, so they only relax the problem,
+//   and the minimum over a grid of lambdas is still a valid bound. A branch is pruned only when
+//   that bound cannot beat the K-th best distinct lineup found so far.
+// - Lineups that are the same players in permuted slots of equal value are kept once.
+export function searchTopLineups(slotNames: string[], slate: ValidatedSlate, valueOf: (player: SlatePlayer) => number, options: SearchOptions): SearchResult {
+  const { salaryCap, rosterRules } = slate;
+  const topK = Math.max(1, options.topK);
+  const maxPerTeam = rosterRules.teamConstraints?.maximumPlayersPerTeam;
+  const minimumTeams = rosterRules.teamConstraints?.minimumTeams;
+  const unique = rosterRules.uniquePlayersRequired;
+  type Option = { player: SlatePlayer; salary: number; value: number };
+  const slotOptions = slotNames.map((slot) => {
+    const ruleSlot = baseSlot(slot);
+    const rule = rosterRules.slots[ruleSlot];
+    const multiplier = rule?.fantasyMultiplier ?? 1;
+    return slate.playerPool.flatMap((player): Option[] => {
+      if (!player.eligibility[ruleSlot]) return [];
+      const salary = salaryForSlot(player, ruleSlot, rule);
+      if (salary === undefined || !Number.isFinite(salary)) return [];
+      return [{ player, salary, value: valueOf(player) * multiplier }];
+    // Stable sort: equal-value players keep slate order, matching the previous search's tie order.
+    }).sort((a, b) => b.value - a.value);
+  });
+  // Most constrained slot first keeps branching low at the top of the tree.
+  const order = slotNames.map((_, index) => index).sort((a, b) => slotOptions[a].length - slotOptions[b].length);
+  const slots = order.map((index) => slotNames[index]);
+  const options_ = order.map((index) => slotOptions[index]);
+  const multiplierKey = slots.map((slot) => rosterRules.slots[baseSlot(slot)]?.fantasyMultiplier ?? 1);
+  const n = slots.length;
+  if (options_.some((list) => !list.length)) return { lineups: [], completed: true, enumeratedAll: true, nodesVisited: 0 };
 
-function enumerate(slots: string[], index: number, rosterSlots: Record<string, string>, salaryUsed: number, used: Set<string>, input: OptimizerInput, playersByValue: SlatePlayer[], minSalaryBySlot: Record<string, number>, output: Array<{ rosterSlots: Record<string, string>; salaryUsed: number }>, limit: number, minSalaryUsed: number, control: { visited: number; budget: number }): void {
-  if (output.length >= limit || control.visited >= control.budget) return;
-  control.visited += 1;
-  if (index === slots.length) {
-    const teams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
-    const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
-    if (minimumTeams && teams.size < minimumTeams) return;
-    if (minSalaryUsed && salaryUsed < minSalaryUsed) return;
-    output.push({ rosterSlots: { ...rosterSlots }, salaryUsed });
-    return;
+  const minCostSuffix = new Array<number>(n + 1).fill(0);
+  for (let j = n - 1; j >= 0; j -= 1) minCostSuffix[j] = minCostSuffix[j + 1] + Math.min(...options_[j].map((option) => option.salary));
+  const maxValuePerDollar = Math.max(0, ...options_.flatMap((list) => list.map((option) => option.salary > 0 ? option.value / option.salary : 0)));
+  const lambdas = Array.from({ length: 25 }, (_, index) => maxValuePerDollar * index / 24);
+  // suffix[j][k] = sum over slots j..n-1 of max_p(value - lambda_k * salary)
+  const suffix = Array.from({ length: n + 1 }, () => new Array<number>(lambdas.length).fill(0));
+  for (let j = n - 1; j >= 0; j -= 1) for (let k = 0; k < lambdas.length; k += 1) {
+    let best = -Infinity;
+    for (const option of options_[j]) { const reduced = option.value - lambdas[k] * option.salary; if (reduced > best) best = reduced; }
+    suffix[j][k] = suffix[j + 1][k] + best;
   }
-  const slot = slots[index];
-  const ruleSlot = baseSlot(slot);
-  const minimumTeams = input.validatedSlate.rosterRules.teamConstraints?.minimumTeams;
-  const selectedTeams = new Set(Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((player) => player.playerId === id)?.team).filter(Boolean));
-  const remainingMinCost = slots.slice(index + 1).reduce((sum, remainingSlot) => sum + (minSalaryBySlot[baseSlot(remainingSlot)] ?? 0), 0);
-  for (const player of playersByValue) {
-    if (output.length >= limit || control.visited >= control.budget) return;
-    if (used.has(player.playerId) && input.validatedSlate.rosterRules.uniquePlayersRequired) continue;
-    if (!player.eligibility[ruleSlot]) continue;
-    const salary = salaryForSlot(player, ruleSlot, input.validatedSlate.rosterRules.slots[ruleSlot]);
-    if (salary === undefined || salaryUsed + salary + remainingMinCost > input.validatedSlate.salaryCap) continue;
-    const maxPerTeam = input.validatedSlate.rosterRules.teamConstraints?.maximumPlayersPerTeam;
-    if (maxPerTeam && player.team && Object.values(rosterSlots).map((id) => input.validatedSlate.playerPool.find((candidate) => candidate.playerId === id)?.team).filter((team) => team === player.team).length >= maxPerTeam) continue;
-    if (minimumTeams && index === slots.length - 1 && selectedTeams.size < minimumTeams && player.team && selectedTeams.has(player.team)) continue;
-    rosterSlots[slot] = player.playerId;
-    used.add(player.playerId);
-    enumerate(slots, index + 1, rosterSlots, salaryUsed + salary, used, input, playersByValue, minSalaryBySlot, output, limit, minSalaryUsed, control);
-    delete rosterSlots[slot];
-    used.delete(player.playerId);
-  }
+  const upperBound = (from: number, budget: number) => { let bound = Infinity; for (let k = 0; k < lambdas.length; k += 1) { const candidate = suffix[from][k] + lambdas[k] * budget; if (candidate < bound) bound = candidate; } return bound; };
+
+  // Kept sorted descending by value; threshold is the K-th best value once full.
+  const best: Array<{ value: number; key: string; rosterSlots: Record<string, string>; salaryUsed: number }> = [];
+  const seen = new Set<string>();
+  const epsilon = 1e-9;
+  const threshold = () => best.length >= topK ? best[best.length - 1].value : -Infinity;
+  let visited = 0; let enumeratedAll = true; let completed = true;
+  const chosen: Option[] = new Array(n);
+  const used = new Set<string>();
+  const teamCounts = new Map<string, number>();
+
+  const record = (value: number, salaryUsed: number) => {
+    if (minimumTeams && teamCounts.size < minimumTeams) return;
+    if (options.minSalaryUsed && salaryUsed < options.minSalaryUsed) return;
+    const key = chosen.map((option, index) => `${multiplierKey[index]}:${option.player.playerId}`).sort().join('|');
+    if (seen.has(key)) return;
+    if (best.length >= topK && value <= threshold() + epsilon) { enumeratedAll = false; return; }
+    const rosterSlots: Record<string, string> = {};
+    for (let index = 0; index < n; index += 1) rosterSlots[slots[index]] = chosen[index].player.playerId;
+    let position = best.length;
+    while (position > 0 && best[position - 1].value < value) position -= 1;
+    best.splice(position, 0, { value, key, rosterSlots, salaryUsed });
+    seen.add(key);
+    if (best.length > topK) { const removed = best.pop()!; seen.delete(removed.key); enumeratedAll = false; }
+  };
+
+  const visit = (depth: number, value: number, salaryUsed: number): void => {
+    if (!completed) return;
+    if (++visited > options.nodeBudget) { completed = false; return; }
+    if (depth === n) { record(value, salaryUsed); return; }
+    const budget = salaryCap - salaryUsed;
+    for (const option of options_[depth]) {
+      if (option.salary + minCostSuffix[depth + 1] > budget) continue;
+      if (unique && used.has(option.player.playerId)) continue;
+      const team = option.player.team;
+      if (maxPerTeam && team && (teamCounts.get(team) ?? 0) >= maxPerTeam) continue;
+      if (best.length >= topK) {
+        const floor = threshold() + epsilon;
+        // lambda = 0 bound ignores salary; options are value-sorted, so once it fails every later
+        // option at this slot fails too.
+        if (value + option.value + suffix[depth + 1][0] <= floor) { enumeratedAll = false; break; }
+        if (value + option.value + upperBound(depth + 1, budget - option.salary) <= floor) { enumeratedAll = false; continue; }
+      }
+      chosen[depth] = option; used.add(option.player.playerId);
+      if (team) teamCounts.set(team, (teamCounts.get(team) ?? 0) + 1);
+      visit(depth + 1, value + option.value, salaryUsed + option.salary);
+      used.delete(option.player.playerId);
+      if (team) { const count = (teamCounts.get(team) ?? 1) - 1; if (count) teamCounts.set(team, count); else teamCounts.delete(team); }
+      if (!completed) return;
+    }
+  };
+  visit(0, 0, 0);
+  return { lineups: best.map(({ rosterSlots, salaryUsed }) => ({ rosterSlots, salaryUsed })), completed, enumeratedAll: completed && enumeratedAll, nodesVisited: Math.min(visited, options.nodeBudget) };
 }
 
 function salaryForSlot(player: { salary: number; captainSalary?: number; utilitySalary?: number }, slot: string, rule?: { salaryMultiplier?: number }): number | undefined {
@@ -317,6 +365,9 @@ function scoreCandidate(lineup: { rosterSlots: Record<string, string>; salaryUse
   return { id, playerIds: Object.values(lineup.rosterSlots), rosterSlots: lineup.rosterSlots, salaryUsed: lineup.salaryUsed, salaryRemaining: input.validatedSlate.salaryCap - lineup.salaryUsed, floor, expectedPoints, median, ceiling, correlationScore, simulatedScoreSamples: lineupOutcomeSamples, heuristicTournamentScore: objective, heuristicOwnershipProxy: ownershipEstimate, heuristicLeverageScore: leverageScore, heuristicDuplicationRisk, heuristicDuplicationRiskScore: ownershipEstimate, medianRank: 0, ceilingRank: 0, heuristicTournamentRank: 0, candidateTypes: [], gameScriptCluster, strategicSimilarity: 0, riskFlags: players.flatMap((player) => player.uncertaintyFactors) };
 }
 
+// Mean of the same per-player distribution scoreCandidate sums, so the search value and the
+// scored lineup expectation agree exactly (including synthetic samples when none were stored).
+function playerMean(projection: OptimizerInput['projectionPackage']['players'][number]): number { const values = projection.simulatedFantasyPointSamples?.length ? projection.simulatedFantasyPointSamples : syntheticSamples(projection.projectedOutcomes); return meanOf(values, projection.projectedOutcomes.medianP50); }
 function meanOf(values: number[], fallback: number): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : fallback; }
 
 function applyContestMetrics(candidates: LineupCandidate[], simulation: ReturnType<typeof simulateContestField>): void {

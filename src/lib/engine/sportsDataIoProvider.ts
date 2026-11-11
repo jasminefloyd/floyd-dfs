@@ -187,6 +187,20 @@ export class SportsDataIoClient {
    * are the account's own real, ungated stats). Used as the projection basis for MLB/NBA/NFL --
    * see projectionInputs.ts's deriveSeasonBasedInputs for how season totals become per-game rates.
    */
+  /** The provider's own current-season label (e.g. "2027" for the 2026-27 NBA season), or
+   * undefined when the endpoint is unavailable. Callers fall back to seasonParamFor(). */
+  async getCurrentSeason(sport: Sport, signal?: AbortSignal): Promise<string | undefined> {
+    const payload = await this.get<unknown>(sport, 'scores', 'CurrentSeason', undefined, signal);
+    const row = asRecord(Array.isArray(payload) ? payload[0] : payload);
+    if (row) {
+      const season = readNumber(row, ['Season', 'season']);
+      if (season !== undefined && Number.isInteger(season) && season > 2000) return String(season);
+      const apiSeason = readString(row, ['ApiSeason', 'apiSeason'])?.match(/^(\d{4})/)?.[1];
+      if (apiSeason) return apiSeason;
+    }
+    if (typeof payload === 'number' && Number.isInteger(payload) && payload > 2000) return String(payload);
+    return undefined;
+  }
   async getSeasonStats(sport: Sport, seasonParam: string, signal?: AbortSignal): Promise<Record<string, unknown>[]> {
     // WNBA exposes PlayerSeasonStats under the scores subfeed. The other supported
     // season-stat routes used here are under stats (verified against the published
@@ -209,9 +223,12 @@ export class SportsDataIoClient {
       return [{ gameId: readIdentifier(row, ['GameID', 'GameId']), homeTeam: readString(row, ['HomeTeam']), awayTeam: readString(row, ['AwayTeam']), homeProbablePitcherId: readIdentifier(row, ['HomeTeamProbablePitcherID']), awayProbablePitcherId: readIdentifier(row, ['AwayTeamProbablePitcherID']), homeProbablePitcher: readString(row, ['HomeTeamStartingPitcher']), awayProbablePitcher: readString(row, ['AwayTeamStartingPitcher']), homeOpener: readBoolean(row, ['HomeTeamOpener']), awayOpener: readBoolean(row, ['AwayTeamOpener']), temperatureLow: readNumber(row, ['ForecastTempLow']), temperatureHigh: readNumber(row, ['ForecastTempHigh']), windSpeed: readNumber(row, ['ForecastWindSpeed']), windDirection: readString(row, ['ForecastWindDirection']), description: readString(row, ['ForecastDescription']) }];
     });
   }
-  /** WNBA exposes final player minutes nested in its final box-score feed. This bounded
-   * lookback uses only dates strictly before the slate date, preventing same-day/future leakage. */
-  async getWnbaRecentMinutes(eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> {
+  /** Final player minutes from recent box scores. This bounded lookback uses only dates
+   * strictly before the slate date, preventing same-day/future leakage. WNBA nests player rows
+   * in `scores/BoxScores/{date}`; NBA v3 serves final box scores at `stats/BoxScoresFinal/{date}`. */
+  async getWnbaRecentMinutes(eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> { return this.getBasketballRecentMinutes('WNBA', eventDate, lookbackDays, signal); }
+  async getBasketballRecentMinutes(sport: 'NBA' | 'WNBA', eventDate: string, lookbackDays = 28, signal?: AbortSignal): Promise<WnbaRecentPlayerMinutes[]> {
+    const [feed, resource] = sport === 'NBA' ? ['stats', 'BoxScoresFinal'] : ['scores', 'BoxScores'];
     const target = new Date(`${eventDate.slice(0, 10)}T00:00:00.000Z`);
     if (!Number.isFinite(target.getTime())) return [];
     const dates = Array.from({ length: Math.max(1, Math.min(45, Math.floor(lookbackDays))) }, (_, index) => {
@@ -222,7 +239,7 @@ export class SportsDataIoClient {
     // for box scores, and empty dates are expected during the off-season.
     for (let index = 0; index < dates.length; index += 4) {
       const batches = await Promise.all(dates.slice(index, index + 4).map(async (date) => {
-        try { return rowsFromPayload(await this.get<unknown>('WNBA', 'scores', 'BoxScores', date, signal)); }
+        try { return rowsFromPayload(await this.get<unknown>(sport, feed, resource, date, signal)); }
         catch { return []; }
       }));
       for (const boxScores of batches) for (const boxValue of boxScores) {
@@ -298,7 +315,13 @@ export class SportsDataIoClient {
 
 // MLB/NBA/CFB accept a bare year; NFL requires the season-type suffix ('REG' = regular season).
 export function seasonParamFor(sport: Sport, eventDate: string, yearOffset = 0): string {
-  const year = new Date(eventDate).getUTCFullYear() + yearOffset;
+  const date = new Date(eventDate);
+  // SportsDataIO labels an NBA season by the year it ends (2026-27 is "2027"). Games from October
+  // through December belong to the season that ends the following calendar year; without this, a
+  // November slate requested last season's completed stats. Prefer getCurrentSeason() when the
+  // provider is reachable; this is the fallback rule.
+  const nbaRollover = sport === 'NBA' && date.getUTCMonth() >= 9 ? 1 : 0;
+  const year = date.getUTCFullYear() + nbaRollover + yearOffset;
   return sport === 'NFL' ? `${year}REG` : String(year);
 }
 

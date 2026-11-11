@@ -222,6 +222,11 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
     if (['MLB', 'NBA', 'WNBA', 'NFL', 'CFB'].includes(workingSlate.sport)) {
       try {
         let seasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate);
+        if (workingSlate.sport === 'NBA') {
+          // Trust the provider's season label over the calendar rule when it answers.
+          const providerSeason = await availability.getCurrentSeason('NBA').catch(() => undefined);
+          if (providerSeason) seasonParam = providerSeason;
+        }
         let seasonRows = await availability.getSeasonStats(workingSlate.sport, seasonParam);
         let seasonFallbackNote = '';
         // NFL/CFB specifically: early in a season, the current year may have no usable rows for
@@ -234,17 +239,17 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         }
         let priorSeasonRows: Record<string, unknown>[] = [];
         let priorSeasonParam = '';
-        if (['MLB', 'NFL', 'CFB'].includes(workingSlate.sport)) {
+        if (['MLB', 'NFL', 'CFB', 'NBA'].includes(workingSlate.sport)) {
           const currentSeasonMissing = workingSlate.playerPool.some((player) => { const row = findRow(player, seasonRows, workingSlate.sport === 'MLB'); return !row || gamesPlayedFromRow(row) <= 0; });
           if (currentSeasonMissing) {
-            priorSeasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
+            priorSeasonParam = String(Number(seasonParam.slice(0, 4)) - 1) + seasonParam.slice(4);
             priorSeasonRows = await availability.getSeasonStats(workingSlate.sport, priorSeasonParam);
           }
           // Fetch the prior season whenever current-season data exists too, so the projection
           // stage can blend both verified samples instead of switching abruptly at a row-level
           // cutoff. The blend weights are explicit provisional model policy (not calibration).
           if (!priorSeasonRows.length) {
-            priorSeasonParam = seasonParamFor(workingSlate.sport, workingSlate.event.eventDate, -1);
+            priorSeasonParam = String(Number(seasonParam.slice(0, 4)) - 1) + seasonParam.slice(4);
             priorSeasonRows = await availability.getSeasonStats(workingSlate.sport, priorSeasonParam);
           }
         }
@@ -267,7 +272,8 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           const slateTeam = normalizeTeamCode(String(player.team ?? ''));
           if (providerTeam && slateTeam && providerTeam !== slateTeam) teamMismatchPlayers.push(`${player.playerName} (${slateTeam} slate / ${providerTeam} stats)`);
           const dkPoints = Number(row.FantasyPointsDraftKings ?? NaN);
-          const currentWeight = workingSlate.sport === 'CFB' || workingSlate.sport === 'NFL' ? (currentGames >= 4 ? 0.7 : 0.5) : 0.7;
+          // NBA: a handful of early-season games is noisy, so lean on last season until the sample grows.
+          const currentWeight = workingSlate.sport === 'CFB' || workingSlate.sport === 'NFL' ? (currentGames >= 4 ? 0.7 : 0.5) : workingSlate.sport === 'NBA' ? (currentGames >= 15 ? 0.8 : currentGames >= 5 ? 0.6 : 0.4) : 0.7;
           const weighted = deriveWeightedSeasonInputs(workingSlate.sport, player, seasonRows, priorSeasonRows, currentWeight, { allowTeamMismatch });
           const inputs = weighted.inputs;
           if (weighted.usedPrior && currentRow && currentGames > 0 && priorRow) blendedPlayers.push(player.playerName);
@@ -362,9 +368,13 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
         stages.weatherWarning = `MLB game-day forecast lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
       }
     }
-    if (workingSlate.sport === 'WNBA') {
+    if (workingSlate.sport === 'WNBA' || workingSlate.sport === 'NBA') {
+      // Recent final minutes catch role changes that season averages hide (new starters, returns
+      // from injury, minutes restrictions). Blended 50/50 with season minutes; provisional weight.
+      const sport = workingSlate.sport;
+      const stageKey = sport === 'NBA' ? 'nba' : 'wnba';
       try {
-        const recentRows = await availability.getWnbaRecentMinutes(workingSlate.event.eventDate, 28);
+        const recentRows = await availability.getBasketballRecentMinutes(sport, workingSlate.event.eventDate, 28);
         const byId = new Map(recentRows.flatMap((row) => row.playerId ? [[row.playerId, row.minutes] as const] : []));
         const byNameTeam = new Map(recentRows.flatMap((row) => row.name ? [[`${normalizeProviderName(row.name)}|${normalizeTeamCode(row.team ?? '')}`, row.minutes] as const] : []));
         let matched = 0;
@@ -384,10 +394,10 @@ export async function processRun(db: SupabaseClient, run: Json, slate: Validated
           return { ...player, projectionInputs: { ...player.projectionInputs, expectedMinutes: minutesP50, minutesP10, minutesP90, limitedMinutesRisk }, sportContext: { ...player.sportContext, nba: { ...player.sportContext?.nba, minutesP10, minutesP50, minutesP90, limitedMinutesRisk, minutesSampleCount: ordered.length, minutesRetrievedAt: new Date().toISOString() } } };
         });
         workingSlate = { ...workingSlate, playerPool };
-        stages.wnbaMinutesHistory = { source: 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, retrievedAt: new Date().toISOString() };
-        if (matched < playerPool.length) stages.wnbaMinutesWarning = `Recent WNBA minutes were available for ${matched}/${playerPool.length} players. Missing histories retain season-based minutes; role uncertainty remains provisional.`;
+        stages[`${stageKey}MinutesHistory`] = { source: sport === 'NBA' ? 'SportsDataIO NBA final BoxScoresFinal' : 'SportsDataIO final BoxScores', lookbackDays: 28, playersMatched: matched, playerPoolSize: playerPool.length, retrievedAt: new Date().toISOString() };
+        if (matched < playerPool.length) stages[`${stageKey}MinutesWarning`] = `Recent ${sport} minutes were available for ${matched}/${playerPool.length} players. Missing histories retain season-based minutes; role uncertainty remains provisional.`;
       } catch (error) {
-        stages.wnbaMinutesWarning = `Recent WNBA game minutes lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
+        stages[`${stageKey}MinutesWarning`] = `Recent ${sport} game minutes lookup failed: ${error instanceof Error ? error.message : 'provider request failed'}.`;
       }
     }
   }
