@@ -75,14 +75,17 @@ export async function persistEvidenceLedger(db: SupabaseClient, input: {
     });
   }
   if (observations.length) {
-    const observationRows = observations.map((item) => ({
-      id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId,
-      source: item.source, source_record_id: item.sourceRecordId ?? null, source_url: item.sourceUrl ?? null,
-      subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value,
-      effective_at: item.effectiveAt ?? null, observed_at: item.observedAt, retrieved_at: item.retrievedAt, expires_at: item.expiresAt ?? null,
-      observation_status: item.status, identity_confidence: item.identityConfidence, raw_payload_ref: item.rawPayloadRef,
-      raw_payload: { normalized_claim: item.value }, content_sha256: digest(item),
-    }));
+    const observationRows = observations.map((item) => {
+      const rawPayload = { normalized_claim: item.value };
+      return {
+        id: item.id, tenant_id: tenantId, generation_run_id: runId, slate_id: item.slateId, sport: item.sport, event_id: item.eventId,
+        source: item.source, source_record_id: item.sourceRecordId ?? null, source_url: item.sourceUrl ?? null,
+        subject_kind: item.subject.kind, subject_id: item.subject.id, fact_type: item.factType, fact_value: item.value,
+        effective_at: item.effectiveAt ?? null, observed_at: item.observedAt, retrieved_at: item.retrievedAt, expires_at: item.expiresAt ?? null,
+        observation_status: item.status, identity_confidence: item.identityConfidence, raw_payload_ref: item.rawPayloadRef,
+        raw_payload: rawPayload, raw_payload_sha256: digest(rawPayload), content_sha256: digest(item),
+      };
+    });
     const inserted = await db.from('floyd_dfs_source_observations').upsert(observationRows, { onConflict: 'tenant_id,generation_run_id,content_sha256', ignoreDuplicates: true });
     if (inserted.error) throw inserted.error;
     const facts = resolveObservations(observations, new Date(research.generatedAt));
