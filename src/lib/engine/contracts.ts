@@ -196,6 +196,9 @@ export interface ValidatedSlate {
   league: Sport;
   /** Structured provider diagnostics carried into Research for auditability. */
   providerDiagnostics?: Array<{ provider: string; status: 'SUCCEEDED' | 'EMPTY' | 'FAILED'; error?: string; httpStatus?: number; retrievedAt: string }>;
+  /** Players removed from the playable pool for an explicit OUT/INACTIVE status. Never lineup-eligible;
+   * kept so projection can reassign the minutes/opportunity they vacate. */
+  excludedPlayers?: SlatePlayer[];
   event: {
     eventId: string;
     name: string;

@@ -915,6 +915,38 @@ const testNbaClassicSearchFindsProvenOptimumParity = (): void => {
   assert.ok(sorted.every((value) => value <= best + 1e-9));
 };
 
+const testNbaVacatedMinutesRedistributionParity = (): void => {
+  // A confirmed-out starter's minutes must be played by someone. They move to available
+  // teammates (weighted toward overlapping positions), capped by the 240-minute budget and by
+  // the absent player's own minutes; a pool that is short only because of missing data is not inflated.
+  const rates = { pointsPerMinute: 0.5, reboundsPerMinute: 0.2, assistsPerMinute: 0.1, stealsPerMinute: 0.03, blocksPerMinute: 0.02, turnoversPerMinute: 0.05, threesPerMinute: 0.05 };
+  const make = (id: string, position: string, minutes: number, eligibility: Record<string, boolean>) => ({ playerId: id, playerName: id, team: 'BOS', opponent: 'NYK', position, salary: 5000, eligibility, projectionInputs: { expectedMinutes: minutes, ...rates } });
+  const guard = { PG: true, SG: true, G: true, UTIL: true }; const big = { PF: true, C: true, F: true, UTIL: true };
+  const rotation = [make('pg-out', 'PG', 34, guard), make('pg-backup', 'PG', 18, guard), make('sg', 'SG', 32, guard), make('sf', 'SF', 33, { SF: true, F: true, UTIL: true }), make('pf', 'PF', 30, big), make('c', 'C', 30, big), make('wing-bench', 'SF', 20, { SF: true, F: true, UTIL: true }), make('big-bench', 'C', 16, big), make('deep-bench', 'PG', 3, guard)];
+  const nba: ValidatedSlate = { ...baseSlate, sport: 'NBA', scoringRules: { points: { value: 1 }, threePointersMade: { value: 0.5 }, rebounds: { value: 1.25 }, assists: { value: 1.5 }, steals: { value: 2 }, blocks: { value: 2 }, turnovers: { value: -0.5 } }, playerPool: rotation };
+  const withOut = applyAvailabilitySnapshot(nba, { source: 'ESPN', retrievedAt: now.toISOString(), confirmedLineupAvailable: false, records: rotation.map((player) => ({ playerName: player.playerName, team: 'BOS', status: player.playerId === 'pg-out' ? 'OUT' as const : 'ACTIVE' as const, confirmed: true })) });
+  assert.ok(!withOut.playerPool.some((player) => player.playerId === 'pg-out'), 'the OUT player is not lineup-eligible');
+  assert.ok(withOut.excludedPlayers?.some((player) => player.playerId === 'pg-out'), 'the OUT player is retained as non-playable context');
+  const emptyAdjustments = { slateId: nba.slateId, tenantId: nba.tenantId, sport: 'NBA', version: 1, generatedAt: now.toISOString(), adjustments: [], status: 'COMPLETE' } as unknown as Parameters<typeof projectSlate>[1];
+  const projected = projectSlate(withOut, emptyAdjustments, now);
+  const minutes = (id: string) => projected.players.find((player) => player.playerId === id)?.adjustedOpportunity.expectedMinutes ?? 0;
+  const total = projected.players.reduce((sum, player) => sum + (player.adjustedOpportunity.expectedMinutes ?? 0), 0);
+  // Available pool is 182 of 240; the absent PG vacated 34, so all 34 are reassigned (216 total).
+  assert.ok(Math.abs(total - 216) < 0.01, `vacated minutes are fully reassigned within budget (got ${total})`);
+  assert.ok(minutes('pg-backup') - 18 > minutes('big-bench') - 16, 'the same-position backup gains more than an unrelated bench big');
+  assert.ok(minutes('pg-backup') <= 18 + 14 + 1e-9, 'a single player gain is capped');
+  assert.ok(minutes('sg') <= 38 + 1e-9, 'starters are capped at a realistic minute ceiling');
+  assert.equal(minutes('deep-bench'), 3, 'out-of-rotation players do not inherit a starter role');
+  assert.ok(projected.players.find((player) => player.playerId === 'pg-backup')?.uncertaintyFactors.some((factor) => /vacated by confirmed-out teammates/.test(factor)));
+  const backupBefore = projectSlate(nba, emptyAdjustments, now).players.find((player) => player.playerId === 'pg-backup')!;
+  const backupAfter = projected.players.find((player) => player.playerId === 'pg-backup')!;
+  assert.ok(backupAfter.projectedOutcomes.medianP50 > backupBefore.projectedOutcomes.medianP50 * 1.3, 'the backup projection rises materially with the starter out');
+  // No confirmed absence: a short pool (missing data) is not inflated.
+  const shortPool: ValidatedSlate = { ...nba, playerPool: rotation.slice(1, 4) };
+  const shortProjected = projectSlate(shortPool, emptyAdjustments, now);
+  assert.equal(shortProjected.players.reduce((sum, player) => sum + (player.adjustedOpportunity.expectedMinutes ?? 0), 0), 83);
+};
+
 const testMarketDerivedOwnershipNudgeParity = (): void => {
   const marketSlate: ValidatedSlate = {
     ...baseSlate,
@@ -1400,7 +1432,7 @@ const testDraftKingsShowdownCsvMergesCaptainAndUtilityRows = async (): Promise<v
 
 (async () => {
   testMlbRelieverWorkloadGuardParity(); testPairedBaselineHoldoutParity();
-  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
+  testOptimizerParity(); testUnprojectedPlayerExclusion(); testMlbUnconfirmedStarterExclusion(); testMlbConfirmedStartingPitcherParity(); testNegativeProviderFppgFallbackParity(); testCashLineFieldEstimateParity(); testSalarySlotParity(); testCashGameSelectionParity(); testGppSelectionUnaffectedByCashLineParity(); testSelectionParity(); testSelectionWatchItemsParity(); testRunTrustGateParity(); testAvailabilityParity(); testOutPlayersRemovedForNonMlbSportsParity(); testProviderIdentityConflictIsRejectedParity(); testNonMlbHistoricalTeamMismatchIsNotAcceptedParity(); testStaleAvailabilitySnapshotIsRejectedParity(); testContestKindClassificationParity(); testCashLineCalibrationBoundaryParity(); testConflictingEvidenceNetsRealSignalParity(); testAvailabilityNarrativeNegationParity(); testDirectAvailabilityConflictResolutionParity(); testNoiseWidthReflectsRoleCertaintyParity(); testDegradedAvailabilityParity(); testThinPoolDiversityDisclosureParity(); testRoleCertaintyThreeTierParity(); testOwnershipEstimateReflectsVolatilityParity(); testAdjustmentStatusReflectsResolvedConflictsParity(); testSearchOrderFindsHighValueStudParity(); testGolfClassicSlateBuildParity(); testWnbaOfficialScoringProfileParity(); testGolfShowdownUsesAuthoritativeNoCaptainTemplate(); testGolfDraftKingsTournamentLobbyParity(); testClassicPositionEligibilityFallbackParity(); testSeasonBasedInputsParity(); testSeasonParamForParity(); testMarketDerivedOwnershipNudgeParity(); testNbaClassicSearchFindsProvenOptimumParity(); testNbaVacatedMinutesRedistributionParity(); testBringBackCorrelationParity(); testMlbHitterCorrelationParity(); testGenuinePortfolioDiversityParity(); testContractParity(); testGate1ScoringGoldenFixtures(); testGate1TypedAdjustmentParity(); testGate1RoleRedistributionAndMinutesParity(); testWnbaMinutesBudgetParity(); testGate1ResearchAttributionParity(); testGate1LineupDistributionParity(); testGate1OptimizerExhaustiveParity(); testGate1IdentitySuffixParity(); testProviderIdentityFallbackParity(); testGate2SportDistributionAndFallbackParity(); testGate2CalibrationMetricsParity(); testGate3ContestSimulationParity(); testResearchDateNormalizationParity(); testCollegeFootballSupportParity(); testGolfFinishModelReadinessParity(); testResolvedFactFreshnessAndConflicts();
   await testCollegeFootballRosterSemanticsParity(); await testDraftKingsShowdownCsvMergesCaptainAndUtilityRows();
   await testNflIdentityAndEventResolutionParity();
   await testWnbaAvailabilityUsesNumericEventTeamIds();

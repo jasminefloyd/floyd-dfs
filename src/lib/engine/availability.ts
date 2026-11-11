@@ -89,7 +89,9 @@ export function applyAvailabilitySnapshot(slate: ValidatedSlate, snapshot: Avail
   if (snapshot.confirmedLineupAvailable) warnings.push(`${snapshot.source} confirmed lineup state applied at ${snapshot.retrievedAt}.`);
   else if (snapshot.rosterComplete && ['NFL', 'CFB'].includes(slate.sport)) warnings.push(`${snapshot.source} verified roster membership for the primary ${slate.sport} slate, but did not verify starters; remaining role status is not a confirmed starting lineup.`);
   else warnings.push(`${snapshot.source} did not provide a confirmed pregame lineup; unconfirmed players remain labeled UNKNOWN.`);
-  return { ...slate, playerPool: filtered, providerDiagnostics: [...(slate.providerDiagnostics ?? []), ...(snapshot.diagnostics ?? [])], validation: { ...slate.validation, warnings } };
+  const newlyAbsent = playerPool.filter((player) => player.availability?.status === 'OUT' || player.availability?.status === 'INACTIVE');
+  const excludedPlayers = [...(slate.excludedPlayers ?? []).filter((player) => !newlyAbsent.some((item) => item.playerId === player.playerId)), ...newlyAbsent];
+  return { ...slate, playerPool: filtered, ...(excludedPlayers.length ? { excludedPlayers } : {}), providerDiagnostics: [...(slate.providerDiagnostics ?? []), ...(snapshot.diagnostics ?? [])], validation: { ...slate.validation, warnings } };
 }
 
 function shouldReplaceAvailability(existing: NonNullable<SlatePlayer['availability']>, incoming: AvailabilityRecord): boolean {

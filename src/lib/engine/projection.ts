@@ -117,6 +117,7 @@ function projectPlayer(slate: ValidatedSlate, player: SlatePlayer, values: Recor
   const ceiling = quantile(orderedSamples, 0.9);
   const uncertaintyFactors = adjustment?.roleCertainty === 'LOW' ? ['Role certainty is LOW.'] : [];
   if (slate.sport === 'WNBA' && (adjusted.expectedMinutes ?? 99) <= 8 && player.availability?.roleStatus !== 'CONFIRMED_STARTER') uncertaintyFactors.push('Low-minute WNBA role is not confirmed; the current event distribution does not model a separate DNP probability.');
+  if ((adjusted.vacatedMinutesGain ?? 0) > 0) uncertaintyFactors.push(`Projected for +${adjusted.vacatedMinutesGain.toFixed(1)} minutes vacated by confirmed-out teammates (provisional allocation by role and position).`);
   if (Math.abs(median - analyticalMedian) > 0.000001) uncertaintyFactors.push('Median is the simulated P50; analytical expectation is retained in component projections.');
   uncertaintyFactors.push(`Floor/ceiling use the deterministic ${distributionFor(slate.sport, player)?.family ?? 'SPORT_EVENT'} sampler; its event-rate dispersion is provisional and not outcome-calibrated.`);
   if (adjustment?.adjustments.some((item) => item.confidence === 'LOW')) uncertaintyFactors.push('At least one adjustment has LOW confidence.');
@@ -314,25 +315,86 @@ function adjustmentFields(type?: string): string[] {
   }
 }
 
+const UNAVAILABLE_STATUSES = ['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'];
+// Explicit absences whose minutes another rostered player must absorb. NOT_IN_PROVIDER_ROSTER is
+// excluded: a player no longer on the team was not part of the rotation the stats describe.
+function isConfirmedAbsence(player: SlatePlayer): boolean {
+  if (['OUT', 'INACTIVE'].includes(player.availability?.status ?? '')) return true;
+  return /^(out|inactive|suspended|IL\b)/i.test(String(player.providerStatus ?? '').trim());
+}
+const MAX_PLAYER_MINUTES: Record<'NBA' | 'WNBA', number> = { NBA: 38, WNBA: 35 };
+const MAX_MINUTES_GAIN = 14;
+
 function reconcileBasketballOpportunities(prepared: Array<{ player: SlatePlayer; values: Record<string, number>; adjustment?: PlayerAdjustment }>, slate: ValidatedSlate, gaps: ProjectionPackage['gaps']): void {
+  const sport = slate.sport === 'WNBA' ? 'WNBA' : 'NBA';
+  const targetMinutes = sport === 'WNBA' ? 200 : 240;
   const byTeam = new Map<string, typeof prepared>();
-  for (const item of prepared) {
+  const absentByTeam = new Map<string, typeof prepared>();
+  // Confirmed-out players removed from the playable pool still vacate minutes.
+  const removedAbsent = (slate.excludedPlayers ?? []).filter((player) => !prepared.some((item) => item.player.playerId === player.playerId) && Number.isFinite(player.projectionInputs?.expectedMinutes));
+  for (const item of [...prepared, ...removedAbsent.map((player) => ({ player, values: player.projectionInputs as Record<string, number> }))]) {
     const team = item.player.team;
     if (!team || !Number.isFinite(item.values.expectedMinutes)) continue;
-    if (['OUT', 'INACTIVE', 'NOT_IN_PROVIDER_ROSTER'].includes(item.player.availability?.status ?? '')) continue;
+    if (isConfirmedAbsence(item.player)) { absentByTeam.set(team, [...(absentByTeam.get(team) ?? []), item]); continue; }
+    if (UNAVAILABLE_STATUSES.includes(item.player.availability?.status ?? '')) continue;
     byTeam.set(team, [...(byTeam.get(team) ?? []), item]);
   }
   for (const [team, teamPlayers] of byTeam.entries()) {
-    const total = teamPlayers.reduce((sum, player) => sum + (player.values.expectedMinutes ?? 0), 0);
+    let total = teamPlayers.reduce((sum, player) => sum + (player.values.expectedMinutes ?? 0), 0);
     if (!(total > 0)) continue;
-    const targetMinutes = slate.sport === 'WNBA' ? 200 : 240;
+    // Vacated minutes: a team must still play its full regulation minutes, so minutes that
+    // confirmed-absent players would have played move to available teammates. The transfer is
+    // capped by (a) the absent players' own projected minutes, so a pool that is short because
+    // of missing data is never inflated, and (b) the remaining regulation budget, so minutes
+    // already absorbed in teammates' recent box scores (a long-term absence) are not counted twice.
+    const absent = absentByTeam.get(team) ?? [];
+    const vacated = absent.reduce((sum, item) => sum + Math.max(0, item.values.expectedMinutes ?? 0), 0);
+    let transfer = Math.min(vacated, Math.max(0, targetMinutes - total));
+    if (transfer > 0.5) {
+      const absentPositions = new Set(absent.flatMap((item) => positionsOf(item.player)));
+      const gains = new Map<string, number>();
+      // Weight by position overlap with the absent players and by each player's remaining room:
+      // a same-position backup absorbs most of a starter's minutes, while starters already near
+      // their ceiling add little. Iterate so minutes left by capped players are offered again.
+      for (let round = 0; round < 4 && transfer > 0.05; round += 1) {
+        const open = teamPlayers.filter((item) => headroom(item, gains, sport) > 0.05);
+        const weights = open.map((item) => { const overlap = positionsOf(item.player).some((position) => absentPositions.has(position)) ? 1 : 0.25; return headroom(item, gains, sport) * overlap; });
+        const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+        if (!(weightTotal > 0)) break;
+        let given = 0;
+        open.forEach((item, index) => {
+          const amount = Math.min(headroom(item, gains, sport), transfer * weights[index] / weightTotal);
+          gains.set(item.player.playerId, (gains.get(item.player.playerId) ?? 0) + amount);
+          item.values = { ...item.values, expectedMinutes: (item.values.expectedMinutes ?? 0) + amount };
+          given += amount;
+        });
+        transfer -= given; total += given;
+      }
+      for (const item of teamPlayers) {
+        const gain = gains.get(item.player.playerId) ?? 0;
+        if (gain > 0.05) item.values = { ...item.values, vacatedMinutesGain: gain, ...(Number.isFinite(item.values.minutesP10) ? { minutesP10: item.values.minutesP10 + gain } : {}), ...(Number.isFinite(item.values.minutesP90) ? { minutesP90: item.values.minutesP90 + gain } : {}) };
+      }
+    }
     if (total < targetMinutes - 1) gaps.push({ reason: `${team} ${slate.sport} projected player pool accounts for ${total.toFixed(1)} of ${targetMinutes} regulation minutes; incomplete rotation coverage is not inflated into the missing minutes.` });
-    // Partial provider pools must not be inflated to a full team's minutes. Reconcile only
-    // over-allocation; missing rotation minutes remain a visible coverage problem.
+    // Reconcile over-allocation; missing rotation minutes remain a visible coverage problem.
     if (total <= targetMinutes) continue;
     const factor = targetMinutes / total;
     for (const player of teamPlayers) {
       player.values = { ...player.values, expectedMinutes: (player.values.expectedMinutes ?? 0) * factor };
     }
   }
+}
+
+function headroom(item: { player: SlatePlayer; values: Record<string, number> }, gains: Map<string, number>, sport: 'NBA' | 'WNBA'): number {
+  const minutes = item.values.expectedMinutes ?? 0;
+  if (minutes < 4) return 0; // out-of-rotation players do not inherit a starter's minutes
+  const cap = Math.max(minutes, Math.min(MAX_PLAYER_MINUTES[sport], minutes - (gains.get(item.player.playerId) ?? 0) + MAX_MINUTES_GAIN));
+  return Math.max(0, cap - minutes);
+}
+
+function positionsOf(player: SlatePlayer): string[] {
+  const base = ['PG', 'SG', 'SF', 'PF', 'C'];
+  const fromEligibility = base.filter((position) => player.eligibility?.[position]);
+  const fromPosition = String(player.position ?? '').toUpperCase().split(/[/,\s]+/).filter((position) => base.includes(position));
+  return [...new Set([...fromEligibility, ...fromPosition])];
 }
